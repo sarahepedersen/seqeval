@@ -378,7 +378,8 @@ Arms consume only resolved objects; they never touch year-valued config numbers 
   - Loaders support column pruning and (for generated) predicate pushdown on
     `age_start`/`age_stop`/`seed` via pyarrow filters, so arms load only the runs they need.
 - **Dependencies:** pandas, pyarrow, numpy, pydantic, pandera, matplotlib, scikit-learn
-  (ROC/Brier only), pyyaml. **No lifelines/scikit-survival** — KM and life tables are implemented
+  (ROC/Brier only), scipy (Beta quantiles for Jeffreys intervals; replicate engine, plan 02b),
+  pyyaml. **No lifelines/scikit-survival** — KM and life tables are implemented
   natively (they are simple, and the spec calls for conversion rather than integration).
 - **Single derivation path:** when a quantity can be derived from the data, it is derived from
   the data — no optional user-supplied overrides or alternate inputs (spans from last age,
