@@ -1,0 +1,70 @@
+model:
+  name: transformer_model_example
+
+data:
+  observed: data/observed.parquet
+  generated: data/generated.parquet
+  persons: data/persons.parquet
+  event_definitions: data/events.csv
+  age_unit: days
+
+events:
+  birth: "01"
+
+persons:
+  covariates: [education, region]
+
+replicates:
+  estimator: jeffreys
+  interval: jeffreys
+  level: 0.95
+  min_replicates: 5
+  bootstrap: {n: 200, seed: 7}
+  convergence_curve: true
+
+outcomes:
+  first_birth: {event: birth, n: 1}
+  second_birth: {event: birth, n: 2, origin: first_birth}
+
+arms:
+  descriptives:
+    kaplan_meier: [first_birth, second_birth]
+    fertility:
+      ccf: true
+      asfr: [period, cohort]
+      ppr: {max_parity: 6}
+    life_table: {max_parity: 6}
+    stratify_by: [cohort]
+
+  backtesting:
+    windows: all
+    conditions:
+      - {name: p0, event: birth, max_count: 0}
+      - {name: p1, event: birth, min_count: 1, max_count: 1}
+    probability_outcomes:
+      - {outcome: first_birth, by_age: 35, given: p0}
+      - {outcome: second_birth, within_origin: 5, given: p1}
+      - {event: birth, min_events: 1, within: 5}
+      - {event: birth, min_events: 1, within: 5, given: p1}
+    aggregate_targets: [ccf, asfr_cohort, ppr, km:first_birth, km:second_birth]
+    min_seeds: 5
+
+  forecasting:
+    windows: all
+    lexis:
+      outcome: first_birth
+      ages: [15, 45]
+      years: [1960, 2035]
+      subgroup_by: []
+    illegal_moves:
+      - {event: birth, max_age: 45}
+      - {event: birth, min_age: 15}
+      - {event: birth, min_spacing: 0.6, severity: warn}
+      - {event: birth, max_count: 10, severity: warn}
+    seed_stability:
+      individual: true
+      aggregate: [ccf]
+
+output:
+  dir: results/
+  figure_format: png
