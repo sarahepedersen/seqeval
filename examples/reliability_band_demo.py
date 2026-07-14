@@ -32,6 +32,7 @@ from seqeval.core import outcomes as O  # noqa: E402
 from seqeval.core import replicates as R  # noqa: E402
 from seqeval.core.specs import CountQuery, Frame, ReplicateSpec  # noqa: E402
 from seqeval.units import years_to_days as yd  # noqa: E402
+from seqeval.viz._labels import describe_outcome  # noqa: E402
 
 GK = ["person_id", "seed", "age_start", "age_stop"]
 RK = ["person_id", "age_start", "age_stop"]
@@ -103,9 +104,12 @@ def main() -> None:
         ax.set_aspect("equal")
         ax.legend(loc="upper left", fontsize=8)
     axes[0].set_ylabel("observed frequency")
+    outcome_desc = describe_outcome(spec, jumpoff_days=jo, label_fn=str)
     fig.suptitle(
-        "Reliability + null band: at n=5 the p̂ grid is coarse and estimation noise dominates; "
-        "at n=50 the curve hugs the diagonal within a tight band"
+        f"Reliability + null band  —  outcome: {outcome_desc}\n"
+        "at n=5 the p̂ grid is coarse and estimation noise dominates; at n=50 the curve hugs the "
+        "diagonal within a tight band",
+        fontsize=10,
     )
     fig.tight_layout()
 

@@ -46,6 +46,7 @@ from seqeval.core import replicates as R  # noqa: E402
 from seqeval.core.specs import CountQuery, Frame, ReplicateSpec  # noqa: E402
 from seqeval.io.loaders import load_all  # noqa: E402
 from seqeval.units import years_to_days as yd  # noqa: E402
+from seqeval.viz._labels import describe_outcome  # noqa: E402
 
 GK = ["person_id", "seed", "age_start", "age_stop"]
 RK = ["person_id", "age_start", "age_stop"]
@@ -192,13 +193,22 @@ def replicate_showcase(bundle, hazards, out_dir: Path) -> list[tuple[str, str]]:
             }
         )
     axes[0].set_ylabel("observed frequency")
-    fig.suptitle("Reliability + null band: coarse and wide at n=5, tight at n=50")
+    outcome_desc = describe_outcome(spec, jumpoff_days=jo, label_fn=bundle.label)
+    fig.suptitle(
+        f"Reliability + null band  —  outcome: {outcome_desc}\n"
+        "coarse and wide at n=5, tight at n=50",
+        fontsize=11,
+    )
     fig.tight_layout()
     path = out_dir / "reliability_band.png"
     fig.savefig(path, dpi=130, bbox_inches="tight")
     plt.close(fig)
     figures.append(
-        (path.name, "Reliability diagram with the perfect-calibration null band (n_seeds 5 vs 50)")
+        (
+            path.name,
+            f"Reliability diagram + perfect-calibration null band for {outcome_desc} "
+            "(n_seeds 5 vs 50)",
+        )
     )
 
     print("\nBrier score: few seeds inflate it; the MC-error correction recovers the truth")
