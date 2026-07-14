@@ -100,13 +100,14 @@ EXPECTED_PPR = {
 #: Kaplan-Meier survival for time-to-first-birth, as (age_years, S(t)) *just after* each event.
 #:   Event/censor times: 22, 24, 25, 27, 28(censor p0), 30. n starts at 6.
 #:   S: 22 -> 5/6; 24 -> 5/6*4/5 = 2/3; 25 -> *3/4 = 1/2; 27 -> *2/3 = 1/3;
-#:      28 is a censor (n: 3 -> 2, S unchanged); 30 -> 1/3*1/2 = 1/6.
+#:      28 is a censor (p0 leaves; at-risk falls to {p4} only); 30 -> the last woman (p4) has her
+#:      first birth, so n_at_risk=1, d=1 and S drops to 0.
 EXPECTED_KM_FIRST_BIRTH = [
     (22, 5 / 6),
     (24, 2 / 3),
     (25, 1 / 2),
     (27, 1 / 3),
-    (30, 1 / 6),
+    (30, 0.0),
 ]
 
 #: Total person-days observed within the age band [25, 30) years, summed over the 6 women.
