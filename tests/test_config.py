@@ -31,6 +31,16 @@ def test_relative_paths_resolved_against_yaml_dir():
     assert cfg.generated_path == _REF.parent / "data" / "generated.parquet"
 
 
+def test_cohort_width_is_shared_via_persons():
+    # cohort_width lives on the persons block; Config.cohort_width exposes it to every arm.
+    d = _ref_dict()
+    d["persons"]["cohort_width"] = 10
+    assert C.Config.model_validate(d).cohort_width == 10
+    # falls back to the default when no persons block is present
+    minimal = {"model": {"name": "m"}, "data": {"observed": "o.parquet"}, "events": {"birth": "01"}}
+    assert C.Config.model_validate(minimal).cohort_width == C.DEFAULT_COHORT_WIDTH
+
+
 def test_hash_stable_under_key_reordering():
     cfg1 = C.Config.model_validate(_ref_dict())
     reordered = dict(reversed(list(_ref_dict().items())))

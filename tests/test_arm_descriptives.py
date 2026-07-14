@@ -85,13 +85,11 @@ def test_km_xlabel_reflects_origin():
     assert _km_xlabel(OUTCOMES["second_birth"], OUTCOMES) == "years since first birth"
 
 
-def test_cohort_width_config_produces_five_year_bands(tmp_path):
+def test_cohort_width_param_produces_five_year_bands(tmp_path):
     import pandas as pd
 
-    cfg = _full_cfg()
-    cfg.cohort_width = 5
     out = OutputWriter(base_dir=tmp_path, arm="descriptives", model="demo")
-    D.run(_bundle(), cfg, out, outcomes=OUTCOMES)
+    D.run(_bundle(), _full_cfg(), out, outcomes=OUTCOMES, cohort_width=5)
     cohorts = set(pd.read_parquet(out.dir / "ccf.parquet")["cohort"])
     assert all(c % 5 == 0 for c in cohorts)
 

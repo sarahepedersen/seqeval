@@ -13,7 +13,7 @@ import logging
 import pandas as pd
 
 from seqeval.arms._common import OutputWriter
-from seqeval.config import DescriptivesConfig
+from seqeval.config import DEFAULT_COHORT_WIDTH, DescriptivesConfig
 from seqeval.core.outcomes import births as births_table
 from seqeval.core.outcomes import observation_spans, time_to_event
 from seqeval.core.slicing import AgeBins, cohort_bins
@@ -37,17 +37,19 @@ def run(
     out: OutputWriter,
     *,
     outcomes: dict[str, TTESpec],
+    cohort_width: int = DEFAULT_COHORT_WIDTH,
 ) -> None:
     """Compute every configured descriptive metric, write result frames, and render figures.
 
     ``outcomes`` is the resolved timing registry (``config.resolve_outcomes``); ``kaplan_meier``
-    config entries are names into it. (This registry parameter extends 01's ``run(bundle, cfg,
-    out)`` signature because the arm needs the resolved specs, which live at the top level of the
-    config, not inside ``DescriptivesConfig``.)
+    config entries are names into it. ``cohort_width`` is the shared birth-cohort band width
+    (``Config.cohort_width``, from the top-level ``persons`` block) — passed in rather than read
+    from ``DescriptivesConfig`` so every arm uses one population-wide value. (Both parameters extend
+    01's ``run(bundle, cfg, out)`` signature because they live at the top level of the config.)
     """
     observed = bundle.observed
     spans = observation_spans(observed, OBS_KEYS)
-    strata = _strata_frame(bundle, cfg.stratify_by, cfg.cohort_width)
+    strata = _strata_frame(bundle, cfg.stratify_by, cohort_width)
 
     _run_kaplan_meier(observed, cfg, out, outcomes, strata)
 
@@ -57,7 +59,7 @@ def run(
         births = births_table(observed, OBS_KEYS, birth_event=bundle.token("birth"))
 
     if cfg.fertility is not None:
-        _run_fertility(bundle, cfg, out, births, spans)
+        _run_fertility(bundle, cfg, out, births, spans, cohort_width)
     if cfg.life_table is not None:
         _run_life_table(cfg, out, births, spans)
 
@@ -115,7 +117,7 @@ def _km_xlabel(spec: TTESpec, outcomes: dict[str, TTESpec]) -> str:
     return "years since origin event"
 
 
-def _run_fertility(bundle: Bundle, cfg, out, births, spans) -> None:
+def _run_fertility(bundle: Bundle, cfg, out, births, spans, cohort_width: int) -> None:
     fcfg = cfg.fertility
     persons = bundle.persons
 
@@ -132,13 +134,13 @@ def _run_fertility(bundle: Bundle, cfg, out, births, spans) -> None:
         return
 
     if fcfg.ccf:
-        ccf = fe.ccf(births, spans, persons, by_cohort=True, cohort_width=cfg.cohort_width)
+        ccf = fe.ccf(births, spans, persons, by_cohort=True, cohort_width=cohort_width)
         out.frame("ccf", ccf)
         out.figure("ccf", viz_fertility.plot_ccf(ccf))
 
     bins = AgeBins.from_years(_FERTILE_LO_YEARS, _FERTILE_HI_YEARS, fcfg.age_bin_width)
     for mode in fcfg.asfr:
-        table = fe.asfr(births, spans, persons, mode=mode, bins=bins, cohort_width=cfg.cohort_width)
+        table = fe.asfr(births, spans, persons, mode=mode, bins=bins, cohort_width=cohort_width)
         out.frame(f"asfr_{mode}", table)
         dim = "year" if mode == "period" else "cohort"
         out.figure(f"asfr_{mode}", viz_fertility.plot_asfr(table, dim=dim))

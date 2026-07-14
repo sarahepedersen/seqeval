@@ -106,10 +106,17 @@ class EventConfig(BaseModel):
         return self.mapping.keys()
 
 
+#: Default birth-cohort band width (years) when no ``persons.cohort_width`` is configured.
+DEFAULT_COHORT_WIDTH = 5
+
+
 class PersonsConfig(_Strict):
-    """``persons:`` block — the allowlist of extra covariate columns to load."""
+    """``persons:`` block — covariate allowlist and the population's cohort definition."""
 
     covariates: list[str] = []
+    # Width (years) of birth-cohort bands; shared by every arm that groups/stratifies by `cohort`
+    # (descriptives CCF/ASFR/KM, backtesting stratification, forecasting Lexis subgroups).
+    cohort_width: int = DEFAULT_COHORT_WIDTH
 
 
 class BootstrapConfig(_Strict):
@@ -267,7 +274,6 @@ class DescriptivesConfig(_Strict):
     fertility: FertilityConfig | None = None
     life_table: LifeTableConfig | None = None
     stratify_by: list[str] = []
-    cohort_width: int = 5  # width of birth-cohort bands (years) for `cohort` grouping/stratifying
 
 
 class BacktestingConfig(_Strict):
@@ -375,6 +381,11 @@ class Config(_Strict):
     @property
     def covariates(self) -> list[str]:
         return list(self.persons.covariates) if self.persons else []
+
+    @property
+    def cohort_width(self) -> int:
+        """Shared birth-cohort band width (years); every arm reads this one value."""
+        return self.persons.cohort_width if self.persons is not None else DEFAULT_COHORT_WIDTH
 
     # --- cross-reference validation -------------------------------------------------------------
     @model_validator(mode="after")

@@ -66,6 +66,7 @@ events:
 
 persons:
   covariates: [education, region]
+  cohort_width: 5          # birth-cohort band width (years) — shared by every arm
 
 replicates:
   estimator: jeffreys
@@ -88,7 +89,6 @@ arms:
       ppr: {max_parity: 6}
     life_table: {max_parity: 6}
     stratify_by: [cohort]
-    cohort_width: 5          # birth-cohort bands in years (CCF / cohort-ASFR / KM stratification)
 """
 
 
@@ -276,7 +276,13 @@ def main() -> None:
 
     banner("3. DESCRIPTIVES ARM (03): metrics + figures")
     writer = OutputWriter(base_dir=out, arm="descriptives", model=cfg.model.name)
-    descriptives_arm.run(bundle, cfg.arms.descriptives, writer, outcomes=resolve_outcomes(cfg))
+    descriptives_arm.run(
+        bundle,
+        cfg.arms.descriptives,
+        writer,
+        outcomes=resolve_outcomes(cfg),
+        cohort_width=cfg.cohort_width,
+    )
     desc_figs = [(p.name, p) for p in writer.written if p.suffix == ".png"]
     for _name, path in desc_figs:
         print(f"  wrote {path.relative_to(out)}")
