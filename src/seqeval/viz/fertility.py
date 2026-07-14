@@ -28,6 +28,40 @@ def plot_asfr(asfr: pd.DataFrame, *, dim: str) -> Figure:
     return fig
 
 
+def plot_asfr_surface(asfr: pd.DataFrame, *, dim: str = "year") -> Figure:
+    """Period ASFR as a heatmap surface: calendar year (x) vs age (y), rate as color.
+
+    Far more legible than one line per year when there are many periods — it shows the fertility
+    hump moving through calendar time as a continuous surface, the standard demographic view.
+    """
+    grid = asfr.pivot_table(index="age_bin", columns=dim, values="asfr").sort_index()
+    fig, ax = new_fig()
+    ax.grid(False)
+    mesh = ax.pcolormesh(
+        grid.columns.to_numpy(),
+        grid.index.to_numpy(),
+        grid.to_numpy(),
+        shading="auto",
+        cmap="magma",
+    )
+    fig.colorbar(mesh, ax=ax, label="age-specific fertility rate")
+    ax.set_xlabel("calendar year")
+    ax.set_ylabel("age (years)")
+    ax.set_title("Period ASFR surface")
+    return fig
+
+
+def plot_tfr(tfr: pd.DataFrame) -> Figure:
+    """Period total fertility rate over calendar years — the one-number summary of period ASFR."""
+    fig, ax = new_fig()
+    df = tfr.sort_values("year")
+    ax.plot(df["year"], df["tfr"], "-", color="tab:blue")
+    ax.set_xlabel("calendar year")
+    ax.set_ylabel("total fertility rate")
+    ax.set_title("Period TFR by year")
+    return fig
+
+
 def plot_ccf(ccf: pd.DataFrame) -> Figure:
     """CCF by birth cohort; incomplete cohorts drawn dashed so truncated means are visible."""
     fig, ax = new_fig()

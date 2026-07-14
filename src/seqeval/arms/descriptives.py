@@ -142,10 +142,16 @@ def _run_fertility(bundle: Bundle, cfg, out, births, spans, cohort_width: int) -
     for mode in fcfg.asfr:
         table = fe.asfr(births, spans, persons, mode=mode, bins=bins, cohort_width=cohort_width)
         out.frame(f"asfr_{mode}", table)
-        dim = "year" if mode == "period" else "cohort"
-        out.figure(f"asfr_{mode}", viz_fertility.plot_asfr(table, dim=dim))
         if mode == "period":
-            out.frame("tfr", fe.tfr(table))
+            # Period ASFR is a (year x age) surface — a heatmap plus a TFR-over-time summary line
+            # read far better than one age-profile line per calendar year.
+            out.figure("asfr_period", viz_fertility.plot_asfr_surface(table))
+            tfr = fe.tfr(table)
+            out.frame("tfr", tfr)
+            out.figure("tfr", viz_fertility.plot_tfr(tfr))
+        else:
+            # Cohort ASFR has few groups; one age-profile line per cohort stays legible.
+            out.figure("asfr_cohort", viz_fertility.plot_asfr(table, dim="cohort"))
 
 
 def _run_life_table(cfg, out, births, spans) -> None:

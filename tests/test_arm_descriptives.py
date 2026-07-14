@@ -64,6 +64,8 @@ def test_arm_writes_all_files(tmp_path):
         "life_table.parquet",
     }
     assert expected <= names
+    # Period ASFR is rendered as a heatmap surface plus a TFR-over-time line (not spaghetti lines).
+    assert {"asfr_period.png", "tfr.png", "asfr_cohort.png", "km_first_birth.png"} <= names
     for path in out.written:
         assert path.exists() and path.stat().st_size > 0
 
