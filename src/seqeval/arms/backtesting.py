@@ -1,0 +1,534 @@
+"""Past/generated backtesting arm: sweep jump-off windows, score generated vs observed (04).
+
+Orchestration only — every statistic comes from 02b (probabilities/bands/bootstraps) and 03
+(fertility/survival metrics), reused unchanged. For each window ``(t1, t2)`` the arm evaluates the
+configured probability outcomes and aggregate targets on the generated runs and on the observed
+truth with the *same* ``jumpoff = t2``, so both sides describe the same population.
+
+Full-life-course construction (00 section 5.1, 04 section 2.1): the generated file holds only rows
+with ``age > t2``. A **framed** outcome (absolute ordinal) and every **aggregate** metric therefore
+need each replicate's *full* sequence, so the arm concatenates the observed prefix (``age <= t2``)
+with the generated future per replicate and runs 02's evaluators / 03's metrics on the combined
+frame. This makes the settled-at-jump-off rule and the ordinal count fall out correctly and
+identically on both sides. A **count** query counts only post-``t2`` events, so it is evaluated on
+the generated rows directly (no prefix needed).
+"""
+
+from __future__ import annotations
+
+import logging
+
+import numpy as np
+import pandas as pd
+
+from seqeval.arms._common import OutputWriter
+from seqeval.config import DEFAULT_COHORT_WIDTH, BacktestingConfig
+from seqeval.core import replicates as rep
+from seqeval.core.outcomes import (
+    births,
+    evaluate_count,
+    evaluate_framed,
+    observation_spans,
+    time_to_event,
+)
+from seqeval.core.slicing import AgeBins, align_jumpoff_to_event, condition_on_count
+from seqeval.core.specs import Condition, CountQuery, FramedOutcome, ReplicateSpec, TTESpec
+from seqeval.io.loaders import Bundle
+from seqeval.io.schema import GEN_KEYS, OBS_KEYS
+from seqeval.metrics import fertility as fe
+from seqeval.metrics import ml
+from seqeval.metrics import survival as sv
+from seqeval.units import days_to_years
+from seqeval.viz import backtest as viz_backtest
+from seqeval.viz import calibration as viz_calibration
+from seqeval.viz._labels import describe_outcome
+
+logger = logging.getLogger("seqeval")
+
+_GEN_COLS = ["person_id", "seed", "age_start", "age_stop", "age", "event"]
+_RUN_KEYS = ["person_id", "age_start", "age_stop"]
+_EXTRA_BY = ("seed", "age_start", "age_stop")
+_FERTILE = (15.0, 50.0)
+# Age grid (years) at which generated vs observed KM survival is compared for `km:*` targets.
+_KM_GRID_YEARS = list(range(16, 46, 2))
+
+
+def run(
+    bundle: Bundle,
+    cfg: BacktestingConfig,
+    out: OutputWriter,
+    *,
+    outcomes: dict[str, TTESpec],
+    conditions: dict[str, Condition],
+    prob_outcomes: list[FramedOutcome | CountQuery],
+    replicate_spec: ReplicateSpec,
+    cohort_width: int = DEFAULT_COHORT_WIDTH,
+) -> None:
+    """Run backtesting over every configured window; write the six result tables (04 section 2.2).
+
+    ``outcomes``/``conditions``/``prob_outcomes``/``replicate_spec`` are the resolved objects from
+    ``config.resolve_*`` (passed in, like the descriptives registry, because they live at the top
+    level of the config). Writes ``probabilities``, ``calibration``, ``scores``,
+    ``aggregate_error``, ``coverage`` and (when configured) ``convergence`` parquet tables.
+    """
+    if bundle.generated is None:
+        logger.warning("backtesting: no generated file; arm skipped")
+        return
+
+    from seqeval.config import resolve_windows
+
+    windows = resolve_windows(cfg.windows, bundle.available_windows())
+    observed = bundle.observed
+    spans_obs = observation_spans(observed, OBS_KEYS)
+    birth_token = bundle.token("birth") if _needs_births(cfg) else None
+
+    acc: dict[str, list[pd.DataFrame]] = {
+        k: []
+        for k in (
+            "probabilities",
+            "calibration",
+            "scores",
+            "aggregate_error",
+            "coverage",
+            "convergence",
+        )
+    }
+
+    for t1, t2 in windows:
+        gen_w = bundle.generated[
+            (bundle.generated["age_start"] == t1) & (bundle.generated["age_stop"] == t2)
+        ]
+        if gen_w.empty:
+            continue
+        cond_sets = {
+            name: set(condition_on_count(observed, OBS_KEYS, cond=cond, anchor_age=t2)["person_id"])
+            for name, cond in conditions.items()
+        }
+        all_persons = set(observed["person_id"].unique())
+
+        for spec in prob_outcomes:
+            _score_probability_outcome(
+                spec,
+                gen_w,
+                observed,
+                spans_obs,
+                t1,
+                t2,
+                cond_sets,
+                all_persons,
+                replicate_spec,
+                acc,
+                out,
+                bundle.label,
+            )
+
+        for target in cfg.aggregate_targets:
+            _score_aggregate_target(
+                target,
+                gen_w,
+                observed,
+                spans_obs,
+                bundle.persons,
+                birth_token,
+                outcomes,
+                cohort_width,
+                t1,
+                t2,
+                replicate_spec,
+                acc,
+            )
+
+    tables = {}
+    for name, frames in acc.items():
+        if frames:
+            tables[name] = pd.concat(frames, ignore_index=True)
+            out.frame(name, tables[name])
+
+    # Summary figures: how does each metric move as the jump-off shifts across windows?
+    if "scores" in tables and tables["scores"]["age_stop"].nunique() > 1:
+        for metric in ("roc_auc", "brier_corrected"):
+            out.figure(
+                f"metric_vs_jumpoff_{metric}",
+                viz_backtest.plot_metric_vs_jumpoff(tables["scores"], metric=metric),
+            )
+
+
+# =================================================================================================
+# per-outcome scoring
+# =================================================================================================
+def _score_probability_outcome(
+    spec,
+    gen_w,
+    observed,
+    spans_obs,
+    t1,
+    t2,
+    cond_sets,
+    all_persons,
+    replicate_spec,
+    acc,
+    out,
+    label_fn,
+) -> None:
+    given = spec.given
+    cond_persons = cond_sets[given] if given else all_persons
+
+    obs_eval = _evaluate_observed(spec, observed, spans_obs, t2)
+    gen_eval = _evaluate_generated(spec, gen_w, observed, t1, t2)
+
+    obs_eval = obs_eval[obs_eval["person_id"].isin(cond_persons)]
+    gen_eval = gen_eval[gen_eval["person_id"].isin(cond_persons)]
+    settled = _settled_persons(spec, observed, t2) & set(cond_persons)
+
+    label = _cell_label(t1, t2, spec.name, given)
+    acc["coverage"].append(
+        _coverage_row(obs_eval, gen_eval, cond_persons, all_persons, settled, label)
+    )
+
+    summary = rep.replicate_summary(gen_eval, run_keys=_RUN_KEYS)
+    if summary.empty:
+        return
+    _warn_thin_replicates(summary, replicate_spec, label)
+    probs = rep.estimate_probability(summary, spec=replicate_spec)
+    joined = ml.join_truth(probs, obs_eval)
+    if joined.empty or joined["y_true"].nunique() < 1:
+        return
+
+    acc["probabilities"].append(_stamp(probs, label))
+
+    cal = ml.calibration_table(joined, n_bins=10, strategy="uniform")
+    band = rep.null_calibration_band(
+        summary,
+        n_bins=10,
+        strategy="uniform",
+        n_sims=200,
+        rng=np.random.default_rng(replicate_spec.bootstrap_seed),
+        estimator=replicate_spec.estimator,
+    )
+    cal = cal.merge(
+        band[["bin", "lo", "hi"]].rename(columns={"lo": "band_lo", "hi": "band_hi"}),
+        on="bin",
+        how="left",
+    )
+    acc["calibration"].append(_stamp(cal, label))
+
+    desc = describe_outcome(spec, jumpoff_days=t2, label_fn=label_fn)
+    out.figure(
+        f"reliability_{spec.name}_w{int(round(days_to_years(t2)))}",
+        viz_calibration.plot_reliability(cal, probs=probs, title=desc),
+    )
+
+    scores = _score_row(spec, joined, summary, gen_w, observed, t1, t2)
+    acc["scores"].append(_stamp_scores(scores, label))
+
+    if replicate_spec.convergence_curve:
+        conv = _convergence(gen_eval, obs_eval, replicate_spec)
+        if conv is not None:
+            acc["convergence"].append(_stamp(conv, label))
+
+
+def _evaluate_observed(spec, observed, spans_obs, t2) -> pd.DataFrame:
+    if isinstance(spec, CountQuery):
+        return evaluate_count(observed, OBS_KEYS, spec, spans_obs, jumpoff=t2)
+    return evaluate_framed(observed, OBS_KEYS, spec, spans_obs, jumpoff=t2)
+
+
+def _evaluate_generated(spec, gen_w, observed, t1, t2) -> pd.DataFrame:
+    if isinstance(spec, CountQuery):
+        spans = observation_spans(gen_w, GEN_KEYS)
+        return evaluate_count(gen_w, GEN_KEYS, spec, spans, jumpoff=t2)
+    combined = _combine_prefix(observed, gen_w, t1, t2)
+    spans = observation_spans(combined, GEN_KEYS)
+    return evaluate_framed(combined, GEN_KEYS, spec, spans, jumpoff=t2)
+
+
+def _combine_prefix(observed, gen_w, t1, t2) -> pd.DataFrame:
+    """Observed prefix (age <= t2) replicated across the window's seeds, concatenated with the
+    generated future — the full life course per replicate."""
+    persons = gen_w["person_id"].unique()
+    prefix = observed.loc[
+        observed["person_id"].isin(persons) & (observed["age"] <= t2), ["person_id", "age", "event"]
+    ]
+    seeds = pd.DataFrame({"seed": gen_w["seed"].unique().astype(np.int32)})
+    pref = prefix.merge(seeds, how="cross")
+    pref["age_start"] = np.int32(t1)
+    pref["age_stop"] = np.int32(t2)
+    combined = pd.concat([pref[_GEN_COLS], gen_w[_GEN_COLS]], ignore_index=True)
+    combined["event"] = combined["event"].astype("category")
+    return combined
+
+
+# =================================================================================================
+# coverage + scores
+# =================================================================================================
+def _settled_persons(spec, observed, t2) -> set:
+    """Persons whose *framed* outcome is already settled at t2 (answer in the observed prefix)."""
+    if not isinstance(spec, FramedOutcome):
+        return set()
+    tte = spec.tte
+    target = align_jumpoff_to_event(observed, event=tte.target, occurrence=tte.occurrence)
+    target_age = target.set_index("person_id")["age"]
+    if spec.frame.kind == "by_age":
+        upper = pd.Series(spec.frame.value, index=target_age.index)
+    elif spec.frame.kind == "within":
+        upper = pd.Series(t2 + spec.frame.value, index=target_age.index)
+    else:  # within_origin
+        origin = align_jumpoff_to_event(
+            observed, event=tte.origin.target, occurrence=tte.origin.occurrence
+        ).set_index("person_id")["age"]
+        upper = (origin + spec.frame.value).reindex(target_age.index)
+    settled = (upper <= t2) | (target_age <= t2)
+    return set(target_age.index[settled.fillna(False)])
+
+
+def _warn_thin_replicates(summary, spec, label) -> None:
+    median_n = float(summary["n"].median())
+    if median_n < spec.min_replicates:
+        logger.warning(
+            "backtesting %s: median replicate count %.0f < min_replicates %d — probabilities are "
+            "coarse; generate more seeds",
+            label["outcome"],
+            median_n,
+            spec.min_replicates,
+        )
+
+
+def _coverage_row(obs_eval, gen_eval, cond_persons, all_persons, settled, label) -> pd.DataFrame:
+    """Per-cell evaluability accounting — shrinking sets and thin replicate counts, never silent."""
+    n_condition = len(cond_persons)
+    n_evaluable = int(obs_eval["evaluable"].sum())
+    n_settled = len(settled)
+    ns = gen_eval.loc[gen_eval["evaluable"]].groupby(_RUN_KEYS, observed=True).size()
+    return pd.DataFrame(
+        [
+            {
+                **label,
+                "n_condition": n_condition,
+                "n_evaluable": n_evaluable,
+                "n_excluded_condition": len(all_persons) - n_condition,
+                "n_settled": n_settled,
+                # everything in the condition that is neither evaluable nor settled = uncovered span
+                "n_uncovered": max(n_condition - n_evaluable - n_settled, 0),
+                "n_seed_min": int(ns.min()) if len(ns) else 0,
+                "n_seed_median": float(ns.median()) if len(ns) else 0.0,
+                "n_seed_max": int(ns.max()) if len(ns) else 0,
+            }
+        ]
+    )
+
+
+def _score_row(spec, joined, summary, gen_w, observed, t1, t2) -> dict:
+    brier = ml.brier(joined)
+    median_n = float(summary["n"].median())
+    scores = {
+        "ece": ml.ece(ml.calibration_table(joined, strategy="quantile")),
+        "roc_auc": ml.roc_auc(joined),
+        "auc_grid_resolution": 1.0 / median_n if median_n else np.nan,
+        "brier_raw": brier["raw"],
+        "brier_corrected": brier["corrected"],
+        "log_loss": ml.log_loss(joined),
+    }
+    if isinstance(spec, FramedOutcome):
+        scores["timing_coverage"] = _timing_coverage(spec, gen_w, observed, t1, t2)
+    return scores
+
+
+def _timing_coverage(spec, gen_w, observed, t1, t2) -> float:
+    combined = _combine_prefix(observed, gen_w, t1, t2)
+    tte_gen = time_to_event(combined, GEN_KEYS, spec.tte)
+    horizon = spec.frame.value if spec.frame.kind != "by_age" else spec.frame.value
+    td = rep.timing_distribution(tte_gen, run_keys=_RUN_KEYS, seed_col="seed", horizon=horizon)
+    obs_tte = time_to_event(observed, OBS_KEYS, spec.tte)
+    return ml.timing_coverage(td, obs_tte)
+
+
+def _convergence(gen_eval, obs_eval, spec) -> pd.DataFrame | None:
+    truth = obs_eval.loc[obs_eval["evaluable"], ["person_id", "occurred"]].rename(
+        columns={"occurred": "y_true"}
+    )
+    truth["y_true"] = truth["y_true"].astype(int)
+
+    def stat_fn(df: pd.DataFrame) -> pd.DataFrame:
+        summ = rep.replicate_summary(df, run_keys=_RUN_KEYS)
+        est = rep.estimate_probability(summ, spec=spec)
+        j = est.merge(truth, on="person_id", how="inner")
+        if j.empty or j["y_true"].nunique() < 2:
+            return pd.DataFrame({"auc": [np.nan], "brier": [np.nan], "ece": [np.nan]})
+        return pd.DataFrame(
+            {
+                "auc": [ml.roc_auc(j)],
+                "brier": [ml.brier(j)["corrected"]],
+                "ece": [ml.ece(ml.calibration_table(j, strategy="uniform"))],
+            }
+        )
+
+    n_seeds = int(gen_eval["seed"].nunique())
+    if n_seeds < 3:
+        return None
+    sizes = sorted({2, 3, 5, 10, n_seeds} & set(range(2, n_seeds + 1)))
+    return rep.convergence_curve(
+        gen_eval,
+        seed_col="seed",
+        stat_fn=stat_fn,
+        sizes=sizes,
+        n_rep=10,
+        rng=np.random.default_rng(spec.bootstrap_seed),
+        value_cols=["auc", "brier", "ece"],
+    )
+
+
+# =================================================================================================
+# aggregate targets
+# =================================================================================================
+def _score_aggregate_target(
+    target,
+    gen_w,
+    observed,
+    spans_obs,
+    persons,
+    birth_token,
+    outcomes,
+    cohort_width,
+    t1,
+    t2,
+    replicate_spec,
+    acc,
+) -> None:
+    if persons is None and target != "ppr":
+        logger.warning("backtesting: skipping aggregate target %r — needs persons", target)
+        return
+    combined = _combine_prefix(observed, gen_w, t1, t2)
+    gen_births = births(combined, GEN_KEYS, birth_event=birth_token)
+    gen_spans = observation_spans(combined, GEN_KEYS)
+    obs_births = births(observed, OBS_KEYS, birth_event=birth_token)
+
+    try:
+        gen_m, obs_m, value_col, on = _aggregate_tables(
+            target,
+            gen_births,
+            gen_spans,
+            obs_births,
+            spans_obs,
+            persons,
+            outcomes,
+            cohort_width,
+            combined,
+            observed,
+        )
+    except _UnsupportedTarget:
+        logger.warning("backtesting: aggregate target %r not supported; skipped", target)
+        return
+
+    err = ml.aggregate_error(gen_m, obs_m, value_col=value_col, on=on, spec=replicate_spec)
+    err.insert(0, "target", target)
+    acc["aggregate_error"].append(_stamp(err, _cell_label(t1, t2, target, None)))
+
+
+class _UnsupportedTarget(Exception):
+    pass
+
+
+def _aggregate_tables(
+    target,
+    gen_births,
+    gen_spans,
+    obs_births,
+    spans_obs,
+    persons,
+    outcomes,
+    cohort_width,
+    combined,
+    observed,
+):
+    bins = AgeBins.from_years(*_FERTILE, 1.0)
+    if target == "ccf":
+        gen = fe.ccf(
+            gen_births,
+            gen_spans,
+            persons,
+            by_cohort=True,
+            extra_by=_EXTRA_BY,
+            cohort_width=cohort_width,
+        )
+        obs = fe.ccf(obs_births, spans_obs, persons, by_cohort=True, cohort_width=cohort_width)
+        return gen, obs, "ccf", ["cohort"]
+    if target in ("asfr_cohort", "asfr_period"):
+        mode = "cohort" if target == "asfr_cohort" else "period"
+        gen = fe.asfr(
+            gen_births,
+            gen_spans,
+            persons,
+            mode=mode,
+            bins=bins,
+            extra_by=_EXTRA_BY,
+            cohort_width=cohort_width,
+        )
+        obs = fe.asfr(
+            obs_births, spans_obs, persons, mode=mode, bins=bins, cohort_width=cohort_width
+        )
+        dim = "cohort" if mode == "cohort" else "year"
+        return gen, obs, "asfr", [dim, "age_bin"]
+    if target == "ppr":
+        gen = fe.ppr(gen_births, gen_spans, max_parity=6, extra_by=_EXTRA_BY)
+        obs = fe.ppr(obs_births, spans_obs, max_parity=6)
+        return gen, obs, "ppr", ["parity_from"]
+    if target.startswith("km:"):
+        name = target[len("km:") :]
+        gen = _km_at_grid(combined, GEN_KEYS, outcomes[name], by=list(_EXTRA_BY))
+        obs = _km_at_grid(observed, OBS_KEYS, outcomes[name], by=[])
+        return gen, obs, "survival", ["time"]
+    raise _UnsupportedTarget(target)
+
+
+def _km_at_grid(df, keys, spec, by) -> pd.DataFrame:
+    """KM survival at a fixed age grid; tidy ``[*by, time, survival]`` for aggregate_error."""
+    from seqeval.units import years_to_days
+
+    tte = time_to_event(df, keys, spec)
+    km = sv.kaplan_meier(tte, by=by)
+    grid = np.array([years_to_days(y) for y in _KM_GRID_YEARS], dtype=np.int64)
+    rows = []
+    groups = [((), km)] if not by else list(km.groupby(by, observed=True))
+    for key, g in groups:
+        g = g.sort_values("time")
+        # step function: survival at time = last recorded value at or before that time (1.0 before).
+        idx = np.searchsorted(g["time"].to_numpy(), grid, side="right") - 1
+        surv = np.where(idx >= 0, g["survival"].to_numpy()[np.clip(idx, 0, len(g) - 1)], 1.0)
+        block = pd.DataFrame({"time": grid, "survival": surv})
+        if by:
+            key_tuple = key if isinstance(key, tuple) else (key,)
+            for col, val in zip(by, key_tuple, strict=True):
+                block[col] = val
+        rows.append(block)
+    return pd.concat(rows, ignore_index=True)
+
+
+# =================================================================================================
+# small helpers
+# =================================================================================================
+def _needs_births(cfg: BacktestingConfig) -> bool:
+    return bool(cfg.aggregate_targets)
+
+
+def _cell_label(t1, t2, outcome, condition) -> dict:
+    return {
+        "age_start": int(t1),
+        "age_stop": int(t2),
+        "age_start_years": round(days_to_years(t1), 2),
+        "age_stop_years": round(days_to_years(t2), 2),
+        "outcome": outcome,
+        "condition": condition if condition is not None else "-",
+    }
+
+
+def _stamp(df: pd.DataFrame, label: dict) -> pd.DataFrame:
+    out = df.copy()
+    for col in reversed(list(label)):
+        if col not in out.columns:
+            out.insert(0, col, label[col])
+    return out
+
+
+def _stamp_scores(scores: dict, label: dict) -> pd.DataFrame:
+    rows = [{**label, "metric": k, "value": v} for k, v in scores.items()]
+    return pd.DataFrame(rows)

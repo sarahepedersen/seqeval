@@ -358,13 +358,19 @@ def _numeric_and_key_cols(df: pd.DataFrame) -> tuple[list[str], list[str]]:
     return keys, numeric
 
 
-def _melt_stat(result: pd.DataFrame) -> pd.DataFrame:
-    """Melt a stat_fn output to ``[*key_cols, metric, __value__]`` (numeric columns become rows).
+def _melt_stat(result: pd.DataFrame, value_cols: list[str] | None = None) -> pd.DataFrame:
+    """Melt a stat_fn output to ``[*key_cols, metric, __value__]`` (value columns become rows).
 
-    Uses a sentinel value column name so it never collides with a key column a ``stat_fn`` happens
-    to call ``value``.
+    ``value_cols`` names the numeric statistic columns explicitly — required when grouping keys are
+    themselves numeric (cohort year, parity, window ages), which the dtype heuristic would otherwise
+    mistake for values. When omitted, numeric columns are treated as values. A sentinel value column
+    name is used so it never collides with a key column a ``stat_fn`` happens to call ``value``.
     """
-    keys, numeric = _numeric_and_key_cols(result)
+    if value_cols is not None:
+        numeric = list(value_cols)
+        keys = [c for c in result.columns if c not in numeric]
+    else:
+        keys, numeric = _numeric_and_key_cols(result)
     return result.melt(id_vars=keys, value_vars=numeric, var_name="metric", value_name="__value__")
 
 
@@ -385,13 +391,15 @@ def seed_bootstrap(
     n_boot: int,
     rng: np.random.Generator,
     level: float = 0.95,
+    value_cols: list[str] | None = None,
 ) -> pd.DataFrame:
     """Percentile CIs for any aggregate ``stat_fn`` by resampling seed labels with replacement.
 
     Seeds are resampled *within each window* (``age_start``, ``age_stop``) so window structure is
     preserved. ``stat_fn`` maps a replicate-level frame to a tidy frame (key columns + numeric
     value columns); it is applied once per bootstrap draw — outcome evaluation is **never** re-run
-    inside the loop (evaluate once per replicate, resample the rows). Captures Monte-Carlo
+    inside the loop (evaluate once per replicate, resample the rows). ``value_cols`` names the
+    statistic columns explicitly (needed when grouping keys are numeric). Captures Monte-Carlo
     (replicate) uncertainty only; population sampling uncertainty would need a person-level cluster
     bootstrap (out of scope v1). Returns ``[*keys, metric, estimate, ci_lo, ci_hi]``.
     """
@@ -415,7 +423,7 @@ def seed_bootstrap(
                 new_id += 1
                 parts.append(sub)
         resampled = pd.concat(parts, ignore_index=True)
-        draws.append(_melt_stat(stat_fn(resampled)))
+        draws.append(_melt_stat(stat_fn(resampled), value_cols))
 
     stacked = pd.concat(draws, ignore_index=True)
     keys = [c for c in stacked.columns if c != "__value__"]
@@ -425,7 +433,7 @@ def seed_bootstrap(
         .agg(ci_lo=lambda s: s.quantile(alpha / 2), ci_hi=lambda s: s.quantile(1 - alpha / 2))
         .reset_index()
     )
-    point = _melt_stat(stat_fn(df)).rename(columns={"__value__": "estimate"})
+    point = _melt_stat(stat_fn(df), value_cols).rename(columns={"__value__": "estimate"})
     merge_keys = [c for c in point.columns if c != "estimate"]
     return ci.merge(point, on=merge_keys, how="left")
 
@@ -438,14 +446,17 @@ def convergence_curve(
     sizes: list[int] | None = None,
     n_rep: int,
     rng: np.random.Generator,
+    value_cols: list[str] | None = None,
 ) -> pd.DataFrame:
     """Dispersion of an aggregate ``stat_fn`` vs number of seeds ``m`` — the actionable diagnostic.
 
     For each ``m`` in ``sizes`` (default ``2..n``), subsample ``m`` seeds *without replacement*
     within each window ``n_rep`` times, recompute ``stat_fn``, and report the mean and standard
-    deviation across repetitions. Because inference is upstream, "your estimate has not stabilized
-    at m seeds" tells the researcher to generate more replicates — a power analysis for replicate
-    count. Returns ``[*keys, metric, m, mean, std]``.
+    deviation across repetitions. ``value_cols`` names the statistic columns explicitly (needed
+    when grouping keys are numeric). Because inference is upstream, "your estimate has not
+    stabilized at m seeds" tells the researcher to generate more replicates — a replicate-count
+    power analysis.
+    Returns ``[*keys, metric, m, mean, std]``.
     """
     _, groups = _window_seed_groups(df, seed_col)
     seed_index = {
@@ -466,7 +477,7 @@ def convergence_curve(
                 seeds = np.array(list(per_seed.keys()))
                 chosen = rng.choice(seeds, size=m, replace=False)
                 parts.extend(per_seed[s] for s in chosen)
-            reps.append(_melt_stat(stat_fn(pd.concat(parts, ignore_index=True))))
+            reps.append(_melt_stat(stat_fn(pd.concat(parts, ignore_index=True)), value_cols))
         stacked = pd.concat(reps, ignore_index=True)
         keys = [c for c in stacked.columns if c != "__value__"]
         agg = (

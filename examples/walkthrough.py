@@ -38,9 +38,16 @@ if str(_REPO_ROOT) not in sys.path:
 
 from tests import synthetic as S  # noqa: E402
 
+from seqeval.arms import backtesting as backtesting_arm  # noqa: E402
 from seqeval.arms import descriptives as descriptives_arm  # noqa: E402
 from seqeval.arms._common import OutputWriter  # noqa: E402
-from seqeval.config import load_config, resolve_outcomes  # noqa: E402
+from seqeval.config import (  # noqa: E402
+    load_config,
+    resolve_conditions,
+    resolve_outcomes,
+    resolve_probability_outcomes,
+    resolve_replicates,
+)
 from seqeval.core import outcomes as O  # noqa: E402
 from seqeval.core import replicates as R  # noqa: E402
 from seqeval.core.specs import CountQuery, Frame, ReplicateSpec  # noqa: E402
@@ -90,6 +97,18 @@ arms:
       ppr: {max_parity: 6}
     life_table: {max_parity: 6}
     stratify_by: [cohort]
+
+  backtesting:
+    windows: all
+    conditions:
+      - {name: p0, event: birth, max_count: 0}
+      - {name: p1, event: birth, min_count: 1, max_count: 1}
+    probability_outcomes:
+      - {outcome: first_birth, by_age: 35, given: p0}
+      - {event: birth, min_events: 1, within: 5}
+      - {event: birth, min_events: 1, within: 5, given: p1}
+    aggregate_targets: [ccf, ppr]
+    min_seeds: 5
 """
 
 
@@ -303,7 +322,33 @@ def main() -> None:
         f"(converged truth ~ {S.expected_ccf(hazards):.3f})"
     )
 
-    banner("4. REPLICATE ENGINE (02b): empirical probabilities + calibration")
+    banner("4. BACKTESTING ARM (04): probability metrics vs observed truth")
+    bt_writer = OutputWriter(base_dir=out, arm="backtesting", model=cfg.model.name)
+    resolved = resolve_outcomes(cfg)
+    backtesting_arm.run(
+        bundle,
+        cfg.arms.backtesting,
+        bt_writer,
+        outcomes=resolved,
+        conditions=resolve_conditions(cfg),
+        prob_outcomes=resolve_probability_outcomes(cfg, resolved),
+        replicate_spec=resolve_replicates(cfg),
+        cohort_width=cfg.cohort_width,
+    )
+    bt_figs = [p.name for p in bt_writer.written if p.suffix == ".png"]
+    scores = pd.read_parquet(bt_writer.dir / "scores.parquet")
+    headline = (
+        scores[scores["metric"].isin(["roc_auc", "brier_corrected", "ece"])]
+        .pivot_table(
+            index=["age_stop_years", "outcome", "condition"], columns="metric", values="value"
+        )
+        .round(3)
+    )
+    print(f"wrote {len(bt_figs)} figures + 6 result tables to backtesting/")
+    print("\nheadline scores (one row per window x outcome x condition):")
+    print(headline.to_string())
+
+    banner("5. REPLICATE ENGINE (02b): reliability band at n=5 vs n=50 + convergence")
     rep_dir = out / "replicates"
     rep_dir.mkdir(exist_ok=True)
     rep_figs = replicate_showcase(bundle, hazards, rep_dir)
@@ -316,6 +361,9 @@ def main() -> None:
     ]
     for name, _path in desc_figs:
         lines.append(f"- `descriptives/{name}`")
+    lines.append("\n## Backtesting figures (`backtesting/`)\n")
+    for name in bt_figs:
+        lines.append(f"- `backtesting/{name}`")
     lines.append("\n## Replicate-engine figures (`replicates/`)\n")
     for name, caption in rep_figs:
         lines.append(f"- `replicates/{name}` — {caption}")
@@ -331,11 +379,12 @@ def main() -> None:
         Wrote everything under: {out}/
           data/          demo artifacts + config.yaml
           descriptives/  KM / ASFR / CCF / PPR / life-table tables + figures
+          backtesting/   probabilities / calibration / scores / coverage tables + reliability figs
           replicates/    reliability_band.png, convergence_ccf.png
           INDEX.md       a listing of all figures and tables
 
         Implemented and exercised here: 01 data layer, 02 core outcomes,
-        02b replicate engine, 03 descriptives. Not yet built: 04 backtesting,
+        02b replicate engine, 03 descriptives, 04 backtesting. Not yet built:
         05 forecasting, 06 reporting/CLI.
     """)
     )
