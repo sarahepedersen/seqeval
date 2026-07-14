@@ -47,7 +47,7 @@ def run(
     """
     observed = bundle.observed
     spans = observation_spans(observed, OBS_KEYS)
-    strata = _strata_frame(bundle, cfg.stratify_by)
+    strata = _strata_frame(bundle, cfg.stratify_by, cfg.cohort_width)
 
     _run_kaplan_meier(observed, cfg, out, outcomes, strata)
 
@@ -65,7 +65,7 @@ def run(
 # =================================================================================================
 # stratification
 # =================================================================================================
-def _strata_frame(bundle: Bundle, stratify_by: list[str]) -> pd.DataFrame | None:
+def _strata_frame(bundle: Bundle, stratify_by: list[str], cohort_width: int) -> pd.DataFrame | None:
     """A ``[person_id, *stratify_by]`` frame, or ``None`` if stratification cannot be honored."""
     if not stratify_by:
         return None
@@ -77,7 +77,8 @@ def _strata_frame(bundle: Bundle, stratify_by: list[str]) -> pd.DataFrame | None
     frame = bundle.persons[["person_id"]].copy()
     for col in stratify_by:
         if col == "cohort":
-            frame = frame.merge(cohort_bins(bundle.persons).reset_index(), on="person_id")
+            cohorts = cohort_bins(bundle.persons, width=cohort_width).reset_index()
+            frame = frame.merge(cohorts, on="person_id")
         else:
             frame = frame.merge(bundle.persons[["person_id", col]], on="person_id")
     return frame
@@ -89,12 +90,29 @@ def _strata_frame(bundle: Bundle, stratify_by: list[str]) -> pd.DataFrame | None
 def _run_kaplan_meier(observed, cfg, out, outcomes, strata) -> None:
     by = list(cfg.stratify_by) if strata is not None else []
     for name in cfg.kaplan_meier:
-        tte = time_to_event(observed, OBS_KEYS, outcomes[name])
+        spec = outcomes[name]
+        tte = time_to_event(observed, OBS_KEYS, spec)
         if strata is not None:
             tte = tte.merge(strata, on="person_id", how="left")
         km = sv.kaplan_meier(tte, by=by)
         out.frame(f"km_{name}", km)
-        out.figure(f"km_{name}", viz_km.plot_km(km, by=by, title=name))
+        out.figure(
+            f"km_{name}",
+            viz_km.plot_km(
+                km, by=by, title=name.replace("_", " "), xlabel=_km_xlabel(spec, outcomes)
+            ),
+        )
+
+
+def _km_xlabel(spec: TTESpec, outcomes: dict[str, TTESpec]) -> str:
+    """X-axis label for a KM curve: age from birth, or duration since the outcome's origin event."""
+    if spec.origin is None:
+        return "age (years)"
+    # Duration is measured from the origin occurrence; name it if the origin is a registry entry.
+    for name, other in outcomes.items():
+        if other == spec.origin:
+            return f"years since {name.replace('_', ' ')}"
+    return "years since origin event"
 
 
 def _run_fertility(bundle: Bundle, cfg, out, births, spans) -> None:
@@ -114,13 +132,13 @@ def _run_fertility(bundle: Bundle, cfg, out, births, spans) -> None:
         return
 
     if fcfg.ccf:
-        ccf = fe.ccf(births, spans, persons, by_cohort=True)
+        ccf = fe.ccf(births, spans, persons, by_cohort=True, cohort_width=cfg.cohort_width)
         out.frame("ccf", ccf)
         out.figure("ccf", viz_fertility.plot_ccf(ccf))
 
     bins = AgeBins.from_years(_FERTILE_LO_YEARS, _FERTILE_HI_YEARS, fcfg.age_bin_width)
     for mode in fcfg.asfr:
-        table = fe.asfr(births, spans, persons, mode=mode, bins=bins)
+        table = fe.asfr(births, spans, persons, mode=mode, bins=bins, cohort_width=cfg.cohort_width)
         out.frame(f"asfr_{mode}", table)
         dim = "year" if mode == "period" else "cohort"
         out.figure(f"asfr_{mode}", viz_fertility.plot_asfr(table, dim=dim))

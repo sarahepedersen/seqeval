@@ -103,6 +103,16 @@ def test_fertility_key_agnostic_on_generated():
     assert {"seed", "age_start", "age_stop", "cohort", "age_bin"} <= set(af.columns)
 
 
+def test_cohort_width_groups_into_bands():
+    rng = np.random.default_rng(6)
+    obs, pers = S.simulate_cohort(2000, (1960, 1974), S.default_hazards(), None, rng)
+    births, spans = _tables(obs)
+    ccf1 = FE.ccf(births, spans, pers, by_cohort=True, cohort_width=1)
+    ccf5 = FE.ccf(births, spans, pers, by_cohort=True, cohort_width=5)
+    assert set(ccf5["cohort"]) == {1960, 1965, 1970}  # 5-year bands anchored at the min birth year
+    assert len(ccf5) < len(ccf1)  # coarser bands -> fewer groups
+
+
 def test_ppr_min_exposure_excludes_recent_reachers():
     obs = tiny.observed_fixture()
     births, spans = _tables(obs)

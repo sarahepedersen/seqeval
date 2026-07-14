@@ -9,7 +9,13 @@ from seqeval.units import days_to_years
 from seqeval.viz._style import new_fig, stratum_colors
 
 
-def plot_km(km: pd.DataFrame, *, by: list[str] = (), title: str | None = None) -> Figure:
+def plot_km(
+    km: pd.DataFrame,
+    *,
+    by: list[str] = (),
+    title: str | None = None,
+    xlabel: str = "age (years)",
+) -> Figure:
     """Step-function KM curve(s) with CI bands — one line per stratum, x-axis in years.
 
     Parameters
@@ -20,6 +26,9 @@ def plot_km(km: pd.DataFrame, *, by: list[str] = (), title: str | None = None) -
         Stratum columns present in ``km`` (empty for a single curve).
     title : str, optional
         Axis title (e.g. the outcome label via ``bundle.label``).
+    xlabel : str, default "age (years)"
+        X-axis label. Durations measured from an ``origin`` event are elapsed time since that
+        event, not age, so callers pass e.g. ``"years since first birth"``.
     """
     by = list(by)
     fig, ax = new_fig()
@@ -33,7 +42,7 @@ def plot_km(km: pd.DataFrame, *, by: list[str] = (), title: str | None = None) -
         if {"ci_lo", "ci_hi"} <= set(grp.columns):
             ax.fill_between(years, grp["ci_lo"], grp["ci_hi"], step="post", alpha=0.2, color=color)
 
-    ax.set_xlabel("age (years)")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("survival S(t)")
     ax.set_ylim(0, 1.02)
     if title:

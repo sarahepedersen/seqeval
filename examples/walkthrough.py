@@ -88,6 +88,7 @@ arms:
       ppr: {max_parity: 6}
     life_table: {max_parity: 6}
     stratify_by: [cohort]
+    cohort_width: 5          # birth-cohort bands in years (CCF / cohort-ASFR / KM stratification)
 """
 
 

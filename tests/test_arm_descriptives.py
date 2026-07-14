@@ -77,6 +77,25 @@ def test_result_frames_stamped_with_model(tmp_path):
     assert (ccf["model"] == "my_model").all()
 
 
+def test_km_xlabel_reflects_origin():
+    from seqeval.arms.descriptives import _km_xlabel
+
+    assert _km_xlabel(OUTCOMES["first_birth"], OUTCOMES) == "age (years)"
+    # a duration measured from an origin event is "years since <origin>", not age
+    assert _km_xlabel(OUTCOMES["second_birth"], OUTCOMES) == "years since first birth"
+
+
+def test_cohort_width_config_produces_five_year_bands(tmp_path):
+    import pandas as pd
+
+    cfg = _full_cfg()
+    cfg.cohort_width = 5
+    out = OutputWriter(base_dir=tmp_path, arm="descriptives", model="demo")
+    D.run(_bundle(), cfg, out, outcomes=OUTCOMES)
+    cohorts = set(pd.read_parquet(out.dir / "ccf.parquet")["cohort"])
+    assert all(c % 5 == 0 for c in cohorts)
+
+
 def test_missing_persons_skips_cohort_metrics(tmp_path, caplog):
     out = OutputWriter(base_dir=tmp_path, arm="descriptives", model="demo")
     with caplog.at_level(logging.WARNING, logger="seqeval"):

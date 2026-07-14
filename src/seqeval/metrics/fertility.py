@@ -32,13 +32,15 @@ def ccf(
     by_cohort: bool = True,
     extra_by: tuple[str, ...] = (),
     fertile_upper_days: int | None = None,
+    cohort_width: int = 1,
 ) -> pd.DataFrame:
     """Completed cohort fertility: mean births per woman, by birth cohort.
 
     Returns ``[*extra_by, (cohort,) n_women, ccf, complete]``. ``complete`` is ``False`` when the
     cohort's observation does not reach the fertile upper bound (its members' spans all end before
     :data:`FERTILE_UPPER_YEARS`), so callers can tell a true CCF from a truncated mean — important
-    when the same function runs on censored/backtest data.
+    when the same function runs on censored/backtest data. ``cohort_width`` is the birth-cohort band
+    width in years.
     """
     extra_by = list(extra_by)
     fertile_upper = (
@@ -49,7 +51,7 @@ def ccf(
     pop, bt = spans, births
     if by_cohort:
         # Tag both the population (spans) and the births with each person's cohort.
-        ch = cohort_bins(persons).reset_index()
+        ch = cohort_bins(persons, width=cohort_width).reset_index()
         pop = spans.merge(ch, on="person_id", how="left")
         bt = births.merge(ch, on="person_id", how="left")
 
@@ -83,12 +85,13 @@ def asfr(
     mode: Literal["period", "cohort"],
     bins: AgeBins,
     extra_by: tuple[str, ...] = (),
+    cohort_width: int = 1,
 ) -> pd.DataFrame:
     """Age-specific fertility rate: births in a cell / person-years in the cell.
 
     ``period`` cells are ``(year, age_bin)`` (calendar time from :func:`exposure` with
-    ``by_year=True``); ``cohort`` cells are ``(cohort, age_bin)``. Returns
-    ``[*extra_by, year|cohort, age_bin, births, person_years, asfr]``.
+    ``by_year=True``); ``cohort`` cells are ``(cohort, age_bin)`` with ``cohort_width``-year bands.
+    Returns ``[*extra_by, year|cohort, age_bin, births, person_years, asfr]``.
     """
     extra_by = list(extra_by)
     dim = "year" if mode == "period" else "cohort"
@@ -96,7 +99,9 @@ def asfr(
     # Exposure denominator.
     exp = exposure(spans, bins=bins, persons=persons, by_year=(mode == "period"))
     if mode == "cohort":
-        exp = exp.merge(cohort_bins(persons).reset_index(), on="person_id", how="left")
+        exp = exp.merge(
+            cohort_bins(persons, width=cohort_width).reset_index(), on="person_id", how="left"
+        )
     person_days = (
         exp.groupby([*extra_by, dim, "age_bin"], observed=True)["person_days"].sum().reset_index()
     )
@@ -107,7 +112,9 @@ def asfr(
     if mode == "period":
         b[dim] = calendar_year(b)
     else:
-        b = b.merge(cohort_bins(persons).reset_index(), on="person_id", how="left")
+        b = b.merge(
+            cohort_bins(persons, width=cohort_width).reset_index(), on="person_id", how="left"
+        )
     birth_counts = (
         b.dropna(subset=["age_bin"])
         .groupby([*extra_by, dim, "age_bin"], observed=True)

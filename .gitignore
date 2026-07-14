@@ -17,3 +17,4 @@ tests/.cache/
 
 # Demo / generated data
 examples/data/
+examples/walkthrough_output/

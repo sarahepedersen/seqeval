@@ -267,6 +267,7 @@ class DescriptivesConfig(_Strict):
     fertility: FertilityConfig | None = None
     life_table: LifeTableConfig | None = None
     stratify_by: list[str] = []
+    cohort_width: int = 5  # width of birth-cohort bands (years) for `cohort` grouping/stratifying
 
 
 class BacktestingConfig(_Strict):
