@@ -18,7 +18,7 @@ from seqeval.core.outcomes import exposure
 from seqeval.core.slicing import AgeBins, bin_ages, calendar_year, cohort_bins
 from seqeval.units import DAYS_PER_YEAR, years_to_days
 
-__all__ = ["ccf", "asfr", "ppr", "tfr", "FERTILE_UPPER_YEARS"]
+__all__ = ["ccf", "asfr", "ppr", "tfr", "lexis_surface", "FERTILE_UPPER_YEARS"]
 
 #: Upper edge of the childbearing window (years); a cohort is "complete" once observed to here.
 FERTILE_UPPER_YEARS = 50.0
@@ -192,6 +192,56 @@ def ppr(
     out = pd.DataFrame(rows)
     out["ppr"] = np.where(out["n_at_risk"] > 0, out["n_progressed"] / out["n_at_risk"], np.nan)
     return out.sort_values([*extra_by, "parity_from"]).reset_index(drop=True)
+
+
+def lexis_surface(
+    births: pd.DataFrame,
+    spans: pd.DataFrame,
+    persons: pd.DataFrame,
+    *,
+    occurrence: int = 1,
+    bins: AgeBins,
+    year_range: tuple[int, int],
+    extra_by: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    """Occurrence-specific fertility intensity per (calendar_year, age) cell — the Lexis surface.
+
+    Numerator: the ``occurrence``-th births in the cell (``births`` must carry the ``order`` column
+    from :func:`seqeval.core.outcomes.births`). Denominator: exposure in the cell
+    (:func:`~seqeval.core.outcomes.exposure` with ``by_year=True``), person-days converted to
+    person-years at the rate step. Restricted to ``year_range``. Returns
+    ``[year, age_bin, *extra_by, rate, n_events, person_years]``. Reuses births/exposure — never
+    re-derives them — so observed and generated (per seed) surfaces are the same computation.
+    """
+    extra_by = list(extra_by)
+    lo, hi = year_range
+
+    b = births[births["order"] == occurrence].merge(
+        persons[["person_id", "birth_year"]], on="person_id", how="left"
+    )
+    b["age_bin"] = bin_ages(b["age"], bins)
+    b["year"] = calendar_year(b)
+    num = (
+        b.dropna(subset=["age_bin"])
+        .groupby([*extra_by, "year", "age_bin"], observed=True)
+        .size()
+        .reset_index(name="n_events")
+    )
+
+    exp = exposure(spans, bins=bins, persons=persons, by_year=True)
+    den = (
+        exp.groupby([*extra_by, "year", "age_bin"], observed=True)["person_days"]
+        .sum()
+        .reset_index()
+    )
+
+    out = den.merge(num, on=[*extra_by, "year", "age_bin"], how="left")
+    out["n_events"] = out["n_events"].fillna(0).astype(np.int64)
+    out["person_years"] = out["person_days"] / DAYS_PER_YEAR
+    out["rate"] = np.where(out["person_years"] > 0, out["n_events"] / out["person_years"], np.nan)
+    out = out[(out["year"] >= lo) & (out["year"] <= hi)]
+    cols = ["year", "age_bin", *extra_by, "rate", "n_events", "person_years"]
+    return out[cols].sort_values([*extra_by, "year", "age_bin"]).reset_index(drop=True)
 
 
 def tfr(asfr_period: pd.DataFrame, *, extra_by: tuple[str, ...] = ()) -> pd.DataFrame:
