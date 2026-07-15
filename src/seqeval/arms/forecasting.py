@@ -48,7 +48,8 @@ def run(
     """Run the forecasting arm; write Lexis surfaces, violations, and seed-stability tables.
 
     ``outcomes``/``rules``/``replicate_spec`` are the resolved objects from ``config.resolve_*``
-    (passed in, like the other arms). Writes ``lexis_{observed,forecast,combined}``, ``violations``,
+    (passed in, like the other arms). Writes both period and cohort Lexis surfaces
+    (``lexis_{observed,forecast,combined}`` and ``lexis_cohort_{...}``), ``violations``,
     ``violation_rates`` and ``seed_stability_{individual,aggregate}`` parquet tables plus figures.
     """
     if bundle.generated is None:
@@ -70,7 +71,7 @@ def run(
     observed = bundle.observed
 
     if cfg.lexis is not None:
-        _run_lexis(bundle, cfg, generated, windows, out, outcomes)
+        _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width)
     if cfg.illegal_moves:
         _run_illegal_moves(observed, generated, rules, out)
     if cfg.seed_stability is not None:
@@ -80,63 +81,72 @@ def run(
 # =================================================================================================
 # 1. Lexis
 # =================================================================================================
-def _run_lexis(bundle, cfg, generated, windows, out, outcomes) -> None:
+def _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width) -> None:
     if bundle.persons is None:
         logger.warning("forecasting: skipping Lexis — no persons file (birth_year needed)")
         return
     lex = cfg.lexis
     spec = outcomes[lex.outcome]
-    occurrence = spec.occurrence
-    target = spec.target
+    occurrence, target = spec.occurrence, spec.target
     bins = AgeBins.from_years(lex.ages[0], lex.ages[1], 1.0)
     year_range = (lex.years[0], lex.years[1])
     subgroup = list(lex.subgroup_by)
 
-    persons = bundle.persons
-    observed = bundle.observed
+    persons, observed = bundle.persons, bundle.observed
     obs_b = births(observed, OBS_KEYS, birth_event=target)
     obs_spans = observation_spans(observed, OBS_KEYS)
-    obs_surface = fe.lexis_surface(
-        obs_b,
-        obs_spans,
-        persons,
-        occurrence=occurrence,
-        bins=bins,
-        year_range=year_range,
-        extra_by=tuple(subgroup),
-    )
-    out.frame("lexis_observed", obs_surface)
 
     # Forecast from the earliest jump-off (longest future). The occurrence is absolute, so the
     # forecast surface is built on the full life course (observed prefix + generated future) — a
     # first birth is a *first* birth, not the first post-jump-off birth.
     t1, t2 = min(windows, key=lambda w: w[1])
     gen_w = generated[(generated["age_start"] == t1) & (generated["age_stop"] == t2)]
-    combined = combine_prefix(observed, gen_w, t1, t2)
-    gen_b = births(combined, GEN_KEYS, birth_event=target)
-    gen_spans = observation_spans(combined, GEN_KEYS)
-    fc_by_seed = fe.lexis_surface(
-        gen_b,
-        gen_spans,
-        persons,
-        occurrence=occurrence,
-        bins=bins,
-        year_range=year_range,
-        extra_by=("seed", *subgroup),
-    )
-    out.frame("lexis_forecast", fc_by_seed)
+    combined_seq = combine_prefix(observed, gen_w, t1, t2)
+    gen_b = births(combined_seq, GEN_KEYS, birth_event=target)
+    gen_spans = observation_spans(combined_seq, GEN_KEYS)
 
-    combined = _combine_surfaces(obs_surface, fc_by_seed, subgroup)
-    out.frame("lexis_combined", combined)
+    # Both bases: period (year x age) and cohort (birth-cohort x age).
+    for basis, dim in (("period", "year"), ("cohort", "cohort")):
+        prefix = "lexis" if basis == "period" else "lexis_cohort"
+        obs_surface = fe.lexis_surface(
+            obs_b,
+            obs_spans,
+            persons,
+            occurrence=occurrence,
+            bins=bins,
+            year_range=year_range,
+            extra_by=tuple(subgroup),
+            basis=basis,
+            cohort_width=cohort_width,
+        )
+        fc_by_seed = fe.lexis_surface(
+            gen_b,
+            gen_spans,
+            persons,
+            occurrence=occurrence,
+            bins=bins,
+            year_range=year_range,
+            extra_by=("seed", *subgroup),
+            basis=basis,
+            cohort_width=cohort_width,
+        )
+        combined = _combine_surfaces(obs_surface, fc_by_seed, dim, subgroup)
 
-    out.figure("lexis_combined", viz_lexis.plot_lexis(combined, mark_forecast=True))
-    if fc_by_seed["seed"].nunique() > 1:
-        out.figure("lexis_uncertainty", viz_lexis.plot_lexis_uncertainty(fc_by_seed))
+        out.frame(f"{prefix}_observed", obs_surface)
+        out.frame(f"{prefix}_forecast", fc_by_seed)
+        out.frame(f"{prefix}_combined", combined)
+        out.figure(
+            f"{prefix}_combined", viz_lexis.plot_lexis(combined, dim=dim, mark_forecast=True)
+        )
+        if fc_by_seed["seed"].nunique() > 1:
+            out.figure(
+                f"{prefix}_uncertainty", viz_lexis.plot_lexis_uncertainty(fc_by_seed, dim=dim)
+            )
 
 
-def _combine_surfaces(observed_surface, forecast_by_seed, subgroup) -> pd.DataFrame:
+def _combine_surfaces(observed_surface, forecast_by_seed, dim, subgroup) -> pd.DataFrame:
     """Observed cells (source=observed) + seed-median forecast cells absent from observed."""
-    cell = ["year", "age_bin", *subgroup]
+    cell = [dim, "age_bin", *subgroup]
     fc_median = (
         forecast_by_seed.groupby(cell, observed=True)
         .agg(

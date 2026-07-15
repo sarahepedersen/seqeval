@@ -68,12 +68,15 @@ def test_arm_writes_all_tables_and_figures(tmp_path):
         "lexis_observed.parquet",
         "lexis_forecast.parquet",
         "lexis_combined.parquet",
+        "lexis_cohort_observed.parquet",
+        "lexis_cohort_combined.parquet",
         "violations.parquet",
         "violation_rates.parquet",
         "seed_stability_individual.parquet",
         "seed_stability_aggregate.parquet",
     } <= names
-    assert "lexis_combined.png" in names  # the Lexis heatmap renders
+    # both period (year x age) and cohort (birth-cohort x age) Lexis heatmaps render
+    assert {"lexis_combined.png", "lexis_cohort_combined.png"} <= names
     for p in out.written:
         assert p.exists() and p.stat().st_size > 0
 

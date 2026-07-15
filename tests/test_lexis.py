@@ -31,6 +31,27 @@ def test_lexis_surface_conserves_and_rates():
     assert row["rate"] == pytest.approx(row["n_events"] / row["person_years"])
 
 
+def test_lexis_cohort_basis_bands_and_conserves():
+    rng = np.random.default_rng(1)
+    obs, pers = S.simulate_cohort(2000, (1960, 1974), S.default_hazards(), None, rng)
+    b = O.births(obs, OBS_KEYS, birth_event="birth")
+    sp = O.observation_spans(obs, OBS_KEYS)
+    bins = AgeBins.from_years(12, 55, 1)
+    surface = FE.lexis_surface(
+        b,
+        sp,
+        pers,
+        occurrence=1,
+        bins=bins,
+        year_range=(1975, 2035),
+        basis="cohort",
+        cohort_width=5,
+    )
+    assert "cohort" in surface.columns and "year" not in surface.columns
+    assert set(surface["cohort"].unique()) == {1960, 1965, 1970}  # 5-year bands
+    assert surface["n_events"].sum() == len(b[b["order"] == 1])  # cohort basis has no year filter
+
+
 def _surface(cells, seed=None):
     df = pd.DataFrame(cells, columns=["year", "age_bin"])
     df["rate"] = 0.1
@@ -46,7 +67,7 @@ def test_combined_forecast_only_beyond_observed():
     forecast = pd.concat(
         [_surface([(2001, 26), (2002, 27)], seed=s) for s in (0, 1)], ignore_index=True
     )
-    combined = _combine_surfaces(observed, forecast, subgroup=[])
+    combined = _combine_surfaces(observed, forecast, "year", subgroup=[])
     src = combined.set_index(["year", "age_bin"])["source"]
     assert src.loc[(2000, 25)] == "observed"
     assert src.loc[(2001, 26)] == "observed"  # present in observed -> not overwritten by forecast
