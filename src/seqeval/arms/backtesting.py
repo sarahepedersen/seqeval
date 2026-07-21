@@ -21,7 +21,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from seqeval.arms._common import OutputWriter
+from seqeval.arms._common import OutputWriter, combine_prefix
 from seqeval.config import DEFAULT_COHORT_WIDTH, BacktestingConfig
 from seqeval.core import replicates as rep
 from seqeval.core.outcomes import (
@@ -45,7 +45,6 @@ from seqeval.viz._labels import describe_outcome
 
 logger = logging.getLogger("seqeval")
 
-_GEN_COLS = ["person_id", "seed", "age_start", "age_stop", "age", "event"]
 _RUN_KEYS = ["person_id", "age_start", "age_stop"]
 _EXTRA_BY = ("seed", "age_start", "age_stop")
 _FERTILE = (15.0, 50.0)
@@ -237,25 +236,9 @@ def _evaluate_generated(spec, gen_w, observed, t1, t2) -> pd.DataFrame:
     if isinstance(spec, CountQuery):
         spans = observation_spans(gen_w, GEN_KEYS)
         return evaluate_count(gen_w, GEN_KEYS, spec, spans, jumpoff=t2)
-    combined = _combine_prefix(observed, gen_w, t1, t2)
+    combined = combine_prefix(observed, gen_w, t1, t2)
     spans = observation_spans(combined, GEN_KEYS)
     return evaluate_framed(combined, GEN_KEYS, spec, spans, jumpoff=t2)
-
-
-def _combine_prefix(observed, gen_w, t1, t2) -> pd.DataFrame:
-    """Observed prefix (age <= t2) replicated across the window's seeds, concatenated with the
-    generated future — the full life course per replicate."""
-    persons = gen_w["person_id"].unique()
-    prefix = observed.loc[
-        observed["person_id"].isin(persons) & (observed["age"] <= t2), ["person_id", "age", "event"]
-    ]
-    seeds = pd.DataFrame({"seed": gen_w["seed"].unique().astype(np.int32)})
-    pref = prefix.merge(seeds, how="cross")
-    pref["age_start"] = np.int32(t1)
-    pref["age_stop"] = np.int32(t2)
-    combined = pd.concat([pref[_GEN_COLS], gen_w[_GEN_COLS]], ignore_index=True)
-    combined["event"] = combined["event"].astype("category")
-    return combined
 
 
 # =================================================================================================
@@ -334,7 +317,7 @@ def _score_row(spec, joined, summary, gen_w, observed, t1, t2) -> dict:
 
 
 def _timing_coverage(spec, gen_w, observed, t1, t2) -> float:
-    combined = _combine_prefix(observed, gen_w, t1, t2)
+    combined = combine_prefix(observed, gen_w, t1, t2)
     tte_gen = time_to_event(combined, GEN_KEYS, spec.tte)
     horizon = spec.frame.value if spec.frame.kind != "by_age" else spec.frame.value
     td = rep.timing_distribution(tte_gen, run_keys=_RUN_KEYS, seed_col="seed", horizon=horizon)
@@ -397,7 +380,7 @@ def _score_aggregate_target(
     if persons is None and target != "ppr":
         logger.warning("backtesting: skipping aggregate target %r — needs persons", target)
         return
-    combined = _combine_prefix(observed, gen_w, t1, t2)
+    combined = combine_prefix(observed, gen_w, t1, t2)
     gen_births = births(combined, GEN_KEYS, birth_event=birth_token)
     gen_spans = observation_spans(combined, GEN_KEYS)
     obs_births = births(observed, OBS_KEYS, birth_event=birth_token)

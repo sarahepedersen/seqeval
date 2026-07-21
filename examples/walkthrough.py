@@ -40,6 +40,7 @@ from tests import synthetic as S  # noqa: E402
 
 from seqeval.arms import backtesting as backtesting_arm  # noqa: E402
 from seqeval.arms import descriptives as descriptives_arm  # noqa: E402
+from seqeval.arms import forecasting as forecasting_arm  # noqa: E402
 from seqeval.arms._common import OutputWriter  # noqa: E402
 from seqeval.config import (  # noqa: E402
     load_config,
@@ -47,11 +48,13 @@ from seqeval.config import (  # noqa: E402
     resolve_outcomes,
     resolve_probability_outcomes,
     resolve_replicates,
+    resolve_rules,
 )
 from seqeval.core import outcomes as O  # noqa: E402
 from seqeval.core import replicates as R  # noqa: E402
 from seqeval.core.specs import CountQuery, Frame, ReplicateSpec  # noqa: E402
-from seqeval.io.loaders import load_all  # noqa: E402
+from seqeval.io.loaders import Bundle, load_all  # noqa: E402
+from seqeval.units import DAYS_PER_YEAR, completed_years  # noqa: E402
 from seqeval.units import years_to_days as yd  # noqa: E402
 from seqeval.viz._labels import describe_outcome  # noqa: E402
 
@@ -109,7 +112,24 @@ arms:
       - {event: birth, min_events: 1, within: 5, given: p1}
     aggregate_targets: [ccf, ppr]
     min_seeds: 5
+
+  forecasting:
+    windows: all
+    lexis:
+      outcome: first_birth
+      ages: [12, 55]
+      years: [1975, 2040]
+      subgroup_by: []
+    illegal_moves:
+      - {event: birth, max_age: 50}
+      - {event: birth, min_age: 15}
+      - {event: birth, min_spacing: 0.6, severity: warn}
+    seed_stability: {individual: true, aggregate: [ccf]}
 """
+
+# For the forecasting demo we pretend data is only available up to this calendar year, so recent
+# cohorts are incomplete and the model's futures fill the upper-right Lexis triangle.
+_FORECAST_CUTOFF_YEAR = 2015
 
 
 def banner(title: str) -> None:
@@ -128,8 +148,9 @@ def build_demo_data(data_dir: Path, n: int, seeds: int, rng) -> Path:
     observed, persons = S.simulate_cohort(
         n, (1960, 1990), hazards, None, rng, no_event_fraction=1.0
     )
+    # (0, 15) is an early jump-off so the forecasting Lexis has a full future triangle.
     generated = S.simulate_generated(
-        observed, persons, hazards, [(0.0, 25.0), (0.0, 30.0), (0.0, 35.0)], seeds, rng
+        observed, persons, hazards, [(0.0, 15.0), (0.0, 25.0), (0.0, 30.0), (0.0, 35.0)], seeds, rng
     )
     observed.to_parquet(data_dir / "observed.parquet", index=False)
     generated.to_parquet(data_dir / "generated.parquet", index=False)
@@ -139,6 +160,59 @@ def build_demo_data(data_dir: Path, n: int, seeds: int, rng) -> Path:
     ).to_csv(data_dir / "events.csv", index=False)
     (data_dir / "config.yaml").write_text(_CONFIG_YAML)
     return data_dir / "config.yaml"
+
+
+# =================================================================================================
+# forecasting: pretend "today" is a cutoff year so recent cohorts are incomplete
+# =================================================================================================
+def _calendar_truncate(observed, persons, cutoff_year):
+    """Keep observed rows in calendar years <= cutoff and add a no-event marker at the cutoff age.
+
+    Simulates a real data snapshot: cohorts young enough that the cutoff falls mid-life are
+    incomplete, so the forecasting arm's model-generated futures fill the rest of the Lexis surface.
+    """
+    birth_year = observed["person_id"].map(persons.set_index("person_id")["birth_year"])
+    year = birth_year.to_numpy() + completed_years(observed["age"].to_numpy())
+    kept = observed[year <= cutoff_year].copy()
+
+    # a marker at each person's age when the cutoff is reached (capped at the fertile upper bound)
+    cutoff_age = np.clip(
+        (cutoff_year - persons["birth_year"].to_numpy()) * DAYS_PER_YEAR, 0, yd(50)
+    )
+    markers = pd.DataFrame(
+        {
+            "person_id": persons["person_id"].to_numpy(),
+            "age": np.rint(cutoff_age).astype(np.int32),
+            "event": "no_event",
+        }
+    )
+    markers = markers[markers["age"] > 0]
+    out = pd.concat([kept, markers], ignore_index=True)
+    out["event"] = out["event"].astype("category")
+    return out.sort_values(["person_id", "age"]).reset_index(drop=True)
+
+
+def forecasting_section(cfg, bundle, out) -> list[str]:
+    """Run the forecasting arm on a calendar-truncated view so the Lexis forecast region shows."""
+    truncated = _calendar_truncate(bundle.observed, bundle.persons, _FORECAST_CUTOFF_YEAR)
+    fc_bundle = Bundle(
+        observed=truncated,
+        generated=bundle.generated,
+        persons=bundle.persons,
+        event_defs=bundle.event_defs,
+        events=bundle.events,
+    )
+    writer = OutputWriter(base_dir=out, arm="forecasting", model=cfg.model.name)
+    forecasting_arm.run(
+        fc_bundle,
+        cfg.arms.forecasting,
+        writer,
+        outcomes=resolve_outcomes(cfg),
+        rules=resolve_rules(cfg),
+        replicate_spec=resolve_replicates(cfg),
+        cohort_width=cfg.cohort_width,
+    )
+    return [p.name for p in writer.written if p.suffix == ".png"], writer
 
 
 # =================================================================================================
@@ -348,7 +422,19 @@ def main() -> None:
     print("\nheadline scores (one row per window x outcome x condition):")
     print(headline.to_string())
 
-    banner("5. REPLICATE ENGINE (02b): reliability band at n=5 vs n=50 + convergence")
+    banner("5. FORECASTING ARM (05): Lexis completion, illegal moves, seed stability")
+    fc_figs, fc_writer = forecasting_section(cfg, bundle, out)
+    vr = pd.read_parquet(fc_writer.dir / "violation_rates.parquet")
+    gen_rate = vr.loc[vr["source"] == "generated", "rate_per_event"].mean()
+    obs_rate = vr.loc[vr["source"] == "observed", "rate_per_event"].mean()
+    print(f"wrote {len(fc_figs)} figures + Lexis/violations/seed-stability tables to forecasting/")
+    print(
+        f"illegal-move rate (per event): model {gen_rate:.4f} vs observed baseline {obs_rate:.4f} "
+        "(observed rate contextualizes data artifacts)"
+    )
+    print(f"Lexis forecast region fills calendar years > {_FORECAST_CUTOFF_YEAR}")
+
+    banner("6. REPLICATE ENGINE (02b): reliability band at n=5 vs n=50 + convergence")
     rep_dir = out / "replicates"
     rep_dir.mkdir(exist_ok=True)
     rep_figs = replicate_showcase(bundle, hazards, rep_dir)
@@ -364,6 +450,9 @@ def main() -> None:
     lines.append("\n## Backtesting figures (`backtesting/`)\n")
     for name in bt_figs:
         lines.append(f"- `backtesting/{name}`")
+    lines.append("\n## Forecasting figures (`forecasting/`)\n")
+    for name in fc_figs:
+        lines.append(f"- `forecasting/{name}`")
     lines.append("\n## Replicate-engine figures (`replicates/`)\n")
     for name, caption in rep_figs:
         lines.append(f"- `replicates/{name}` — {caption}")
@@ -380,12 +469,13 @@ def main() -> None:
           data/          demo artifacts + config.yaml
           descriptives/  KM / ASFR / CCF / PPR / life-table tables + figures
           backtesting/   probabilities / calibration / scores / coverage tables + reliability figs
+          forecasting/   Lexis surfaces + violations + seed-stability tables + Lexis heatmap
           replicates/    reliability_band.png, convergence_ccf.png
           INDEX.md       a listing of all figures and tables
 
         Implemented and exercised here: 01 data layer, 02 core outcomes,
-        02b replicate engine, 03 descriptives, 04 backtesting. Not yet built:
-        05 forecasting, 06 reporting/CLI.
+        02b replicate engine, 03 descriptives, 04 backtesting, 05 forecasting.
+        Not yet built: 06 reporting/CLI.
     """)
     )
 

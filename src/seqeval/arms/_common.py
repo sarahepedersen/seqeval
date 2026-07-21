@@ -12,8 +12,33 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
+
+_GEN_COLS = ["person_id", "seed", "age_start", "age_stop", "age", "event"]
+
+
+def combine_prefix(observed: pd.DataFrame, gen_w: pd.DataFrame, t1: int, t2: int) -> pd.DataFrame:
+    """Full life course per replicate: observed prefix (age <= t2) x seeds + the generated future.
+
+    The generated file holds only ``age > t2`` rows; a framed outcome (absolute ordinal) or any
+    aggregate metric needs each replicate's whole sequence. Replicating the observed prefix across
+    the window's seeds and concatenating the generated future lets 02's evaluators and 03's metrics
+    run unchanged on generated runs (shared by the backtesting and forecasting arms).
+    """
+    persons = gen_w["person_id"].unique()
+    prefix = observed.loc[
+        observed["person_id"].isin(persons) & (observed["age"] <= t2),
+        ["person_id", "age", "event"],
+    ]
+    seeds = pd.DataFrame({"seed": gen_w["seed"].unique().astype(np.int32)})
+    pref = prefix.merge(seeds, how="cross")
+    pref["age_start"] = np.int32(t1)
+    pref["age_stop"] = np.int32(t2)
+    combined = pd.concat([pref[_GEN_COLS], gen_w[_GEN_COLS]], ignore_index=True)
+    combined["event"] = combined["event"].astype("category")
+    return combined
 
 
 @dataclass

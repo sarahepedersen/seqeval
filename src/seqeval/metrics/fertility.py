@@ -18,7 +18,7 @@ from seqeval.core.outcomes import exposure
 from seqeval.core.slicing import AgeBins, bin_ages, calendar_year, cohort_bins
 from seqeval.units import DAYS_PER_YEAR, years_to_days
 
-__all__ = ["ccf", "asfr", "ppr", "tfr", "FERTILE_UPPER_YEARS"]
+__all__ = ["ccf", "asfr", "ppr", "tfr", "lexis_surface", "FERTILE_UPPER_YEARS"]
 
 #: Upper edge of the childbearing window (years); a cohort is "complete" once observed to here.
 FERTILE_UPPER_YEARS = 50.0
@@ -192,6 +192,66 @@ def ppr(
     out = pd.DataFrame(rows)
     out["ppr"] = np.where(out["n_at_risk"] > 0, out["n_progressed"] / out["n_at_risk"], np.nan)
     return out.sort_values([*extra_by, "parity_from"]).reset_index(drop=True)
+
+
+def lexis_surface(
+    births: pd.DataFrame,
+    spans: pd.DataFrame,
+    persons: pd.DataFrame,
+    *,
+    occurrence: int = 1,
+    bins: AgeBins,
+    year_range: tuple[int, int],
+    extra_by: tuple[str, ...] = (),
+    basis: Literal["period", "cohort"] = "period",
+    cohort_width: int = 1,
+) -> pd.DataFrame:
+    """Occurrence-specific fertility intensity per cell — the Lexis surface, period or cohort basis.
+
+    Numerator: the ``occurrence``-th births in the cell (``births`` must carry the ``order`` column
+    from :func:`seqeval.core.outcomes.births`). Denominator: exposure in the cell
+    (:func:`~seqeval.core.outcomes.exposure`), person-days converted to person-years at the rate
+    step. ``basis="period"`` gives ``(year, age_bin)`` cells (calendar time, limited to
+    ``year_range``); ``basis="cohort"`` gives ``(cohort, age_bin)`` cells (``cohort_width``-year
+    bands), the view that shows each cohort's age profile and its forecasted completion. Returns
+    ``[dim, age_bin, *extra_by, rate, n_events, person_years]`` where ``dim`` is ``year`` or
+    ``cohort``. Reuses births/exposure — never re-derives them.
+    """
+    extra_by = list(extra_by)
+    dim = "year" if basis == "period" else "cohort"
+
+    b = births[births["order"] == occurrence].merge(
+        persons[["person_id", "birth_year"]], on="person_id", how="left"
+    )
+    b["age_bin"] = bin_ages(b["age"], bins)
+    if basis == "period":
+        b[dim] = calendar_year(b)
+    else:
+        b = b.merge(cohort_bins(persons, width=cohort_width).reset_index(), on="person_id")
+    num = (
+        b.dropna(subset=["age_bin"])
+        .groupby([*extra_by, dim, "age_bin"], observed=True)
+        .size()
+        .reset_index(name="n_events")
+    )
+
+    exp = exposure(spans, bins=bins, persons=persons, by_year=(basis == "period"))
+    if basis == "cohort":
+        exp = exp.merge(cohort_bins(persons, width=cohort_width).reset_index(), on="person_id")
+    den = exp.groupby([*extra_by, dim, "age_bin"], observed=True)["person_days"].sum().reset_index()
+
+    out = den.merge(num, on=[*extra_by, dim, "age_bin"], how="left")
+    # A Lexis cell exists only where there is exposure — drop zero-exposure cells so that
+    # observed/forecast completion is not blocked by empty observed cells (the period/by-year
+    # exposure already drops these; the cohort/non-year path does not).
+    out = out[out["person_days"] > 0]
+    out["n_events"] = out["n_events"].fillna(0).astype(np.int64)
+    out["person_years"] = out["person_days"] / DAYS_PER_YEAR
+    out["rate"] = np.where(out["person_years"] > 0, out["n_events"] / out["person_years"], np.nan)
+    if basis == "period":
+        out = out[(out[dim] >= year_range[0]) & (out[dim] <= year_range[1])]
+    cols = [dim, "age_bin", *extra_by, "rate", "n_events", "person_years"]
+    return out[cols].sort_values([*extra_by, dim, "age_bin"]).reset_index(drop=True)
 
 
 def tfr(asfr_period: pd.DataFrame, *, extra_by: tuple[str, ...] = ()) -> pd.DataFrame:
