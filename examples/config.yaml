@@ -1,0 +1,82 @@
+# seqeval reference config — the experiment specification (00 section 5).
+#
+# Every value below is in YEARS; seqeval converts to canonical integer days internally.
+# Paths are resolved relative to THIS file's directory.
+#
+# Quickstart (see README):
+#   python examples/make_demo_data.py --out examples/data   # writes data/*.parquet + events.csv
+#   seqeval validate examples/config.yaml                   # sanity-check before computing
+#   seqeval run examples/config.yaml                        # -> results/report.html
+
+model:
+  name: demo_perfect_model          # stamped as a `model` column into every result table, so
+                                    # cross-model comparison is a pd.concat over tidy tables
+
+data:
+  observed: data/observed.parquet    # defines the analysis population (no filtering native to `seqeval`)
+  generated: data/generated.parquet  # model trajectories; omit for a descriptives-only run
+  persons: data/persons.parquet      # OPTIONAL index of sample, demographic data + optional static covariates; omit → cohort/period/Lexis skipped with a warning
+  event_definitions: data/events.csv # OPTIONAL mapping of sequence events to natural language; omit → raw tokens used as plot labels
+  age_unit: days                     # days | years (the unit of the parquet age columns)
+
+events:                              # alias → raw token map; every arm references the alias
+  birth: BIRTH
+
+persons:
+  covariates: [education, region]    # extra `persons` columns to load (for subgroup analysis)
+  cohort_width: 5                    # birth-cohort band width (years), shared across arms
+
+replicates:                          # how seed-stochasticity becomes probability (00 section 3b)
+  estimator: jeffreys                # jeffreys | mle | laplace
+  interval: jeffreys                 # jeffreys | wilson
+  level: 0.95
+  min_replicates: 5                  # warn below this — the probability grid is coarser than 1/n
+  bootstrap: {n: 200, seed: 7}       # seed-bootstrap CIs on aggregate metrics; n: 0 disables
+  convergence_curve: true            # emit metric-vs-n-seeds diagnostics
+
+outcomes:                           
+  first_birth:  {event: birth, n: 1} # first BIRTH event token (from alias)
+  second_birth: {event: birth, n: 2, origin: first_birth} # parity 1->2 transition 
+
+arms:
+  descriptives:                      # past / observed
+    kaplan_meier: [first_birth, second_birth] # define based on time-specific outcomes 
+    fertility:
+      ccf: true                      # completed cohort fertility (aggregated from generated sequences)
+      asfr: [period, cohort]         # age-specific fertility rates 
+      ppr: {max_parity: 6}           # parity progression ratios
+    life_table: {max_parity: 6}      # converts sequences into life table format (state)
+    stratify_by: [cohort]
+
+  backtesting:                       # past / generated
+    windows: all                     # every (age_start, age_stop) censoring range in the `generated` dataset; can specify subsets in list
+    conditions:                      # count predicates evaluated on the observed prefix
+      - {name: p0, event: birth, max_count: 0}
+      - {name: p1, event: birth, min_count: 1, max_count: 1}
+    probability_outcomes:
+      - {outcome: first_birth,  by_age: 35, given: p0}   # who enters motherhood by 35?
+      - {outcome: second_birth, within_origin: 5, given: p1}  # 2nd birth within 5y of 1st?
+      - {event: birth, min_events: 1, within: 5}         # any birth in 5y after jump-off?
+      - {event: birth, min_events: 1, within: 5, given: p1}
+    aggregate_targets: [ccf, asfr_cohort, ppr, km:first_birth, km:second_birth]
+    min_seeds: 5
+
+  forecasting:                       # future / generated
+    windows: all
+    lexis:
+      outcome: first_birth
+      ages: [15, 45]
+      years: [1960, 2035]
+      subgroup_by: []
+    illegal_moves:                   # assessment of demographic plausibility (either disallowed or should be predicted infrequently)
+      - {event: birth, max_age: 45}
+      - {event: birth, min_age: 15}
+      - {event: birth, min_spacing: 0.6, severity: warn}
+      - {event: birth, max_count: 10, severity: warn}
+    seed_stability:                 # assessment variation in predictions when generating the same sequence across seeds 
+      individual: true
+      aggregate: [ccf]
+
+output:
+  dir: results/
+  figure_format: png

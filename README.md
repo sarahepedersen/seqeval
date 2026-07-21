@@ -22,44 +22,6 @@ This is enabled by two design principles:
 - **Probabilities are recovered empirically.** Because models are black boxes, per-outcome
   probabilities come from replicate runs, rather than any internal model architecture: for each `(person, window)`, inference is run under multiple `seed`s and the fraction of replicates in which an outcome occurs estimates its probability — evaluating the generative system *as actually used* (temperature, top-k, and all). Smoothed estimators (Jeffreys) and empirical logits are the default; Monte-Carlo error is quantified and corrected rather than ignored.
 
-## How `seqeval` represents time 
-
-The canonical internal unit for age and duration is **integer days** (`int32`) — exact integer
-arithmetic keeps event ordering and window membership out of float-equality traps. Everything
-**user-facing is in years**: all YAML config values and every figure axis. Conversion is confined
-to three places (loaders, config resolvers, viz/report) and `units.py` is the single boundary.
-
-## Install
-
-```bash
-# from the repo root
-pip install -e ".[dev]"      # runtime deps + pytest/ruff
-```
-
-Requires Python ≥ 3.11. Core dependencies: pandas, pyarrow, numpy, pydantic, pandera, matplotlib,
-scikit-learn, scipy, pyyaml.
-
-## Start-up Guide
-
-The config file **is** the experiment specification: an arm runs if and only if its block is
-present (presence = enabled). See a sample config: [`examples/delphi_config.yaml`](examples/delphi_config.yaml). 
-
-```bash
-# End-to-end walkthrough on a synthetic "perfect model" — writes every figure the
-# implemented layers can produce, plus an INDEX.md to browse them.
-python examples/walkthrough.py --out examples/walkthrough_output
-
-# Run all three arms against real sequences.
-python examples/run_delphi_eval.py --config examples/delphi_config.yaml --out results/
-
-# Read-only inspector for a directory of parquet artifacts (schemas, dtypes, window × seed grid).
-python examples/inspect_data.py --data path/to/data_dir
-```
-
-Programmatically, every arm exposes a `run(bundle, cfg, out, *, ...resolved specs...)` entry point
-consuming resolved (day-valued) objects from `config.resolve_*`; arms never touch year-valued
-config numbers directly.
-
 ## Data model
 
 Three parquet artifacts (see `00_architecture.md` §4 for full schemas):
@@ -68,8 +30,63 @@ Three parquet artifacts (see `00_architecture.md` §4 for full schemas):
 - **generated** — many per person, keyed by run: `+ seed, age_start, age_stop` (generated rows
   have `age > age_stop`).
 - **persons** (optional) — `person_id, birth_year, sex, ...covariates`; required for
-  cohort/period/Lexis analyses. Absent → those are skipped with a logged warning; age-only metrics
-  still run.
+  cohort/period/Lexis analyses. When absent, those are skipped with a logged warning; age-only metrics still run.
 
-`event` values are kept raw (whatever the model emitted); an optional event-definitions CSV maps
-them to human labels for plots only, never during computation.
+One option `.csv` file:
+- **labels** (optional) -- `token_id`, `label`; if model does not represent events in natural language, provides a mapping for downstream analysis with event definitions (used for plots only, not computation)
+
+## How `seqeval` represents time 
+
+The canonical internal unit for age and duration is **integer days** (`int32`) — exact integer
+arithmetic keeps event ordering and window membership out of float-equality traps. Everything
+**in config files is in years**. Conversion is confined to three places (loaders, config resolvers, viz/report); `units.py` is the single boundary.
+
+## Install `seqeval` package 
+
+```bash
+# from the repo root
+pip install -e ".[dev]"      # runtime deps + pytest/ruff
+```
+
+- Requires Python ≥ 3.11. 
+- Core dependencies: pandas, pyarrow, numpy, pydantic, pandera, matplotlib,
+scikit-learn, scipy, pyyaml.
+
+## Start-up Guide
+
+The config file is the experiment specification: an arm runs if its block is present. See the fully-commented reference [`examples/config.yaml`](examples/config.yaml).
+
+
+Example quickstart with synthetic data: 
+```bash
+# 1. Write a demo dataset (observed/generated/persons/events) next to the reference config.
+python examples/make_demo_data.py --out examples/data
+
+# 2. Sanity-check config + artifacts WITHOUT computing anything: prints the population,
+#    the window × replicate grid.
+seqeval validate examples/config.yaml
+
+# 3. Run descriptive, backtesting, and forecasting arms → results/manifest.json + results/report.html (openable in browser).
+seqeval run examples/config.yaml
+
+# Re-build the HTML report from an existing results dir.
+seqeval report results/
+```
+
+`seqeval run` validates implicitly, executes present arms in order (descriptives → backtesting →
+forecasting), isolates arm failures (one failing arm logs a traceback and the rest still run, with
+a nonzero exit code), and writes a reproducibility **manifest** (seqeval version, content-hash of
+every input, resolved config, per-arm status/outputs, and the verbatim warning list) plus a
+self-contained HTML **report**. Use `--arm <name>` to run a single arm, `--force` to overwrite an
+existing results dir, and `--verbose` for DEBUG logging.
+
+Other example scripts:
+
+```bash
+# End-to-end walkthrough on a synthetic "perfect model" — writes every figure the
+# implemented layers can produce, plus an INDEX.md to browse them.
+python examples/walkthrough.py --out examples/walkthrough_output
+
+# Read-only inspector for a directory of parquet artifacts (schemas, dtypes, window × seed grid).
+python examples/inspect_data.py --data path/to/data_dir
+```

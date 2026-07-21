@@ -18,3 +18,7 @@ tests/.cache/
 # Demo / generated data
 examples/data/
 examples/walkthrough_output/
+
+# Run outputs (manifest + report + result tables/figures)
+results/
+examples/results/
