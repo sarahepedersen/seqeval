@@ -224,6 +224,10 @@ def _score_probability_outcome(
         conv = _convergence(gen_eval, obs_eval, replicate_spec)
         if conv is not None:
             acc["convergence"].append(_stamp(conv, label))
+            out.figure(
+                f"convergence_{spec.name}_w{int(round(days_to_years(t2)))}",
+                viz_calibration.plot_convergence(conv),
+            )
 
 
 def _evaluate_observed(spec, observed, spans_obs, t2) -> pd.DataFrame:

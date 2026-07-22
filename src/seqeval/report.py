@@ -215,8 +215,78 @@ def _table_html(path: Path) -> str:
     return caption + table
 
 
-def _run_summary_section(manifest: dict) -> str:
-    """Run summary: model, version, timestamp, and data coverage."""
+def _coverage_summary(results_dir: Path) -> str:
+    """Compact backtest-evaluability table for the run summary (read from coverage.parquet).
+
+    Surfaces the shrinking denominator behind every backtest score: per outcome × window ×
+    condition, how many persons actually contribute a score (``n_evaluable``) versus how many were
+    excluded because the answer was fixed at jump-off (``n_settled``) or the sequence ran out before
+    the frame closed (``n_uncovered``). Cells with zero evaluable persons are flagged — they produce
+    no score, reliability, or convergence figure. Returns ``""`` when the arm did not run.
+    """
+    path = results_dir / "backtesting" / "coverage.parquet"
+    if not path.exists():
+        return ""
+    df = pd.read_parquet(path, engine="pyarrow")
+    if df.empty:
+        return ""
+
+    if {"age_start_years", "age_stop_years"} <= set(df.columns):
+        window = df["age_start_years"].astype(str) + "–" + df["age_stop_years"].astype(str)
+    else:  # fall back to converting the day-valued columns
+        to_y = lambda d: round(days_to_years(int(d)), 1)  # noqa: E731
+        window = df["age_start"].map(to_y).astype(str) + "–" + df["age_stop"].map(to_y).astype(str)
+
+    view = pd.DataFrame(
+        {
+            "outcome": df.get("outcome", ""),
+            "window (y)": window,
+            "given": df.get("condition", "-"),
+            "n_condition": df.get("n_condition"),
+            "n_evaluable": df.get("n_evaluable"),
+            "n_settled": df.get("n_settled"),
+            "n_uncovered": df.get("n_uncovered"),
+            "seeds (med)": df.get("n_seed_median"),
+        }
+    ).sort_values(["outcome", "window (y)", "given"], kind="stable")
+
+    n_total = len(view)
+    n_empty = int((view["n_evaluable"] == 0).sum())
+    shown = view.head(_MAX_TABLE_ROWS)
+
+    header = "".join(f"<th>{html.escape(c)}</th>" for c in shown.columns)
+    body_rows = []
+    for row in shown.itertuples(index=False):
+        cells = []
+        for col, val in zip(shown.columns, row, strict=True):
+            empty = col == "n_evaluable" and (pd.isna(val) or val == 0)
+            klass = ' class="flag"' if empty else ""
+            cells.append(f"<td{klass}>{html.escape(str(val))}</td>")
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    note = (
+        '<p class="muted"><code>n_evaluable</code> persons actually contribute a score; '
+        "<code>n_settled</code> were already determined in the observed prefix and "
+        "<code>n_uncovered</code> ran out of observation before the frame closed. "
+    )
+    if n_empty:
+        note += (
+            f'<span class="flag">{n_empty} cell(s)</span> have no evaluable persons — no score is '
+            "produced there. "
+        )
+    if n_total > _MAX_TABLE_ROWS:
+        note += (
+            f"Showing {_MAX_TABLE_ROWS} of {n_total} cells; full table in the Backtesting section. "
+        )
+    note += "</p>"
+    return (
+        "<h3>Backtest coverage (evaluability)</h3>"
+        f"<table><tr>{header}</tr>{''.join(body_rows)}</table>{note}"
+    )
+
+
+def _run_summary_section(manifest: dict, results_dir: Path) -> str:
+    """Run summary: model, version, timestamp, data coverage, and backtest evaluability."""
     cov = manifest.get("coverage", {})
     rows = [
         ("Model", manifest.get("model", {}).get("name", "")),
@@ -250,6 +320,8 @@ def _run_summary_section(manifest: dict) -> str:
             "meaningful.</p>"
         )
         out.append(f"<h3>Windows × replicates</h3><table>{''.join(wr)}</table>{note}")
+
+    out.append(_coverage_summary(results_dir))
     return "\n".join(out)
 
 
@@ -290,7 +362,7 @@ def build_report(results_dir: str | Path) -> Path:
     results_dir = Path(results_dir)
     manifest = read_manifest(results_dir) or {}
 
-    sections = [_run_summary_section(manifest)]
+    sections = [_run_summary_section(manifest, results_dir)]
     present_arms = []
     for arm in ARM_ORDER:
         arm_dir = results_dir / arm

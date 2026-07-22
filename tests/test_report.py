@@ -28,6 +28,26 @@ def test_build_report_has_all_sections(demo_config, tmp_path):
     assert ".parquet" in html
 
 
+def test_run_summary_has_coverage_summary(demo_config, tmp_path):
+    """The run-summary section carries the backtest-evaluability table, before the arm sections."""
+    results = _run(demo_config, tmp_path / "results")
+    html = (results / report.REPORT_NAME).read_text()
+    summary = html.split('<h2 id="descriptives"')[0]  # everything before the first arm section
+    assert "Backtest coverage (evaluability)" in summary
+    assert "n_evaluable" in summary
+
+
+def test_coverage_summary_absent_without_backtesting(demo_config, tmp_path):
+    """No backtesting arm dir → no coverage summary, and the report still builds."""
+    results = _run(demo_config, tmp_path / "results")
+    import shutil
+
+    shutil.rmtree(results / "backtesting")
+    html = report.build_report(results).read_text()
+    assert "Backtest coverage" not in html
+    assert 'id="summary"' in html
+
+
 def test_report_embeds_figures_and_caps_tables(demo_config, tmp_path):
     results = _run(demo_config, tmp_path / "results")
     # a many-row table exists; report shows it capped with a "showing N" note
