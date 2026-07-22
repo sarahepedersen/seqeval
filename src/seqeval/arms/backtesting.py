@@ -218,16 +218,13 @@ def _score_probability_outcome(
     )
 
     scores = _score_row(spec, joined, summary, gen_w, observed, t1, t2)
-    acc["scores"].append(_stamp_scores(scores, label))
+    cis = _score_cis(gen_eval, obs_eval, replicate_spec)
+    acc["scores"].append(_stamp_scores(scores, label, cis))
 
     if replicate_spec.convergence_curve:
         conv = _convergence(gen_eval, obs_eval, replicate_spec)
         if conv is not None:
             acc["convergence"].append(_stamp(conv, label))
-            out.figure(
-                f"convergence_{spec.name}_w{int(round(days_to_years(t2)))}",
-                viz_calibration.plot_convergence(conv),
-            )
 
 
 def _evaluate_observed(spec, observed, spans_obs, t2) -> pd.DataFrame:
@@ -318,6 +315,52 @@ def _score_row(spec, joined, summary, gen_w, observed, t1, t2) -> dict:
     if isinstance(spec, FramedOutcome):
         scores["timing_coverage"] = _timing_coverage(spec, gen_w, observed, t1, t2)
     return scores
+
+
+def _score_cis(gen_eval, obs_eval, spec) -> pd.DataFrame | None:
+    """95% seed-bootstrap CIs for the ML metrics using **all** seeds, as ``[metric, ci_lo, ci_hi]``.
+
+    Resamples seed labels with replacement (``spec.bootstrap_n`` draws) and recomputes each metric,
+    giving the Monte-Carlo (replicate) uncertainty on the headline scores. Returns ``None`` when
+    bootstrapping is disabled or the truth column is single-valued (no metric is defined).
+    """
+    if spec.bootstrap_n <= 0:
+        return None
+    truth = obs_eval.loc[obs_eval["evaluable"], ["person_id", "occurred"]].rename(
+        columns={"occurred": "y_true"}
+    )
+    truth["y_true"] = truth["y_true"].astype(int)
+    if truth["y_true"].nunique() < 2:
+        return None
+
+    metrics = ["roc_auc", "brier_corrected", "ece", "log_loss"]
+
+    def stat_fn(df: pd.DataFrame) -> pd.DataFrame:
+        summ = rep.replicate_summary(df, run_keys=_RUN_KEYS)
+        est = rep.estimate_probability(summ, spec=spec)
+        j = est.merge(truth, on="person_id", how="inner")
+        if j.empty or j["y_true"].nunique() < 2:
+            return pd.DataFrame({m: [np.nan] for m in metrics})
+        return pd.DataFrame(
+            {
+                "roc_auc": [ml.roc_auc(j)],
+                "brier_corrected": [ml.brier(j)["corrected"]],
+                # match _score_row's estimator exactly (quantile bins) so the point sits on the
+                # same statistic as its CI.
+                "ece": [ml.ece(ml.calibration_table(j, strategy="quantile"))],
+                "log_loss": [ml.log_loss(j)],
+            }
+        )
+
+    boot = rep.seed_bootstrap(
+        gen_eval,
+        seed_col="seed",
+        stat_fn=stat_fn,
+        n_boot=spec.bootstrap_n,
+        rng=np.random.default_rng(spec.bootstrap_seed),
+        value_cols=metrics,
+    )
+    return boot[["metric", "ci_lo", "ci_hi"]]
 
 
 def _timing_coverage(spec, gen_w, observed, t1, t2) -> float:
@@ -516,6 +559,11 @@ def _stamp(df: pd.DataFrame, label: dict) -> pd.DataFrame:
     return out
 
 
-def _stamp_scores(scores: dict, label: dict) -> pd.DataFrame:
-    rows = [{**label, "metric": k, "value": v} for k, v in scores.items()]
-    return pd.DataFrame(rows)
+def _stamp_scores(scores: dict, label: dict, cis: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Long scores rows ``[*label, metric, value, ci_lo, ci_hi]`` (CIs NaN if not bootstrapped)."""
+    df = pd.DataFrame([{**label, "metric": k, "value": v} for k, v in scores.items()])
+    if cis is not None:
+        return df.merge(cis, on="metric", how="left")
+    df["ci_lo"] = np.nan
+    df["ci_hi"] = np.nan
+    return df

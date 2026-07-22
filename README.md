@@ -18,7 +18,7 @@ Our evaluation is targeted toward studying fertility events, so specific metrics
 This is enabled by two design principles:  
 
 - **One standardized sequence format.** Observed and generated sequences share a single long-format
-  `DataFrame`; generated rows just carry extra key columns `(seed, age_start, age_stop)`. These describe the (1) seed used to generate the sequence, (2) the bounds of the input sequence utilized in prediction (e.g., if the model sees an observed sequence from the age of 0 to 30 versus 20 to 30). A sidecar `person` file provides relevant covariate or demographic information (birth year, etc.) for subgroups in downstream analysis. This enables us to compare models solely on their outputs. 
+  `DataFrame`: `(person_id, age, event)`. Each row is an age-time-stamped event in `person_id`'s sequence. Generated rows just carry extra key columns `(seed, age_start, age_stop)`. These describe the (1) seed used to generate the sequence, (2) the bounds of the input sequence utilized in prediction (e.g., if the model sees an observed sequence from the age of 0 to 30 versus 20 to 30). A sidecar `person` file provides relevant covariate or demographic information (birth year, etc.) for subgroups in downstream analysis. This enables us to compare models solely on their outputs. 
 - **Probabilities are recovered empirically.** Because models are black boxes, per-outcome
   probabilities come from replicate runs, rather than any internal model architecture: for each `(person, window)`, inference is run under multiple `seed`s and the fraction of replicates in which an outcome occurs estimates its probability — evaluating the generative system *as actually used* (temperature, top-k, and all). Smoothed estimators (Jeffreys) and empirical logits are the default; Monte-Carlo error is quantified and corrected rather than ignored.
 
@@ -60,7 +60,7 @@ The config file is the experiment specification: an arm runs if its block is pre
 Example quickstart with synthetic data: 
 ```bash
 # 1. Write a demo dataset (observed/generated/persons/events) next to the reference config.
-python examples/make_demo_data.py --out examples/data
+python examples/make_demo_data.py --n 10000 --seeds 10 --out examples/data
 
 # 2. Sanity-check config + artifacts WITHOUT computing anything: prints the population,
 #    the window × replicate grid.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 import yaml
@@ -168,6 +170,43 @@ def test_arm_writes_scores_and_tables(tmp_path):
     # one row per (window, outcome, condition, metric)
     assert not scores.duplicated(["age_stop", "outcome", "condition", "metric"]).any()
     assert {"roc_auc", "brier_corrected", "ece", "log_loss"} <= set(scores["metric"])
+
+
+def test_scores_carry_seed_bootstrap_cis_when_enabled(tmp_path):
+    """With bootstrap on, scores gain finite ``ci_lo``/``ci_hi`` for the ML metrics (all seeds)."""
+    cfg_yaml = _CFG_YAML.replace("bootstrap: {n: 0, seed: 7}", "bootstrap: {n: 50, seed: 7}")
+    cfg = Config.model_validate(yaml.safe_load(cfg_yaml))
+    rng = np.random.default_rng(0)
+    h = S.default_hazards()
+    obs, pers = S.simulate_cohort(1200, (1960, 1985), h, None, rng, no_event_fraction=1.0)
+    gen = S.simulate_generated(obs, pers, h, [(0.0, 25.0), (0.0, 30.0)], 10, rng)
+    bundle = Bundle(
+        observed=obs, generated=gen, persons=pers, event_defs=None,
+        events=EventConfig(birth="birth"),
+    )
+    out = OutputWriter(base_dir=tmp_path, arm="backtesting", model="perfect")
+    BT.run(
+        bundle,
+        cfg.arms.backtesting,
+        out,
+        outcomes=resolve_outcomes(cfg),
+        conditions=resolve_conditions(cfg),
+        prob_outcomes=resolve_probability_outcomes(cfg, resolve_outcomes(cfg)),
+        replicate_spec=resolve_replicates(cfg),
+        cohort_width=5,
+    )
+    scores = pd.read_parquet(out.dir / "scores.parquet")
+    assert {"ci_lo", "ci_hi"} <= set(scores.columns)
+    ml_rows = scores[scores["metric"].isin(["roc_auc", "brier_corrected", "ece", "log_loss"])]
+    finite = ml_rows.dropna(subset=["ci_lo", "ci_hi"])
+    assert len(finite) > 0  # at least some cells produced a bootstrap CI
+    assert (finite["ci_lo"] <= finite["ci_hi"]).all()
+
+    # reliability is emitted as one figure per (outcome, window) — names carry a `_w<age>` suffix.
+    figs = {p.name for p in out.written if p.suffix == ".png"}
+    reliab = [f for f in figs if f.startswith("reliability_")]
+    assert reliab
+    assert all(re.search(r"_w\d", f) for f in reliab)
 
 
 def test_coverage_reports_settled_for_framed(tmp_path):
