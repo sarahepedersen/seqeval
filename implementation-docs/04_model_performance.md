@@ -11,10 +11,13 @@
 
 ```
 src/seqeval/metrics/ml.py
+src/seqeval/metrics/baseline.py
 src/seqeval/arms/backtesting.py
 src/seqeval/viz/calibration.py
 src/seqeval/viz/backtest.py
+src/seqeval/viz/baseline.py
 tests/test_ml.py
+tests/test_baseline.py
 tests/test_arm_backtesting.py
 ```
 
@@ -144,6 +147,56 @@ A tidy frame `scores.parquet`: one row per (window, outcome, condition, metric) 
 table that answers the spec's motivating questions ("is a second birth easier to predict than a
 first?", "how does predictability change moving the jump-off from 25 to 30?").
 
+## 2.4 The ASFR baseline — what the scores are read *against*
+
+A Brier score of 0.23 is not interpretable on its own. `metrics/baseline.py` supplies the reference
+every score is judged against: the probability of the **same** binary outcome implied by nothing
+but the observed age-specific fertility rates. Enabled by `arms.backtesting.baseline`.
+
+**Construction (three steps, all reusing existing layers).**
+
+1. **Schedule** — `asfr_schedule` is `fertility.asfr(mode="period")` on the observed file: births
+   per person-year in each `(age_bin, calendar year)` cell. Cells resting on less than
+   `min_person_years` of exposure are blanked (a rate on a handful of person-years is noise).
+   Estimated **once per run**, written as `baseline_asfr_schedule.parquet`.
+2. **Freeze at the jump-off** — `frozen_rates` forward-fills the schedule along calendar time only.
+   Person *i* reaching the jump-off in year *yᵢ* is priced with the rates at *yᵢ*, held constant
+   forward; an age bin with no rate at *yᵢ* falls back to the most recent **earlier** year that has
+   one. Nothing after *yᵢ* is ever read — this is the no-hindsight guarantee, and it is what makes
+   the baseline a genuine forecast-time reference rather than an in-sample oracle.
+3. **Integrate over the frame** — the outcome's frame gives each person an age interval `(lo, hi]`
+   (`frame_intervals`, mirroring `evaluate_framed` / `evaluate_count` semantics exactly). Summing
+   frozen rate × exposure over the age bins in that interval gives a cumulative intensity `Λ`, and
+   `p_base = P(N ≥ m)` for `N ~ Poisson(Λ)`, where `m` is how many further events the outcome needs
+   — `min_events` for a count query; for an ordinal framed outcome, the occurrence minus the
+   person's count of that event in the observed prefix (the prefix is information the model sees
+   too; only the *rates* are population-average).
+
+**The schedule is deliberately plain**: births over exposure by age and year, no parity split. Two
+30-year-olds in 1990 get the same rate whether they have zero children or two. That is the point —
+any lift the model shows over it is lift from knowing the individual.
+
+**Structural requirement.** A rate for `(age a, year y)` exists only if some cohort is aged `a` in
+year `y`, so the panel needs birth cohorts that overlap in calendar time. With a single cohort no
+age above the jump-off has any history and every person is unpriceable. Exposure with no rate at or
+before the person's jump-off year is reported per person as `unmatched_fraction`, warned about in
+aggregate, and — above `max_unmatched_fraction` — dropped from **both** sides of the comparison
+rather than scored against a rate-zero artifact.
+
+**Outputs.**
+
+- `baseline_individual.parquet` — one row per scored person: the model's `p_hat` beside `p_base`,
+  `y_true`, `lambda_hat`, `n_needed`, and the exposure accounting. This is the individual-level
+  comparison table.
+- `baseline_scores.parquet` — one row per (window, outcome, condition, metric):
+  `[model, baseline, delta, skill, n_compared, n_unpriceable]`. `skill = 1 − model/baseline` for
+  loss metrics (0 = no better than the schedule, negative = worse); AUC and R² report `delta` only.
+  Both columns are computed on the **same** persons, so the comparison has one denominator.
+
+Note when reading Brier/ECE: the model's probabilities live on a `1/n_seeds` grid while the
+baseline's are continuous, so with few seeds the baseline can look better calibrated purely from
+granularity. `brier_corrected` is the fairer comparison.
+
 ## 3. Viz
 
 Axes in years (`days_to_years` at plot time, per 00 §3).
@@ -155,6 +208,10 @@ Axes in years (`days_to_years` at plot time, per 00 §3).
   AUC/corrected-Brier/RMSE with bootstrap CI bands, one line per outcome); (b) observed vs
   generated overlay plots reusing 03 viz (KM curves with generated seed-band: median + IQR
   across seeds).
+- `viz/baseline.py`: (a) reliability overlay — model and baseline curves on one axes; (b)
+  per-individual scatter of model vs baseline probability, split by what actually happened
+  (jittered onto the `k/n` grid, class means marked); (c) lift within equal-count baseline bins —
+  observed rate vs both predictions; (d) skill vs jump-off age across windows.
 
 ## 4. Tests
 
@@ -179,6 +236,14 @@ arm.)
   given: p1}` and `{event: birth, min_events: 1, within: 5, given: p1}` agree (with parity
   capped at 1 they are the same question), while the unconditioned count query differs from any
   framed outcome — guards against re-conflating the two primitives.
+- **Baseline** (`tests/test_baseline.py`): the schedule recovers a known flat hazard; the frozen
+  lookup carries rates forward and never backward; inflating every cell after the latest jump-off
+  year leaves every `p_base` bit-identical (the no-hindsight guarantee); Poisson pricing matches
+  the closed form `1 − exp(−rW)` for a constant hazard; frame intervals and `n_needed` match the
+  evaluators' semantics including `within_origin` origin-unknown drops; a single-cohort panel is
+  reported as unpriceable rather than silently priced; skill is 0 when model = baseline, positive
+  when it wins, negative when it loses. Arm wiring is tested in `tests/test_arm_backtesting.py`
+  (tables written, one population on both sides, graceful skip without persons).
 - Arm smoke test on demo data: files exist; `scores.parquet` has one row per configured
   (window × outcome × condition × metric) with a `model` column.
 

@@ -35,12 +35,15 @@ from seqeval.core.slicing import AgeBins, align_jumpoff_to_event, condition_on_c
 from seqeval.core.specs import Condition, CountQuery, FramedOutcome, ReplicateSpec, TTESpec
 from seqeval.io.loaders import Bundle
 from seqeval.io.schema import GEN_KEYS, OBS_KEYS
+from seqeval.metrics import baseline as bl
 from seqeval.metrics import fertility as fe
 from seqeval.metrics import ml
 from seqeval.metrics import survival as sv
 from seqeval.units import days_to_years
 from seqeval.viz import backtest as viz_backtest
+from seqeval.viz import baseline as viz_baseline
 from seqeval.viz import calibration as viz_calibration
+from seqeval.viz import fertility as viz_fertility
 from seqeval.viz._labels import describe_outcome
 
 logger = logging.getLogger("seqeval")
@@ -90,8 +93,12 @@ def run(
             "aggregate_error",
             "coverage",
             "convergence",
+            "baseline_individual",
+            "baseline_scores",
         )
     }
+
+    baseline_ctx = _build_baseline(bundle, cfg, out)
 
     for t1, t2 in windows:
         gen_w = bundle.generated[
@@ -119,6 +126,7 @@ def run(
                 acc,
                 out,
                 bundle.label,
+                baseline_ctx,
             )
 
         for target in cfg.aggregate_targets:
@@ -151,6 +159,146 @@ def run(
                 f"metric_vs_jumpoff_{metric}",
                 viz_backtest.plot_metric_vs_jumpoff(tables["scores"], metric=metric),
             )
+    if "baseline_scores" in tables and tables["baseline_scores"]["age_stop"].nunique() > 1:
+        out.figure(
+            "baseline_skill_vs_jumpoff",
+            viz_baseline.plot_skill_vs_jumpoff(tables["baseline_scores"], metric="brier"),
+        )
+
+
+# =================================================================================================
+# ASFR baseline (04 section 2.3)
+# =================================================================================================
+class _Baseline:
+    """What the per-outcome scorer needs to price a person under the observed ASFR schedule."""
+
+    def __init__(
+        self,
+        schedule: pd.DataFrame,
+        persons: pd.DataFrame,
+        bins: AgeBins,
+        max_unmatched_fraction: float,
+    ) -> None:
+        self.schedule = schedule
+        self.persons = persons
+        self.bins = bins
+        self.max_unmatched_fraction = max_unmatched_fraction
+
+
+def _build_baseline(bundle: Bundle, cfg: BacktestingConfig, out: OutputWriter) -> _Baseline | None:
+    """Estimate the observed ASFR schedule once and write it (table + surface figure), or skip.
+
+    The schedule is period ASFR over the configured age range, computed from the observed file only.
+    It is estimated once for the whole run: freezing happens per person at scoring time (each person
+    reads the row of rates at their own jump-off year), so no per-window refit is needed.
+    """
+    bcfg = cfg.baseline
+    if bcfg is None or not bcfg.asfr:
+        return None
+    if bundle.persons is None:
+        logger.warning("backtesting: ASFR baseline skipped — needs a persons file (birth_year)")
+        return None
+    try:
+        birth_token = bundle.token("birth")
+    except KeyError:
+        logger.warning(
+            "backtesting: ASFR baseline skipped — no 'birth' event alias is declared under events:"
+        )
+        return None
+
+    bins = AgeBins.from_years(*bcfg.age_range, bcfg.age_bin_width)
+    schedule = bl.asfr_schedule(
+        bundle.observed,
+        bundle.persons,
+        birth_event=birth_token,
+        bins=bins,
+        min_person_years=bcfg.min_person_years,
+    )
+    if schedule.empty or schedule["asfr"].notna().sum() == 0:
+        logger.warning(
+            "backtesting: ASFR baseline skipped — the observed data yields no usable rate cells "
+            "in the age range %s",
+            bcfg.age_range,
+        )
+        return None
+
+    out.frame("baseline_asfr_schedule", schedule)
+    out.figure("baseline_asfr_surface", viz_fertility.plot_asfr_surface(schedule, dim="year"))
+    logger.info(
+        "backtesting: ASFR baseline schedule — %d cells over years %d–%d, ages %g–%g",
+        int(schedule["asfr"].notna().sum()),
+        int(schedule["year"].min()),
+        int(schedule["year"].max()),
+        *bcfg.age_range,
+    )
+    return _Baseline(schedule, bundle.persons, bins, bcfg.max_unmatched_fraction)
+
+
+def _model_scores(joined: pd.DataFrame) -> dict[str, float]:
+    """The model-side statistics the baseline comparison pairs against, on one given population."""
+    return {
+        "brier_corrected": ml.brier(joined)["corrected"],
+        "mse": ml.mse(joined),
+        "r2": ml.r2(joined),
+        "ece": ml.ece(ml.calibration_table(joined, strategy="quantile")),
+        "roc_auc": ml.roc_auc(joined),
+    }
+
+
+def _score_baseline(spec, observed, joined, t2, ctx, label, acc, out, desc) -> None:
+    """Score the ASFR baseline on the same persons as the model and record the comparison.
+
+    Both sides are restricted to the persons the baseline can price *and* the model scored, so the
+    two columns of every comparison row describe the same population — a skill number computed
+    across different denominators would be meaningless.
+    """
+    probs = bl.baseline_probability(
+        observed,
+        ctx.persons,
+        spec,
+        schedule=ctx.schedule,
+        jumpoff=t2,
+        bins=ctx.bins,
+        person_ids=joined["person_id"].unique(),
+    )
+    if probs.empty:
+        return
+    ind = joined.merge(probs, on="person_id", how="inner")
+    # Persons whose frame is mostly un-priceable (no rate history at or before their jump-off year)
+    # are dropped from *both* sides rather than scored against a rate-zero artifact.
+    priceable = ind["unmatched_fraction"] <= ctx.max_unmatched_fraction
+    n_unpriceable = int((~priceable).sum())
+    ind = ind[priceable]
+    if ind.empty or ind["y_true"].nunique() < 2:
+        logger.debug("baseline %s: no comparable population at jump-off %d", spec.name, t2)
+        return
+
+    acc["baseline_individual"].append(_stamp(ind, label))
+
+    comparison = bl.compare(_model_scores(ind), bl.score(ind))
+    comparison["n_compared"] = len(ind)
+    comparison["n_unpriceable"] = n_unpriceable
+    acc["baseline_scores"].append(_stamp(comparison, label))
+
+    jumpoff_y = int(round(days_to_years(t2)))
+    cal_model = ml.calibration_table(ind, n_bins=10, strategy="uniform")
+    cal_base = ml.calibration_table(
+        ind[["p_base", "y_true"]].rename(columns={"p_base": "p_hat"}),
+        n_bins=10,
+        strategy="uniform",
+    )
+    out.figure(
+        f"baseline_reliability_{spec.name}_w{jumpoff_y}",
+        viz_baseline.plot_reliability_overlay(cal_model, cal_base, title=desc),
+    )
+    out.figure(
+        f"baseline_individual_{spec.name}_w{jumpoff_y}",
+        viz_baseline.plot_individual_comparison(ind, title=f"Model vs ASFR baseline — {desc}"),
+    )
+    out.figure(
+        f"baseline_lift_{spec.name}_w{jumpoff_y}",
+        viz_baseline.plot_lift_by_baseline(ind, title=f"Lift over the ASFR baseline — {desc}"),
+    )
 
 
 # =================================================================================================
@@ -169,6 +317,7 @@ def _score_probability_outcome(
     acc,
     out,
     label_fn,
+    baseline_ctx=None,
 ) -> None:
     given = spec.given
     cond_persons = cond_sets[given] if given else all_persons
@@ -220,6 +369,9 @@ def _score_probability_outcome(
     # Timed outcomes also get a waiting-time calibration scatter (predicted vs observed duration).
     if isinstance(spec, FramedOutcome):
         _emit_timing_calibration(spec, gen_w, observed, t1, t2, out, desc)
+
+    if baseline_ctx is not None:
+        _score_baseline(spec, observed, joined, t2, baseline_ctx, label, acc, out, desc)
 
     scores = _score_row(spec, joined, summary, gen_w, observed, t1, t2)
     cis = _score_cis(gen_eval, obs_eval, replicate_spec)
@@ -588,6 +740,10 @@ def _km_at_grid(df, keys, spec, by) -> pd.DataFrame:
 # =================================================================================================
 def _needs_births(cfg: BacktestingConfig) -> bool:
     return bool(cfg.aggregate_targets)
+
+
+def _baseline_enabled(cfg: BacktestingConfig) -> bool:
+    return cfg.baseline is not None and cfg.baseline.asfr
 
 
 def _cell_label(t1, t2, outcome, condition) -> dict:

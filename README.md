@@ -13,14 +13,15 @@ Our evaluation is targeted toward studying fertility events, so specific metrics
 | | past | future |
 |---|---|---|
 | **observed** | **descriptives**: life tables, Kaplan–Meier, CCF / ASFR / PPR | *(impossible)* |
-| **generated** | **backtesting**: ML metrics (calibration, ROC-AUC, Brier) from Monte-Carlo empirical probabilities, with varying jump-off points and count-conditioning (parity) | **forecasting**: Lexis surfaces for incomplete cohorts, illegal-move detection, seed stability |
+| **generated** | **backtesting**: ML metrics (calibration, ROC-AUC, Brier) from Monte-Carlo empirical probabilities, with varying jump-off points and count-conditioning (parity), scored against a demographic ASFR baseline | **forecasting**: Lexis surfaces for incomplete cohorts, illegal-move detection, seed stability |
 
-This is enabled by two design principles:  
+This is enabled by three design principles:  
 
 - **One standardized sequence format.** Observed and generated sequences share a single long-format
   `DataFrame`: `(person_id, age, event)`. Each row is an age-time-stamped event in `person_id`'s sequence. Generated rows just carry extra key columns `(seed, age_start, age_stop)`. These describe the (1) seed used to generate the sequence, (2) the bounds of the input sequence utilized in prediction (e.g., if the model sees an observed sequence from the age of 0 to 30 versus 20 to 30). A sidecar `person` file provides relevant covariate or demographic information (birth year, etc.) for subgroups in downstream analysis. This enables us to compare models solely on their outputs. 
 - **Probabilities are recovered empirically.** Because models are black boxes, per-outcome
   probabilities come from replicate runs, rather than any internal model architecture: for each `(person, window)`, inference is run under multiple `seed`s and the fraction of replicates in which an outcome occurs estimates its probability — evaluating the generative system *as actually used* (temperature, top-k, and all). Smoothed estimators (Jeffreys) and empirical logits are the default; Monte-Carlo error is quantified and corrected rather than ignored.
+- **Scores are read against a demographic baseline.** A Brier score means nothing on its own, so backtesting compares every per-person probability to the one implied by the observed **age-specific fertility rates** alone: period ASFR (age × calendar year) estimated from `observed`, frozen at each person's own jump-off year and held constant forward, then integrated over the outcome's age frame as a Poisson intensity — `p = P(N ≥ m)`, `N ~ Poisson(Λ)`. Because the freeze reads no rate cell later than a person's jump-off, it is a genuine forecast-time reference rather than an in-sample oracle. The headline is a **skill** score (`1 − model/baseline` for loss metrics, where 0 means the model has learned nothing an actuarial table does not already say), and alongside it a per-person table pairing each individual's model probability with their baseline one — so you can see *where* the model adds information, not only whether it does on average.
 
 ## Data model
 

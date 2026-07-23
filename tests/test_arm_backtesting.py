@@ -217,3 +217,102 @@ def test_coverage_reports_settled_for_framed(tmp_path):
     # are settled (answer already in the observed prefix) and excluded.
     unconditioned = cov[(cov["outcome"] == "first_birth_by_age_40y") & (cov["condition"] == "-")]
     assert unconditioned["n_settled"].sum() > 0
+
+
+# =================================================================================================
+# ASFR baseline wiring (04 section 2.3)
+# =================================================================================================
+_BASELINE_YAML = _CFG_YAML.replace(
+    "    min_seeds: 5",
+    "    baseline: {asfr: true, age_range: [15, 50], age_bin_width: 1}\n    min_seeds: 5",
+)
+
+
+def _run_arm_with_baseline(tmp_path, n_seeds=10):
+    cfg = Config.model_validate(yaml.safe_load(_BASELINE_YAML))
+    rng = np.random.default_rng(0)
+    h = S.default_hazards()
+    obs, pers = S.simulate_cohort(1200, (1960, 1985), h, None, rng, no_event_fraction=1.0)
+    gen = S.simulate_generated(obs, pers, h, [(0.0, 25.0), (0.0, 30.0)], n_seeds, rng)
+    bundle = Bundle(
+        observed=obs,
+        generated=gen,
+        persons=pers,
+        event_defs=None,
+        events=EventConfig(birth="birth"),
+    )
+    out = OutputWriter(base_dir=tmp_path, arm="backtesting", model="perfect")
+    BT.run(
+        bundle,
+        cfg.arms.backtesting,
+        out,
+        outcomes=resolve_outcomes(cfg),
+        conditions=resolve_conditions(cfg),
+        prob_outcomes=resolve_probability_outcomes(cfg, resolve_outcomes(cfg)),
+        replicate_spec=resolve_replicates(cfg),
+        cohort_width=5,
+    )
+    return out
+
+
+def test_baseline_tables_are_written_when_configured(tmp_path):
+    out = _run_arm_with_baseline(tmp_path)
+    names = {p.name for p in out.written}
+    assert {
+        "baseline_asfr_schedule.parquet",
+        "baseline_scores.parquet",
+        "baseline_individual.parquet",
+    } <= names
+
+    scores = pd.read_parquet(out.dir / "baseline_scores.parquet")
+    assert {"metric", "model", "baseline", "delta", "skill", "n_compared"} <= set(scores.columns)
+    assert {"brier", "mse", "r2", "ece", "roc_auc"} == set(scores["metric"])
+    # skill is a loss-metric notion only; AUC/R² report a plain difference.
+    assert scores.loc[scores["metric"] == "roc_auc", "skill"].isna().all()
+    assert scores.loc[scores["metric"] == "brier", "skill"].notna().any()
+
+
+def test_baseline_scores_the_same_persons_on_both_sides(tmp_path):
+    """Model and baseline columns must describe one population, or the skill means nothing."""
+    out = _run_arm_with_baseline(tmp_path)
+    ind = pd.read_parquet(out.dir / "baseline_individual.parquet")
+    scores = pd.read_parquet(out.dir / "baseline_scores.parquet")
+
+    counted = ind.groupby(["outcome", "condition", "age_stop"]).size().rename("n")
+    claimed = scores.groupby(["outcome", "condition", "age_stop"])["n_compared"].first()
+    pd.testing.assert_series_equal(counted, claimed, check_names=False, check_index_type=False)
+    # every scored person carries both a model and a baseline probability
+    assert ind["p_hat"].notna().all()
+    assert ind["p_base"].notna().all()
+
+
+def test_baseline_is_skipped_without_persons(tmp_path):
+    """No persons file means no calendar year, hence no schedule — skipped, not crashed."""
+    cfg = Config.model_validate(yaml.safe_load(_BASELINE_YAML))
+    rng = np.random.default_rng(0)
+    h = S.default_hazards()
+    obs, pers = S.simulate_cohort(400, (1960, 1985), h, None, rng, no_event_fraction=1.0)
+    gen = S.simulate_generated(obs, pers, h, [(0.0, 25.0)], 5, rng)
+    bundle = Bundle(
+        observed=obs, generated=gen, persons=None, event_defs=None,
+        events=EventConfig(birth="birth"),
+    )
+    out = OutputWriter(base_dir=tmp_path, arm="backtesting", model="perfect")
+    BT.run(
+        bundle,
+        cfg.arms.backtesting,
+        out,
+        outcomes=resolve_outcomes(cfg),
+        conditions=resolve_conditions(cfg),
+        prob_outcomes=resolve_probability_outcomes(cfg, resolve_outcomes(cfg)),
+        replicate_spec=resolve_replicates(cfg),
+        cohort_width=5,
+    )
+    names = {p.name for p in out.written}
+    assert "scores.parquet" in names  # the rest of the arm still runs
+    assert not any(n.startswith("baseline_") for n in names)
+
+
+def test_no_baseline_block_means_no_baseline_output(tmp_path):
+    out = _run_arm(tmp_path)
+    assert not any(p.name.startswith("baseline_") for p in out.written)

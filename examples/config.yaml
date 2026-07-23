@@ -58,6 +58,11 @@ arms:
       - {event: birth, min_events: 1, within: 5}         # any birth in 5y after jump-off?
       - {event: birth, min_events: 1, within: 5, given: p1}
     aggregate_targets: [ccf, asfr_cohort, ppr, km:first_birth, km:second_birth]
+    baseline:                        # demographic reference the model's probabilities are scored against
+      asfr: true                     # period ASFR (age × calendar year) estimated from `observed`
+      age_range: [15, 50]            # childbearing ages the schedule covers / intensities integrate over
+      age_bin_width: 1               # age-bin width (years) of the schedule
+      min_person_years: 1            # rate cells thinner than this fall back to the last earlier year
     min_seeds: 5
 
   forecasting:                       # future / generated

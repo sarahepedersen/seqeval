@@ -125,6 +125,48 @@ scale-free companion to MSE.
 *(Log loss was removed from the backtest score set; the `log_loss` function remains in `metrics/ml.py`
 if needed.)*
 
+### 2.3 ASFR baseline probability and skill — `metrics/baseline.py`
+
+*What it answers:* how much of the model's score is the model, and how much is just knowing the
+person's age and the calendar year.
+
+**The baseline probability.** For person *i* with jump-off age `t2` and an outcome frame spanning
+ages `(lo, hi]`:
+
+```
+yᵢ  = birth_yearᵢ + completed_years(t2)          # the person's jump-off calendar year
+Λᵢ  = Σ_{age bins a in (lo, hi]}  asfr(a, yᵢ) × exposure_years(a)
+pᵢ  = P(N ≥ m),   N ~ Poisson(Λᵢ)                # m = further events the outcome needs
+```
+
+`asfr(a, y)` is the period ASFR estimated from the **observed** file (births / person-years in cell
+`(a, y)`), forward-filled along calendar time so an age bin with no rate in year `yᵢ` uses the most
+recent earlier year. No cell after `yᵢ` is ever read, so the baseline is a forecast-time reference,
+not an in-sample one. With `m = 1` this reduces to the familiar `p = 1 − exp(−Λ)`.
+
+`m` is `min_events` for a count query; for a framed ordinal outcome ("the k-th birth") it is `k`
+minus the person's count of that event in the observed prefix, floored at 1 — the prefix is
+information the model is given too.
+
+**Skill.** For loss-type metrics (Brier, MSE, ECE):
+
+```
+skill = 1 − metric_model / metric_baseline
+```
+
+**0** = no better than the age-and-year schedule, **1** = perfect, **negative** = worse than the
+schedule. AUC and R² are reported as a plain difference `model − baseline` instead. The model side
+of the Brier row is `brier_corrected` (the baseline is deterministic and carries no finite-seed
+noise to correct); the MSE row pairs the model's raw-rate MSE against the same baseline value.
+
+*Denominator.* Both columns are computed on exactly the persons the baseline can price **and** the
+model scored. Persons more than `max_unmatched_fraction` of whose frame exposure has no rate history
+at or before their jump-off year (the panel's left truncation) are dropped from both sides and
+counted in `n_unpriceable`.
+
+*Caveat when reading Brier/ECE:* the model's `p̂` lives on a `1/n_seeds` grid, the baseline's on a
+continuum, so with few seeds the baseline can appear better calibrated from granularity alone.
+
 ### 2.4 Calibration table + ECE — `calibration_table`, `ece` (`metrics/ml.py`)
 
 *Reliability table.* Bin the runs by `p̂` (default 10 **quantile** bins; uniform bins available). For
@@ -259,6 +301,7 @@ A cell with `n_evaluable = 0` produces no score and is flagged in the report.
 |---|---|
 | Per-run probability, estimators, logit/variance | `core/replicates.py` (`replicate_summary`, `estimate_probability`) |
 | AUC, Brier, log-loss, ECE, calibration table, timing coverage | `metrics/ml.py` |
+| ASFR baseline probability + skill | `metrics/baseline.py` |
 | Brier finite-seed correction | `core/replicates.py` (`brier_noise_correction`) |
 | Calibration null band | `core/replicates.py` (`null_calibration_band`) |
 | Aggregate CIs / convergence | `core/replicates.py` (`seed_bootstrap`, `convergence_curve`) |

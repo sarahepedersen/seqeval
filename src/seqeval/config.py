@@ -269,6 +269,38 @@ class DescriptivesConfig(_Strict):
     stratify_by: list[str] = []
 
 
+class BaselineConfig(_Strict):
+    """``arms.backtesting.baseline`` — the ASFR reference the model is judged against.
+
+    The schedule is period ASFR (births per person-year by age and calendar year) estimated from the
+    *observed* file, and each person is priced with the rates frozen at their own jump-off year, so
+    no cell later than the jump-off is ever read. Requires a ``persons`` file (calendar year needs
+    ``birth_year``) and a ``birth`` event alias.
+    """
+
+    asfr: bool = True
+    #: Age range (years) over which the schedule is built and every intensity integrated.
+    age_range: tuple[float, float] = (15.0, 50.0)
+    #: Age-bin width (years) for the schedule.
+    age_bin_width: float = 1.0
+    #: Rate cells resting on less than this much exposure (person-years) are treated as missing and
+    #: fall back to the most recent earlier year that has a rate.
+    min_person_years: float = 1.0
+    #: Drop from the comparison any person more than this share of whose frame exposure falls in
+    #: (age, year) cells with no rate at or before their jump-off year — the panel's left
+    #: truncation. Their baseline would be an artifact of missing history, not a demographic rate.
+    max_unmatched_fraction: float = 0.5
+
+    @model_validator(mode="after")
+    def _ordered_range(self) -> BaselineConfig:
+        lo, hi = self.age_range
+        if hi <= lo:
+            raise ValueError(
+                f"arms.backtesting.baseline.age_range: upper bound {hi} must exceed lower {lo}"
+            )
+        return self
+
+
 class BacktestingConfig(_Strict):
     """``arms.backtesting`` block (past/generated)."""
 
@@ -276,6 +308,7 @@ class BacktestingConfig(_Strict):
     conditions: list[ConditionConfig] = []
     probability_outcomes: list[ProbabilityOutcomeConfig] = []
     aggregate_targets: list[str] = []
+    baseline: BaselineConfig | None = None
     min_seeds: int = 5
 
 

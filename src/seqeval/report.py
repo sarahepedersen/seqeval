@@ -212,9 +212,7 @@ def _to_years_display(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for col in _DAY_COLUMNS:
         if col in df.columns:
-            df[col] = df[col].map(
-                lambda d: round(days_to_years(int(d)), 1) if pd.notna(d) else d
-            )
+            df[col] = df[col].map(lambda d: round(days_to_years(int(d)), 1) if pd.notna(d) else d)
             df = df.rename(columns={col: f"{col} (y)"})
     return df
 
@@ -418,9 +416,11 @@ def _backtest_metrics_table(path: Path, *, bootstrap_n: int | None = None) -> st
             )
             cells = "".join(f"<td>{cell(r, m)}</td>" for m in keys)
             rows.append(f"<tr>{head}<td>{r.age_stop_years:g}</td>{cells}</tr>")
-    header = "<tr><th>outcome (condition)</th><th>jump-off (y)</th>" + "".join(
-        f"<th>{label}</th>" for _, label in metric_cols
-    ) + "</tr>"
+    header = (
+        "<tr><th>outcome (condition)</th><th>jump-off (y)</th>"
+        + "".join(f"<th>{label}</th>" for _, label in metric_cols)
+        + "</tr>"
+    )
     ci_note = ""
     if has_ci:
         reps = (
@@ -513,12 +513,94 @@ def _timing_calibration_section(arm_dir: Path) -> str:
     )
 
 
+def _baseline_section(arm_dir: Path) -> str:
+    """Model vs the observed-ASFR baseline: skill table plus the per-outcome comparison figures."""
+    path = arm_dir / "baseline_scores.parquet"
+    if not path.exists():
+        return ""
+    df = pd.read_parquet(path, engine="pyarrow")
+    if df.empty:
+        return ""
+
+    shown = ("brier", "roc_auc", "ece")
+    keep = df[df["metric"].isin(shown)].copy()
+    rows = []
+    for (outcome, jumpoff), grp in keep.groupby(["outcome", "age_stop_years"], sort=True):
+        by_metric = grp.set_index("metric")
+        cells = []
+        for metric in shown:
+            if metric not in by_metric.index:
+                cells.append("<td></td><td></td><td></td>")
+                continue
+            r = by_metric.loc[metric]
+            skill = r["skill"]
+            if pd.notna(skill):
+                klass = "" if skill > 0 else ' class="flag"'
+                verdict = f"<td{klass}>{skill:+.3f}</td>"
+            else:
+                delta = r["delta"]
+                klass = "" if pd.notna(delta) and delta > 0 else ' class="flag"'
+                verdict = f"<td{klass}>{delta:+.3f}</td>" if pd.notna(delta) else "<td></td>"
+            cells.append(f"<td>{r['model']:.3f}</td><td>{r['baseline']:.3f}</td>{verdict}")
+        n = int(grp["n_compared"].iloc[0])
+        rows.append(
+            f"<tr><td class='rowhdr'>{html.escape(str(outcome))}</td>"
+            f"<td>{jumpoff:g}</td><td>{n}</td>{''.join(cells)}</tr>"
+        )
+    if not rows:
+        return ""
+
+    head = (
+        "<tr><th rowspan='2'>outcome (condition)</th><th rowspan='2'>jump-off (y)</th>"
+        "<th rowspan='2'>n</th>"
+        "<th colspan='3'>Brier ↓</th><th colspan='3'>AUC ↑</th><th colspan='3'>ECE ↓</th></tr>"
+        "<tr><th>model</th><th>baseline</th><th>skill</th>"
+        "<th>model</th><th>baseline</th><th>Δ</th>"
+        "<th>model</th><th>baseline</th><th>skill</th></tr>"
+    )
+    note = (
+        '<p class="muted">The baseline is the probability implied by the observed age-specific '
+        "fertility rates alone: period ASFR (age × calendar year) estimated from "
+        "<code>observed</code>, frozen at each person's own jump-off year and held constant "
+        "forward, then integrated over the outcome's age frame as a Poisson intensity. It reads no "
+        "rate cell later than the person's jump-off, so it is a genuine forecast-time reference, "
+        "not an in-sample one. <strong>Skill</strong> is <code>1 − model/baseline</code> for loss "
+        "metrics: 0 means no better than the age-and-year schedule, negative (flagged) is "
+        "worse. "
+        "AUC shows the plain difference. Both columns use the same persons — anyone the "
+        "schedule cannot price (frame exposure with no rate history at or before jump-off) is "
+        "dropped from both sides and counted in "
+        "<code>baseline_scores.n_unpriceable</code>.</p>"
+        '<p class="muted">Read Brier and ECE against the seed count: the model\'s probabilities '
+        "live on a <code>1/n_seeds</code> grid while the baseline's are continuous, so with few "
+        "seeds the baseline can look better calibrated purely from that granularity. The "
+        "seed-corrected Brier is the fairer of the two.</p>"
+    )
+    parts = [
+        f'<h3 id="baseline">Vs the ASFR baseline</h3><table>{head}{"".join(rows)}</table>{note}'
+    ]
+
+    for label, pattern in (
+        ("Skill across jump-offs", "baseline_skill_vs_jumpoff.png"),
+        ("Reliability: model vs baseline", "baseline_reliability_*.png"),
+        ("Per-individual comparison", "baseline_individual_*.png"),
+        ("Lift within baseline bins", "baseline_lift_*.png"),
+        ("Observed ASFR schedule", "baseline_asfr_surface.png"),
+    ):
+        figs = sorted(arm_dir.glob(pattern))
+        if figs:
+            cells = "".join(_figure_html(f) for f in figs)
+            parts.append(f"<h4>{html.escape(label)}</h4><div class='figrow'>{cells}</div>")
+    return "\n".join(parts)
+
+
 def _backtesting_section(arm_dir: Path, *, bootstrap_n: int | None = None) -> str:
     """Backtesting: metrics table, coverage, gen-vs-obs overlays, and calibration subsections."""
     parts = ['<h2 id="backtesting">Backtesting</h2>']
     for block in (
         _backtest_metrics_table(arm_dir / "scores.parquet", bootstrap_n=bootstrap_n),
         _coverage_summary(arm_dir.parent),
+        _baseline_section(arm_dir),
         _gen_vs_obs_section(arm_dir),
         _calibration_subsections(arm_dir),
         _timing_calibration_section(arm_dir),
@@ -600,12 +682,7 @@ def build_report(results_dir: str | Path) -> Path:
     manifest = read_manifest(results_dir) or {}
 
     # Bootstrap-resample count backs both the backtest-metric CIs and the seed-stability CIs.
-    boot_n = (
-        manifest.get("config_resolved", {})
-        .get("replicates", {})
-        .get("bootstrap", {})
-        .get("n")
-    )
+    boot_n = manifest.get("config_resolved", {}).get("replicates", {}).get("bootstrap", {}).get("n")
     arm_renderers = {
         "descriptives": _descriptives_section,
         "backtesting": lambda d: _backtesting_section(d, bootstrap_n=boot_n),
