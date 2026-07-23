@@ -20,14 +20,14 @@ data:
   age_unit: days                     # days | years (the unit of the parquet age columns)
 
 events:                              # alias → raw token map; every arm references the alias
-  birth: BIRTH
+  birth: birth
 
 persons:
-  covariates: [education, region]    # extra `persons` columns to load (for subgroup analysis)
+  covariates: []    # extra `persons` columns to load (for subgroup analysis)
   cohort_width: 5                    # birth-cohort band width (years), shared across arms
 
 replicates:                          # how seed-stochasticity becomes probability (00 section 3b)
-  estimator: jeffreys                # jeffreys | mle | laplace
+  estimator: mle                # jeffreys | mle | laplace
   interval: jeffreys                 # jeffreys | wilson
   level: 0.95
   min_replicates: 5                  # warn below this — the probability grid is coarser than 1/n
@@ -45,7 +45,6 @@ arms:
       ccf: true                      # completed cohort fertility (aggregated from generated sequences)
       asfr: [period, cohort]         # age-specific fertility rates 
       ppr: {max_parity: 6}           # parity progression ratios
-    life_table: {max_parity: 6}      # converts sequences into life table format (state)
     stratify_by: [cohort]
 
   backtesting:                       # past / generated
@@ -69,10 +68,9 @@ arms:
       years: [1960, 2035]
       subgroup_by: []
     illegal_moves:                   # assessment of demographic plausibility (either disallowed or should be predicted infrequently)
-      - {event: birth, max_age: 45}
-      - {event: birth, min_age: 15}
-      - {event: birth, min_spacing: 0.6, severity: warn}
-      - {event: birth, max_count: 10, severity: warn}
+      - {event: birth, max_age: 45, name: birth_after_45}
+      - {event: birth, min_age: 15, name: birth_before_15}
+      - {event: birth, min_spacing: 0.6, name: birth_min_spacing}
     seed_stability:                 # assessment variation in predictions when generating the same sequence across seeds 
       individual: true
       aggregate: [ccf]

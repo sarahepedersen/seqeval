@@ -150,6 +150,35 @@ def brier(joined: pd.DataFrame) -> dict[str, float]:
     return {"raw": raw, "corrected": raw - correction}
 
 
+def mse(joined: pd.DataFrame) -> float:
+    """Mean squared error of the raw replicate rate ``k/n`` against the observed outcome.
+
+    Unlike :func:`brier` (which squares the smoothed ``p_hat`` and subtracts a finite-seed
+    correction), this uses the unsmoothed empirical rate — it needs only the replicate counts and
+    the observed outcome, no estimator / logit machinery. Equivalently, the Brier score of the MLE
+    probability ``k/n``.
+    """
+    rate = joined["k"].to_numpy() / joined["n"].to_numpy()
+    y = joined["y_true"].to_numpy()
+    return float(np.mean((rate - y) ** 2))
+
+
+def r2(joined: pd.DataFrame) -> float:
+    """Coefficient of determination of the raw rate ``k/n`` against the observed outcome.
+
+    ``R² = 1 − Σ(y − k/n)² / Σ(y − ȳ)²`` — MSE rescaled by the outcome's own variance. 1 = perfect,
+    0 = no better than predicting the base rate, negative = worse than the base rate. Uses the same
+    unsmoothed rate as :func:`mse`. ``NaN`` when the outcome has no variance (``ȳ`` is 0 or 1).
+    """
+    rate = joined["k"].to_numpy() / joined["n"].to_numpy()
+    y = joined["y_true"].to_numpy().astype(float)
+    ss_tot = float(np.sum((y - y.mean()) ** 2))
+    if ss_tot == 0:
+        return float("nan")
+    ss_res = float(np.sum((y - rate) ** 2))
+    return 1.0 - ss_res / ss_tot
+
+
 def log_loss(joined: pd.DataFrame, *, eps: float = 1e-12) -> float:
     """Binary log-loss on the smoothed ``p_hat`` (defined everywhere; never on raw ``k/n``)."""
     p = np.clip(joined["p_hat"].to_numpy(), eps, 1 - eps)

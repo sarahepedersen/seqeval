@@ -91,6 +91,22 @@ def test_log_loss_matches_manual():
     assert ml.log_loss(joined) == pytest.approx(expected)
 
 
+def test_mse_uses_raw_rate_not_smoothed():
+    # rate = k/n = [0.4, 0.6]; MSE against y = [0, 1] ignores p_hat entirely
+    joined = pd.DataFrame({"p_hat": [0.9, 0.1], "y_true": [0, 1], "k": [2, 3], "n": [5, 5]})
+    expected = np.mean([(0.4 - 0) ** 2, (0.6 - 1) ** 2])
+    assert ml.mse(joined) == pytest.approx(expected)
+
+
+def test_r2_raw_rate_and_degenerate():
+    # rate = [0.4, 0.6], y = [0, 1], ȳ = 0.5 -> SS_res=0.32, SS_tot=0.5 -> R² = 1 - 0.64
+    joined = pd.DataFrame({"y_true": [0, 1], "k": [2, 3], "n": [5, 5]})
+    assert ml.r2(joined) == pytest.approx(1 - 0.32 / 0.5)
+    # no variance in the outcome -> R² undefined
+    flat = pd.DataFrame({"y_true": [1, 1], "k": [2, 3], "n": [5, 5]})
+    assert np.isnan(ml.r2(flat))
+
+
 def test_timing_coverage():
     td = pd.DataFrame({"person_id": [1, 2, 3], "q10": [10, 10, 10], "q90": [20, 20, 20]})
     obs = pd.DataFrame(

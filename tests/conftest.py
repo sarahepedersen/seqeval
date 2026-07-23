@@ -39,7 +39,6 @@ arms:
   descriptives:
     kaplan_meier: [first_birth, second_birth]
     fertility: {ccf: true, asfr: [period, cohort], ppr: {max_parity: 6}}
-    life_table: {max_parity: 6}
     stratify_by: [cohort]
   backtesting:
     windows: all

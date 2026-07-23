@@ -1,4 +1,4 @@
-"""Survival metrics: exact KM on fixtures, life table, key-agnosticism, synthetic convergence."""
+"""Survival metrics: exact KM on fixtures, key-agnosticism, synthetic convergence."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from seqeval.core import outcomes as O
-from seqeval.core.slicing import AgeBins
 from seqeval.core.specs import TTESpec
 from seqeval.metrics import survival as SV
 from seqeval.units import years_to_days as yd
@@ -70,16 +69,3 @@ def test_km_plateau_matches_never_birth_fraction():
     km = SV.kaplan_meier(tte)
     never = 1 - obs[obs["event"] == "birth"]["person_id"].nunique() / pers["person_id"].nunique()
     assert km["survival"].iloc[-1] == pytest.approx(never, abs=0.03)
-
-
-def test_life_table_birth_counts_per_parity():
-    obs = tiny.observed_fixture()
-    births = O.births(obs, OBS_KEYS, birth_event="birth")
-    spans = O.observation_spans(obs, OBS_KEYS)
-    bins = AgeBins.from_years(15, 50, 1)
-    lt = SV.life_table(births, spans, max_parity=4, bins=bins)
-    per_parity = lt.groupby("parity")["births"].sum()
-    assert per_parity.loc[0] == 5  # first births (p1..p5)
-    assert per_parity.loc[1] == 3  # second births (p2, p3, p5)
-    assert per_parity.loc[2] == 1  # third birth (p3)
-    assert (lt["person_years"] > 0).any()

@@ -3,7 +3,7 @@
 Thin orchestration over the shared metric functions (survival, fertility) and the outcome
 extractors (02). Presence of a config block enables the metric (00 section 5 rule 1). When
 ``persons`` is missing, cohort/period metrics are skipped with a logged warning naming exactly what
-was skipped; age-only metrics (KM, PPR, life table) still run.
+was skipped; age-only metrics (KM, PPR) still run.
 """
 
 from __future__ import annotations
@@ -53,15 +53,9 @@ def run(
 
     _run_kaplan_meier(observed, cfg, out, outcomes, strata)
 
-    needs_births = cfg.fertility is not None or cfg.life_table is not None
-    births = None
-    if needs_births:
-        births = births_table(observed, OBS_KEYS, birth_event=bundle.token("birth"))
-
     if cfg.fertility is not None:
+        births = births_table(observed, OBS_KEYS, birth_event=bundle.token("birth"))
         _run_fertility(bundle, cfg, out, births, spans, cohort_width)
-    if cfg.life_table is not None:
-        _run_life_table(cfg, out, births, spans)
 
 
 # =================================================================================================
@@ -154,7 +148,3 @@ def _run_fertility(bundle: Bundle, cfg, out, births, spans, cohort_width: int) -
             out.figure("asfr_cohort", viz_fertility.plot_asfr(table, dim="cohort"))
 
 
-def _run_life_table(cfg, out, births, spans) -> None:
-    bins = AgeBins.from_years(_FERTILE_LO_YEARS, _FERTILE_HI_YEARS, 1.0)
-    lt = sv.life_table(births, spans, max_parity=cfg.life_table.max_parity, bins=bins)
-    out.frame("life_table", lt)

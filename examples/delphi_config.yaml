@@ -44,7 +44,6 @@ arms:
       ccf: true
       asfr: [period, cohort]
       ppr: {max_parity: 6}
-    life_table: {max_parity: 6}
     stratify_by: [cohort]
 
   # past / generated — backtesting at each jump-off window
@@ -70,8 +69,8 @@ arms:
       years: [1950, 2035]
       subgroup_by: []
     illegal_moves:
-      - {event: birth, max_age: 50}
-      - {event: birth, min_age: 12, severity: warn}
+      - {event: birth, max_age: 45}
+      - {event: birth, min_age: 15, severity: warn}
     seed_stability:
       individual: true
       aggregate: [ccf]

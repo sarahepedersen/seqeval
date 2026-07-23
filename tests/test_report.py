@@ -28,13 +28,14 @@ def test_build_report_has_all_sections(demo_config, tmp_path):
     assert ".parquet" in html
 
 
-def test_run_summary_has_coverage_summary(demo_config, tmp_path):
-    """The run-summary section carries the backtest-evaluability table, before the arm sections."""
+def test_backtesting_section_has_coverage(demo_config, tmp_path):
+    """The backtest-evaluability table lives in the backtesting section, with the metrics table."""
     results = _run(demo_config, tmp_path / "results")
     html = (results / report.REPORT_NAME).read_text()
-    summary = html.split('<h2 id="descriptives"')[0]  # everything before the first arm section
-    assert "Backtest coverage (evaluability)" in summary
-    assert "n_evaluable" in summary
+    backtest = html.split('<h2 id="backtesting"')[1].split('<h2 id="forecasting"')[0]
+    assert "Backtest coverage (evaluability)" in backtest
+    assert "n_evaluable" in backtest
+    assert "Backtest metrics" in backtest  # the brier/auc table replaces the line graphs
 
 
 def test_coverage_summary_absent_without_backtesting(demo_config, tmp_path):
@@ -48,11 +49,14 @@ def test_coverage_summary_absent_without_backtesting(demo_config, tmp_path):
     assert 'id="summary"' in html
 
 
-def test_report_embeds_figures_and_caps_tables(demo_config, tmp_path):
+def test_report_embeds_figures_and_samples_persons(demo_config, tmp_path):
     results = _run(demo_config, tmp_path / "results")
-    # a many-row table exists; report shows it capped with a "showing N" note
     html = (results / report.REPORT_NAME).read_text()
-    assert f"showing {report._MAX_TABLE_ROWS}" in html
+    assert "data:image/png;base64," in html
+    # per-person tables (individual seed stability, violations) are down-sampled, not fully dumped
+    forecasting = html.split('<h2 id="forecasting"')[1]
+    assert "sampled persons" in forecasting
+    assert "seed_stability_individual" in forecasting
 
 
 def test_build_report_missing_arm_dir_is_graceful(demo_config, tmp_path):
@@ -78,12 +82,16 @@ def test_build_report_without_manifest(tmp_path):
     """build_report tolerates a results dir with no manifest.json."""
     results = tmp_path / "results"
     (results / "descriptives").mkdir(parents=True)
+    # descriptives renders figures (with a parquet link) — write a figure so the section appears
     pd.DataFrame({"a": [1, 2], "b": [3, 4]}).to_parquet(
         results / "descriptives" / "t.parquet", index=False
     )
+    (results / "descriptives" / "t.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     path = report.build_report(results)
     assert path.exists()
-    assert 'id="descriptives"' in path.read_text()
+    html = path.read_text()
+    assert 'id="descriptives"' in html
+    assert "t.parquet" in html  # linked under the figure
 
 
 def test_manifest_roundtrip(demo_config, tmp_path):

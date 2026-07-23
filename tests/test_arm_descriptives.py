@@ -12,7 +12,6 @@ from seqeval.config import (
     DescriptivesConfig,
     EventConfig,
     FertilityConfig,
-    LifeTableConfig,
     PprConfig,
 )
 from seqeval.core.specs import TTESpec
@@ -43,7 +42,6 @@ def _full_cfg():
     return DescriptivesConfig(
         kaplan_meier=["first_birth", "second_birth"],
         fertility=FertilityConfig(ccf=True, asfr=["period", "cohort"], ppr=PprConfig(max_parity=4)),
-        life_table=LifeTableConfig(max_parity=4),
         stratify_by=["cohort"],
     )
 
@@ -61,7 +59,6 @@ def test_arm_writes_all_files(tmp_path):
         "asfr_cohort.parquet",
         "tfr.parquet",
         "ppr.parquet",
-        "life_table.parquet",
     }
     assert expected <= names
     # Period ASFR is rendered as a heatmap surface plus a TFR-over-time line (not spaghetti lines).
@@ -103,7 +100,7 @@ def test_missing_persons_skips_cohort_metrics(tmp_path, caplog):
 
     names = {p.name for p in out.written}
     # Age-only metrics still run...
-    assert {"km_first_birth.parquet", "ppr.parquet", "life_table.parquet"} <= names
+    assert {"km_first_birth.parquet", "ppr.parquet"} <= names
     # ...cohort/period metrics are skipped.
     assert "ccf.parquet" not in names
     assert "asfr_period.parquet" not in names

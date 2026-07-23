@@ -135,6 +135,7 @@ def run(
                 t2,
                 replicate_spec,
                 acc,
+                out,
             )
 
     tables = {}
@@ -216,6 +217,9 @@ def _score_probability_outcome(
         f"reliability_{spec.name}_w{int(round(days_to_years(t2)))}",
         viz_calibration.plot_reliability(cal, probs=probs, title=desc),
     )
+    # Timed outcomes also get a waiting-time calibration scatter (predicted vs observed duration).
+    if isinstance(spec, FramedOutcome):
+        _emit_timing_calibration(spec, gen_w, observed, t1, t2, out, desc)
 
     scores = _score_row(spec, joined, summary, gen_w, observed, t1, t2)
     cis = _score_cis(gen_eval, obs_eval, replicate_spec)
@@ -310,7 +314,8 @@ def _score_row(spec, joined, summary, gen_w, observed, t1, t2) -> dict:
         "auc_grid_resolution": 1.0 / median_n if median_n else np.nan,
         "brier_raw": brier["raw"],
         "brier_corrected": brier["corrected"],
-        "log_loss": ml.log_loss(joined),
+        "mse": ml.mse(joined),
+        "r2": ml.r2(joined),
     }
     if isinstance(spec, FramedOutcome):
         scores["timing_coverage"] = _timing_coverage(spec, gen_w, observed, t1, t2)
@@ -333,7 +338,7 @@ def _score_cis(gen_eval, obs_eval, spec) -> pd.DataFrame | None:
     if truth["y_true"].nunique() < 2:
         return None
 
-    metrics = ["roc_auc", "brier_corrected", "ece", "log_loss"]
+    metrics = ["roc_auc", "brier_corrected", "mse", "r2", "ece"]
 
     def stat_fn(df: pd.DataFrame) -> pd.DataFrame:
         summ = rep.replicate_summary(df, run_keys=_RUN_KEYS)
@@ -345,10 +350,11 @@ def _score_cis(gen_eval, obs_eval, spec) -> pd.DataFrame | None:
             {
                 "roc_auc": [ml.roc_auc(j)],
                 "brier_corrected": [ml.brier(j)["corrected"]],
+                "mse": [ml.mse(j)],
+                "r2": [ml.r2(j)],
                 # match _score_row's estimator exactly (quantile bins) so the point sits on the
                 # same statistic as its CI.
                 "ece": [ml.ece(ml.calibration_table(j, strategy="quantile"))],
-                "log_loss": [ml.log_loss(j)],
             }
         )
 
@@ -363,13 +369,30 @@ def _score_cis(gen_eval, obs_eval, spec) -> pd.DataFrame | None:
     return boot[["metric", "ci_lo", "ci_hi"]]
 
 
-def _timing_coverage(spec, gen_w, observed, t1, t2) -> float:
+def _timing_tables(spec, gen_w, observed, t1, t2):
+    """``(timing_distribution, observed tte, horizon_days)`` for a framed (timed) outcome."""
     combined = combine_prefix(observed, gen_w, t1, t2)
     tte_gen = time_to_event(combined, GEN_KEYS, spec.tte)
-    horizon = spec.frame.value if spec.frame.kind != "by_age" else spec.frame.value
+    horizon = spec.frame.value
     td = rep.timing_distribution(tte_gen, run_keys=_RUN_KEYS, seed_col="seed", horizon=horizon)
     obs_tte = time_to_event(observed, OBS_KEYS, spec.tte)
+    return td, obs_tte, horizon
+
+
+def _timing_coverage(spec, gen_w, observed, t1, t2) -> float:
+    td, obs_tte, _ = _timing_tables(spec, gen_w, observed, t1, t2)
     return ml.timing_coverage(td, obs_tte)
+
+
+def _emit_timing_calibration(spec, gen_w, observed, t1, t2, out, desc) -> None:
+    """Predicted-vs-observed waiting-time scatter for a timed outcome (one per jump-off)."""
+    td, obs_tte, horizon = _timing_tables(spec, gen_w, observed, t1, t2)
+    out.figure(
+        f"timing_calibration_{spec.name}_w{int(round(days_to_years(t2)))}",
+        viz_backtest.plot_timing_calibration(
+            td, obs_tte, horizon_days=horizon, title=f"Waiting time — {desc}"
+        ),
+    )
 
 
 def _convergence(gen_eval, obs_eval, spec) -> pd.DataFrame | None:
@@ -423,6 +446,7 @@ def _score_aggregate_target(
     t2,
     replicate_spec,
     acc,
+    out,
 ) -> None:
     if persons is None and target != "ppr":
         logger.warning("backtesting: skipping aggregate target %r — needs persons", target)
@@ -452,6 +476,32 @@ def _score_aggregate_target(
     err = ml.aggregate_error(gen_m, obs_m, value_col=value_col, on=on, spec=replicate_spec)
     err.insert(0, "target", target)
     acc["aggregate_error"].append(_stamp(err, _cell_label(t1, t2, target, None)))
+
+    # Generated-vs-observed overlays: the observed "truth" under the generated across-seed band.
+    jumpoff_y = round(days_to_years(t2))
+    if target.startswith("km:"):
+        _emit_km_overlay(target[len("km:") :], combined, observed, outcomes, t2, out)
+    elif target == "ccf":
+        out.figure(
+            f"ccf_overlay_w{jumpoff_y}",
+            viz_backtest.plot_ccf_seed_band(
+                obs_m, gen_m, title=f"CCF by cohort — jump-off {jumpoff_y}y"
+            ),
+        )
+
+
+def _emit_km_overlay(name, combined, observed, outcomes, t2, out) -> None:
+    """Emit the observed KM curve overlaid with the generated across-seed median + IQR band."""
+    spec = outcomes[name]
+    obs_km = sv.kaplan_meier(time_to_event(observed, OBS_KEYS, spec), by=[])
+    gen_km = sv.kaplan_meier(time_to_event(combined, GEN_KEYS, spec), by=["seed"])
+    jumpoff_y = round(days_to_years(t2))
+    out.figure(
+        f"km_overlay_{name}_w{jumpoff_y}",
+        viz_backtest.plot_km_seed_band(
+            obs_km, gen_km, title=f"{name} survival — jump-off {jumpoff_y}y"
+        ),
+    )
 
 
 class _UnsupportedTarget(Exception):

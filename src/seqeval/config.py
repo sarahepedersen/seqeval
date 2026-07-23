@@ -261,18 +261,11 @@ class FertilityConfig(_Strict):
     age_bin_width: float = 1.0  # years; ASFR/exposure age-bin width
 
 
-class LifeTableConfig(_Strict):
-    """``descriptives.life_table`` block."""
-
-    max_parity: int
-
-
 class DescriptivesConfig(_Strict):
     """``arms.descriptives`` block (past/observed)."""
 
     kaplan_meier: list[str] = []
     fertility: FertilityConfig | None = None
-    life_table: LifeTableConfig | None = None
     stratify_by: list[str] = []
 
 

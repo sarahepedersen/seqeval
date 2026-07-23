@@ -169,7 +169,8 @@ def test_arm_writes_scores_and_tables(tmp_path):
     assert (scores["model"] == "perfect").all()
     # one row per (window, outcome, condition, metric)
     assert not scores.duplicated(["age_stop", "outcome", "condition", "metric"]).any()
-    assert {"roc_auc", "brier_corrected", "ece", "log_loss"} <= set(scores["metric"])
+    assert {"roc_auc", "brier_corrected", "mse", "r2", "ece"} <= set(scores["metric"])
+    assert "log_loss" not in set(scores["metric"])  # removed from the backtest score set
 
 
 def test_scores_carry_seed_bootstrap_cis_when_enabled(tmp_path):
