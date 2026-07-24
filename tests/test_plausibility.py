@@ -62,6 +62,23 @@ def test_not_after_ordering():
     assert list(v["age"]) == [yd(45)]  # only the post-death birth
 
 
+def test_not_before_ordering():
+    # a divorce before the first marriage is flagged; one after it is not
+    df = _frame([(1, "marriage", 25), (1, "divorce", 30), (2, "divorce", 20), (2, "marriage", 28)])
+    v = P.check_rules(df, KEYS, [Rule("early_divorce", "divorce", not_before="marriage")])
+    assert list(v["person_id"]) == [2]
+    assert list(v["age"]) == [yd(20)]
+
+
+def test_not_before_flags_missing_anchor():
+    # a divorce with no marriage anywhere in the sequence is a violation too (unlike not_after)
+    df = _frame([(1, "divorce", 30), (2, "marriage", 20), (2, "divorce", 25)])
+    v = P.check_rules(df, KEYS, [Rule("early_divorce", "divorce", not_before="marriage")])
+    assert list(v["person_id"]) == [1]
+    # the mirror not_after rule leaves the anchorless group alone
+    assert P.check_rules(df, KEYS, [Rule("m", "marriage", not_after="divorce")]).empty
+
+
 def test_max_count_flags_excess():
     df = _frame([(1, "birth", 20), (1, "birth", 25), (1, "birth", 30), (1, "birth", 35)])
     v = P.check_rules(df, KEYS, [Rule("cap", "birth", max_count=2)])

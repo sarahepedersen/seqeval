@@ -62,6 +62,10 @@ forecasting:
     - {name: birth_after_death, event: birth, not_after: death}   # generic ordering rule; only
                                                                   # valid if 'death' is a
                                                                   # declared event alias
+    - {name: divorce_before_marriage, event: divorce, not_before: marriage}   # the mirror rule:
+                                                                  # flags the divorce itself,
+                                                                  # including when no marriage
+                                                                  # exists at all
     - {name: parity_cap, event: birth, max_count: 15, severity: warn}
 ```
 
@@ -74,6 +78,7 @@ class Rule:
     min_age: int | None = None; max_age: int | None = None    # days
     min_spacing: int | None = None                            # days
     not_after: Any | None = None                              # raw token
+    not_before: Any | None = None                             # raw token
     max_count: int | None = None
     severity: Literal["illegal", "warn"] = "illegal"
 
@@ -144,7 +149,8 @@ that users typically point this arm at conditions-at-birth or late-jump-off runs
   hand-checked cells; combined surface has `forecast` source only in cells beyond observed spans.
 - Rules engine: parametrized unit tests per rule type on constructed frames (violations found,
   clean data passes; `not_after` flags event X occurring after the first event Y within the same
-  sequence group; spacing computed in exact integer days).
+  sequence group; `not_before` flags X before the first Y *and* X with no Y at all; spacing
+  computed in exact integer days).
 - `violation_rates` denominators correct (per-group vs per-event).
 - Seed stability: perfect-model synthetic data with many seeds → occurrence disagreement (p_hat(1−p_hat)) matches
   binomial expectation from empirical p (loose tolerance).

@@ -108,6 +108,18 @@ def test_neither_form_keys_on_probability_outcome():
         C.Config.model_validate(d)
 
 
+def test_calibration_binning_defaults_to_quantile():
+    cfg = C.load_config(_REF)
+    assert cfg.arms.backtesting.calibration_binning == "quantile"
+
+
+def test_calibration_binning_rejects_unknown_value():
+    d = _ref_dict()
+    d["arms"]["backtesting"]["calibration_binning"] = "deciles"
+    with pytest.raises(ValidationError):
+        C.Config.model_validate(d)
+
+
 def test_within_origin_on_outcome_without_origin():
     d = _ref_dict()
     d["arms"]["backtesting"]["probability_outcomes"].append(
@@ -123,6 +135,25 @@ def test_within_origin_on_count_query():
         {"event": "birth", "min_events": 1, "within_origin": 5}
     )
     with pytest.raises(ValidationError, match="illegal on a count"):
+        C.Config.model_validate(d)
+
+
+def test_resolve_rules_not_before_maps_to_raw_token():
+    d = _ref_dict()
+    d["events"]["death"] = "99"
+    d["arms"]["forecasting"]["illegal_moves"].append(
+        {"event": "birth", "not_before": "death", "name": "birth_before_death"}
+    )
+    cfg = C.Config.model_validate(d)
+    rule = next(r for r in C.resolve_rules(cfg) if r.name == "birth_before_death")
+    assert rule.not_before == "99"
+    assert rule.not_after is None
+
+
+def test_unknown_not_before_alias_rejected():
+    d = _ref_dict()
+    d["arms"]["forecasting"]["illegal_moves"].append({"event": "birth", "not_before": "wedding"})
+    with pytest.raises(ValidationError, match="unknown event alias"):
         C.Config.model_validate(d)
 
 

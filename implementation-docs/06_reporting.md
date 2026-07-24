@@ -81,9 +81,10 @@ Sections (only those with results present):
 2. **Descriptives** — KM curves, ASFR/CCF/PPR figures + headline numbers; note comparing CCF to
    user-supplied external reference values if provided (`report.reference_ccf` config key,
    optional).
-3. **Backtesting** — the `scores` table pivoted (windows × outcomes × conditions), reliability
-   diagrams **with null calibration bands**, convergence curves (metric vs n replicates) when
-   computed, metric-vs-jump-off figures with bootstrap CI bands.
+3. **Backtesting** — the `scores` table pivoted (windows × outcomes × conditions) with bootstrap
+   CIs, reliability diagrams (predicted probability grouped into decile / equal-count bins by
+   default, `arms.backtesting.calibration_binning`), generated-vs-observed overlays, and the
+   waiting-time scatter. 
 4. **Forecasting** — combined Lexis heatmap + uncertainty map, illegal-move rates table
    (generated vs observed side by side), seed-stability summaries.
 5. **Warnings** — verbatim list from manifest.
@@ -92,8 +93,8 @@ Sections (only those with results present):
 
 Because every result table carries `model` and shares tidy schemas, a future
 `seqeval compare results_a/ results_b/ ...` is a pure reporting exercise: concat the per-model
-tables, render side-by-side scores (windows × outcomes × models), overlaid reliability diagrams
-(each with its own null band — different replicate counts give different bands), and Lexis
+tables, render side-by-side scores (windows × outcomes × models), overlaid reliability diagrams,
+and Lexis
 difference maps. Write this section into the README roadmap; implement nothing beyond
 ensuring the `model` column and manifest `model` block exist everywhere (they are acceptance
 criteria of 03–05).

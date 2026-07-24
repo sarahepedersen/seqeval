@@ -25,7 +25,13 @@ def check_rules(df: pd.DataFrame, keys: list[str], rules: list[Rule]) -> pd.Data
     Each field set on a :class:`Rule` is interpreted independently (all in integer days):
     ``min_age``/``max_age`` bound the event's age; ``min_spacing`` flags consecutive occurrences
     closer than the gap; ``not_after`` flags the event occurring strictly after another event's
-    first occurrence in the same group; ``max_count`` flags occurrences beyond the cap.
+    first occurrence in the same group; ``not_before`` flags it occurring strictly *before* another
+    event's first occurrence (or with that event absent entirely); ``max_count`` flags occurrences
+    beyond the cap.
+
+    ``not_after`` and ``not_before`` are not mirror images: ``not_after`` only constrains groups
+    where the other event exists, while ``not_before`` treats a missing anchor as a violation (a
+    divorce is illegal both before the first marriage and with no marriage at all).
     """
     _check_keys(df, keys)
     parts = [_check_one(df, keys, rule) for rule in rules]
@@ -55,6 +61,14 @@ def _check_one(df: pd.DataFrame, keys: list[str], rule: Rule) -> pd.DataFrame:
             first_after.rename("_after").reset_index(), on=keys, how="inner"
         )
         hits.append(merged.loc[merged["age"] > merged["_after"], "_idx"].to_numpy())
+    if rule.not_before is not None and len(ev):
+        first_before = df[df["event"] == rule.not_before].groupby(keys, observed=True)["age"].min()
+        # left join: an absent anchor leaves _before NaN, which is itself a violation
+        merged = ev.reset_index(names="_idx").merge(
+            first_before.rename("_before").reset_index(), on=keys, how="left"
+        )
+        early = merged["_before"].isna() | (merged["age"] < merged["_before"])
+        hits.append(merged.loc[early, "_idx"].to_numpy())
     if rule.max_count is not None and len(ev):
         ordered = ev.sort_values([*keys, "age"])
         order = ordered.groupby(keys, observed=True).cumcount() + 1

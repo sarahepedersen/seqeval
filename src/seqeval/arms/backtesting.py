@@ -119,6 +119,7 @@ def run(
                 acc,
                 out,
                 bundle.label,
+                cfg.calibration_binning,
             )
 
         for target in cfg.aggregate_targets:
@@ -138,19 +139,12 @@ def run(
                 out,
             )
 
-    tables = {}
+    # No metric-vs-jump-off or seed-convergence figures: AUC/Brier read better as numbers than as
+    # lines, so the report's per-outcome metrics table (from `scores`) is the single home for them;
+    # `convergence` stays a table for anyone who wants to check seed sufficiency directly.
     for name, frames in acc.items():
         if frames:
-            tables[name] = pd.concat(frames, ignore_index=True)
-            out.frame(name, tables[name])
-
-    # Summary figures: how does each metric move as the jump-off shifts across windows?
-    if "scores" in tables and tables["scores"]["age_stop"].nunique() > 1:
-        for metric in ("roc_auc", "brier_corrected"):
-            out.figure(
-                f"metric_vs_jumpoff_{metric}",
-                viz_backtest.plot_metric_vs_jumpoff(tables["scores"], metric=metric),
-            )
+            out.frame(name, pd.concat(frames, ignore_index=True))
 
 
 # =================================================================================================
@@ -169,6 +163,7 @@ def _score_probability_outcome(
     acc,
     out,
     label_fn,
+    binning,
 ) -> None:
     given = spec.given
     cond_persons = cond_sets[given] if given else all_persons
@@ -196,20 +191,7 @@ def _score_probability_outcome(
 
     acc["probabilities"].append(_stamp(probs, label))
 
-    cal = ml.calibration_table(joined, n_bins=10, strategy="uniform")
-    band = rep.null_calibration_band(
-        summary,
-        n_bins=10,
-        strategy="uniform",
-        n_sims=200,
-        rng=np.random.default_rng(replicate_spec.bootstrap_seed),
-        estimator=replicate_spec.estimator,
-    )
-    cal = cal.merge(
-        band[["bin", "lo", "hi"]].rename(columns={"lo": "band_lo", "hi": "band_hi"}),
-        on="bin",
-        how="left",
-    )
+    cal = ml.calibration_table(joined, n_bins=10, strategy=binning)
     acc["calibration"].append(_stamp(cal, label))
 
     desc = describe_outcome(spec, jumpoff_days=t2, label_fn=label_fn)
@@ -217,12 +199,14 @@ def _score_probability_outcome(
         f"reliability_{spec.name}_w{int(round(days_to_years(t2)))}",
         viz_calibration.plot_reliability(cal, probs=probs, title=desc),
     )
-    # Timed outcomes also get a waiting-time calibration scatter (predicted vs observed duration).
+    # Timed outcomes also get a waiting-time calibration scatter (predicted vs observed duration),
+    # drawn on the same population this reliability diagram scores: the condition minus the settled.
     if isinstance(spec, FramedOutcome):
-        _emit_timing_calibration(spec, gen_w, observed, t1, t2, out, desc)
+        scored = set(cond_persons) - settled
+        _emit_timing_calibration(spec, gen_w, observed, t1, t2, out, desc, scored)
 
-    scores = _score_row(spec, joined, summary, gen_w, observed, t1, t2)
-    cis = _score_cis(gen_eval, obs_eval, replicate_spec)
+    scores = _score_row(spec, joined, summary, gen_w, observed, t1, t2, binning)
+    cis = _score_cis(gen_eval, obs_eval, replicate_spec, binning)
     acc["scores"].append(_stamp_scores(scores, label, cis))
 
     if replicate_spec.convergence_curve:
@@ -305,11 +289,11 @@ def _coverage_row(obs_eval, gen_eval, cond_persons, all_persons, settled, label)
     )
 
 
-def _score_row(spec, joined, summary, gen_w, observed, t1, t2) -> dict:
+def _score_row(spec, joined, summary, gen_w, observed, t1, t2, binning) -> dict:
     brier = ml.brier(joined)
     median_n = float(summary["n"].median())
     scores = {
-        "ece": ml.ece(ml.calibration_table(joined, strategy="quantile")),
+        "ece": ml.ece(ml.calibration_table(joined, strategy=binning)),
         "roc_auc": ml.roc_auc(joined),
         "auc_grid_resolution": 1.0 / median_n if median_n else np.nan,
         "brier_raw": brier["raw"],
@@ -322,7 +306,7 @@ def _score_row(spec, joined, summary, gen_w, observed, t1, t2) -> dict:
     return scores
 
 
-def _score_cis(gen_eval, obs_eval, spec) -> pd.DataFrame | None:
+def _score_cis(gen_eval, obs_eval, spec, binning) -> pd.DataFrame | None:
     """95% seed-bootstrap CIs for the ML metrics using **all** seeds, as ``[metric, ci_lo, ci_hi]``.
 
     Resamples seed labels with replacement (``spec.bootstrap_n`` draws) and recomputes each metric,
@@ -352,9 +336,9 @@ def _score_cis(gen_eval, obs_eval, spec) -> pd.DataFrame | None:
                 "brier_corrected": [ml.brier(j)["corrected"]],
                 "mse": [ml.mse(j)],
                 "r2": [ml.r2(j)],
-                # match _score_row's estimator exactly (quantile bins) so the point sits on the
-                # same statistic as its CI.
-                "ece": [ml.ece(ml.calibration_table(j, strategy="quantile"))],
+                # match _score_row's binning exactly so the point sits on the same statistic as
+                # its CI.
+                "ece": [ml.ece(ml.calibration_table(j, strategy=binning))],
             }
         )
 
@@ -369,11 +353,26 @@ def _score_cis(gen_eval, obs_eval, spec) -> pd.DataFrame | None:
     return boot[["metric", "ci_lo", "ci_hi"]]
 
 
+def _timing_horizon(spec, t2) -> int:
+    """Where the frame closes, expressed in the outcome's duration units (days from its origin).
+
+    ``time_to_event`` measures from the outcome's origin, so an absolute (``by_age``) or
+    jump-off-relative (``within``) frame has to be re-expressed before it can cap a duration. For an
+    origin-less outcome the duration *is* the age, so the translation is exact. For an origin-based
+    outcome with an absolute frame the exact close is person-specific (``value - origin_age``); the
+    frame value is kept as a loose upper cap there rather than silently inventing a scalar.
+    """
+    kind, value = spec.frame.kind, spec.frame.value
+    if kind == "within_origin" or spec.tte.origin is not None:
+        return value
+    return value if kind == "by_age" else t2 + value
+
+
 def _timing_tables(spec, gen_w, observed, t1, t2):
     """``(timing_distribution, observed tte, horizon_days)`` for a framed (timed) outcome."""
     combined = combine_prefix(observed, gen_w, t1, t2)
     tte_gen = time_to_event(combined, GEN_KEYS, spec.tte)
-    horizon = spec.frame.value
+    horizon = _timing_horizon(spec, t2)
     td = rep.timing_distribution(tte_gen, run_keys=_RUN_KEYS, seed_col="seed", horizon=horizon)
     obs_tte = time_to_event(observed, OBS_KEYS, spec.tte)
     return td, obs_tte, horizon
@@ -384,13 +383,38 @@ def _timing_coverage(spec, gen_w, observed, t1, t2) -> float:
     return ml.timing_coverage(td, obs_tte)
 
 
-def _emit_timing_calibration(spec, gen_w, observed, t1, t2, out, desc) -> None:
-    """Predicted-vs-observed waiting-time scatter for a timed outcome (one per jump-off)."""
+def _emit_timing_calibration(spec, gen_w, observed, t1, t2, out, desc, scored) -> None:
+    """Predicted-vs-observed waiting-time scatter for a timed outcome (one per jump-off).
+
+    The figure spans exactly the region a prediction can land in: from the jump-off (where the
+    forecast starts, and below which every remaining person is settled) to the frame's close. For an
+    origin-less outcome the duration is an age, so both bounds and the axis labels are ages; an
+    origin-based outcome is plotted as elapsed time from its origin and floored at 0, because the
+    jump-off is not a single point on that axis.
+    """
     td, obs_tte, horizon = _timing_tables(spec, gen_w, observed, t1, t2)
+    name = f"timing_calibration_{spec.name}_w{int(round(days_to_years(t2)))}"
+    is_age = spec.tte.origin is None
+    floor = t2 if is_age else 0
+    axes = (
+        ("predicted age at event (years, median across seeds)", "observed age at event (years)")
+        if is_age
+        else (
+            "predicted waiting time (years, median across seeds)",
+            "observed waiting time (years)",
+        )
+    )
     out.figure(
-        f"timing_calibration_{spec.name}_w{int(round(days_to_years(t2)))}",
+        name,
         viz_backtest.plot_timing_calibration(
-            td, obs_tte, horizon_days=horizon, title=f"Waiting time — {desc}"
+            td,
+            obs_tte,
+            horizon_days=horizon,
+            floor_days=floor,
+            persons=scored,
+            xlabel=axes[0],
+            ylabel=axes[1],
+            title=f"{'Age at event' if is_age else 'Waiting time'} — {desc}",
         ),
     )
 

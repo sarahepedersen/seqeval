@@ -197,6 +197,9 @@ class Rule:
         Flag consecutive occurrences closer together than this (days).
     not_after : Any or None
         Flag an ``event`` occurring after this other token has occurred.
+    not_before : Any or None
+        Flag an ``event`` occurring before this other token's first occurrence — including when
+        the other token never occurs at all (a divorce with no marriage anywhere is a violation).
     max_count : int or None
         Flag sequences with more than this many occurrences of ``event``.
     severity : {"illegal", "warn"}, default "illegal"
@@ -209,6 +212,7 @@ class Rule:
     max_age: int | None = None
     min_spacing: int | None = None
     not_after: Any | None = None
+    not_before: Any | None = None
     max_count: int | None = None
     severity: Literal["illegal", "warn"] = "illegal"
 

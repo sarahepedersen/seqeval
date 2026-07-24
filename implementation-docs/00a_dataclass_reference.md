@@ -136,7 +136,7 @@ The symmetry is a feature for *understanding*; the type split is a guard for *us
 
 ```python
 Rule(name, event, min_age=None, max_age=None, min_spacing=None,
-     not_after=None, max_count=None, severity="illegal")
+     not_after=None, not_before=None, max_count=None, severity="illegal")
 ```
 
 States one impossible or implausible pattern to flag in sequences (all age/spacing values in
@@ -144,8 +144,10 @@ days). Purely declarative — the rules engine (`check_rules`, 05) interprets wh
 set; adding a rule never means adding code. Runs against generated *and* observed data, since
 violations in observed data indicate data problems rather than model problems. Not merged with
 `Condition` despite both mentioning counts: a `Rule` flags *rows* (which events violate),
-carries severity, and supports pattern fields (`min_spacing`, `not_after`) that make no sense as
-population filters.
+carries severity, and supports pattern fields (`min_spacing`, `not_after`/`not_before`) that make
+no sense as population filters. The two ordering fields are not mirror images: `not_after` only
+constrains groups where the anchor event exists, while `not_before` also flags the event when the
+anchor never occurs (a divorce with no marriage anywhere).
 
 ## Carriers
 

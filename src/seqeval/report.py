@@ -491,24 +491,17 @@ def _gen_vs_obs_section(arm_dir: Path) -> str:
 
 
 def _timing_calibration_section(arm_dir: Path) -> str:
-    """Waiting-time calibration scatters (predicted vs observed duration), if present."""
+    """Waiting-time scatters (predicted vs observed duration), if present."""
     figs = sorted(arm_dir.glob("timing_calibration_*.png"))
     if not figs:
         return ""
     cells = "".join(_figure_html(f) for f in figs)
     return (
-        '<h3 id="timing-calibration">Timing calibration (waiting time)</h3>'
-        '<p class="muted">Predicted vs observed waiting time per person, for timed outcomes. Gray '
+        '<h3 id="timing-calibration">Waiting time scatter</h3>'
+        '<p class="muted">Predicted vs observed timing per person, for timed outcomes. Gray '
         "points are individuals; the red trend is the median observed time within equal-count bins "
         "of predicted time (IQR ribbon). Above the dashed <code>y = x</code> line the model "
-        "predicts events too early; below it, too late. Scope: persons whose event was observed "
-        "<em>within the frame horizon</em> — the model's predictive distribution is capped there, "
-        "so both axes are clipped to it; predicted medians pile up at that edge for persons whose "
-        "replicates mostly never see the event. "
-        '<span class="flag">Read the right-hand side with care:</span> restricting to events '
-        "inside the horizon drops the long observed waits, and those drops concentrate where "
-        "predictions are long — so the trend flattens toward the right partly by truncation, not "
-        "only by model bias.</p>"
+        "predicts events too early; below it, too late.</p>"
         f'<div class="figrow">{cells}</div>'
     )
 

@@ -210,6 +210,25 @@ def test_scores_carry_seed_bootstrap_cis_when_enabled(tmp_path):
     assert all(re.search(r"_w\d", f) for f in reliab)
 
 
+def test_no_scalar_metric_figures_are_emitted(tmp_path):
+    """AUC/Brier live in the report's metrics table; the arm draws no line charts for them."""
+    out = _run_arm(tmp_path)
+    figs = {p.name for p in out.written if p.suffix == ".png"}
+    assert not [f for f in figs if f.startswith(("metric_vs_jumpoff", "convergence"))]
+    assert (out.dir / "scores.parquet").exists()  # the numbers themselves are still written
+
+
+def test_timing_calibration_figures_emitted_per_framed_jumpoff(tmp_path):
+    """One waiting-time scatter per (framed outcome, jump-off); no display-window table written."""
+    out = _run_arm(tmp_path)
+    figs = {p.name for p in out.written if p.suffix == ".png"}
+    assert {
+        "timing_calibration_first_birth_by_age_40y_given_p0_w25.png",
+        "timing_calibration_first_birth_by_age_40y_given_p0_w30.png",
+    } <= figs
+    assert not (out.dir / "timing_outliers.parquet").exists()
+
+
 def test_coverage_reports_settled_for_framed(tmp_path):
     out = _run_arm(tmp_path)
     cov = pd.read_parquet(out.dir / "coverage.parquet")

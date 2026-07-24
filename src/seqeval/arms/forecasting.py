@@ -136,11 +136,13 @@ def _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width) -> 
         out.frame(f"{prefix}_forecast", fc_by_seed)
         out.frame(f"{prefix}_combined", combined)
         out.figure(
-            f"{prefix}_combined", viz_lexis.plot_lexis(combined, dim=dim, mark_forecast=True)
+            f"{prefix}_combined",
+            viz_lexis.plot_lexis(combined, dim=dim, mark_forecast=True, outcome=lex.outcome),
         )
         if fc_by_seed["seed"].nunique() > 1:
             out.figure(
-                f"{prefix}_uncertainty", viz_lexis.plot_lexis_uncertainty(fc_by_seed, dim=dim)
+                f"{prefix}_uncertainty",
+                viz_lexis.plot_lexis_uncertainty(fc_by_seed, dim=dim, outcome=lex.outcome),
             )
 
 

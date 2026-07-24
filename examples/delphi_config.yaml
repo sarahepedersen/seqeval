@@ -59,6 +59,7 @@ arms:
       - {event: birth, min_events: 1, within: 5, given: p1}
     aggregate_targets: [ccf, asfr_cohort, ppr, km:first_birth, km:second_birth]
     min_seeds: 3                 # match/lower than your export n_seeds
+    calibration_binning: quantile  # decile (equal-count) bins for reliability; or 'uniform'
 
   # future / generated — Lexis forecast, illegal-move checks, seed stability
   forecasting:

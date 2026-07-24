@@ -152,8 +152,9 @@ evaluation per bootstrap draw (evaluate once per replicate; resample the rows).
   IQR maps) comes from `seed_bootstrap`. No duplicate statistics code in 05.
 - **06 (validate/report)**: validate prints replicates-per-window and flags windows below
   `min_replicates` with a plain-language note of what that implies (probability grid width,
-  finest meaningful calibration bin); report shows convergence curves and the null band on
-  every reliability diagram.
+  finest meaningful calibration bin). `null_calibration_band` remains available as a statistic
+  (and is exercised in tests), but the report's reliability diagrams no longer shade it — they show
+  the binned curve against the diagonal, predicted probability grouped into decile bins by default.
 
 ## 6. Tests
 

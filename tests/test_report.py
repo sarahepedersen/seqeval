@@ -38,6 +38,14 @@ def test_backtesting_section_has_coverage(demo_config, tmp_path):
     assert "Backtest metrics" in backtest  # the brier/auc table replaces the line graphs
 
 
+def test_timing_calibration_section_renders_when_figures_present(demo_config, tmp_path):
+    """The timed-outcome scatters appear in the backtesting section."""
+    results = _run(demo_config, tmp_path / "results")
+    assert list((results / "backtesting").glob("timing_calibration_*.png"))
+    html = (results / report.REPORT_NAME).read_text()
+    assert 'id="timing-calibration"' in html
+
+
 def test_coverage_summary_absent_without_backtesting(demo_config, tmp_path):
     """No backtesting arm dir → no coverage summary, and the report still builds."""
     results = _run(demo_config, tmp_path / "results")

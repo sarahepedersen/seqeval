@@ -277,6 +277,10 @@ class BacktestingConfig(_Strict):
     probability_outcomes: list[ProbabilityOutcomeConfig] = []
     aggregate_targets: list[str] = []
     min_seeds: int = 5
+    # How the reliability curve / p_hat histogram group predicted probabilities: "quantile" makes
+    # equal-count decile bins (each point rests on the same number of persons); "uniform" makes
+    # fixed-width [0,1] bins. Same choice feeds the reported ECE so graph and score agree.
+    calibration_binning: Literal["uniform", "quantile"] = "quantile"
 
 
 class RuleConfig(_Strict):
@@ -288,6 +292,7 @@ class RuleConfig(_Strict):
     max_age: float | None = None
     min_spacing: float | None = None
     not_after: str | None = None
+    not_before: str | None = None
     max_count: int | None = None
     severity: Literal["illegal", "warn"] = "illegal"
 
@@ -469,6 +474,8 @@ class Config(_Strict):
             _check_alias(rule.event, f"arms.forecasting.illegal_moves[{i}].event")
             if rule.not_after is not None:
                 _check_alias(rule.not_after, f"arms.forecasting.illegal_moves[{i}].not_after")
+            if rule.not_before is not None:
+                _check_alias(rule.not_before, f"arms.forecasting.illegal_moves[{i}].not_before")
         if fc.lexis is not None:
             if fc.lexis.outcome not in self.outcomes:
                 raise ValueError(
@@ -621,6 +628,7 @@ def resolve_rules(cfg: Config) -> list[Rule]:
                 max_age=years_to_days(rc.max_age) if rc.max_age is not None else None,
                 min_spacing=years_to_days(rc.min_spacing) if rc.min_spacing is not None else None,
                 not_after=cfg.events[rc.not_after] if rc.not_after is not None else None,
+                not_before=cfg.events[rc.not_before] if rc.not_before is not None else None,
                 max_count=rc.max_count,
                 severity=rc.severity,
             )

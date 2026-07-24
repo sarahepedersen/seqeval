@@ -94,6 +94,16 @@ backtesting:
   min_seeds: 5
 ```
 
+**Timing calibration scope.** A framed outcome's timing figure compares predicted vs observed
+timing on the population its reliability diagram scores: persons in the `given` condition whose
+answer was *not* already settled at the jump-off (a settled event sits in the observed prefix every
+replicate replays, so it would land on `y = x` for free), whose event was observed inside the frame,
+and whom the model does not project past the frame (a predicted median equal to the horizon is the
+cap, not a date). The axes therefore span exactly the reachable region: jump-off → frame close for
+an origin-less outcome (whose duration is an age), 0 → frame close for an origin-based one. Because
+the axes cover exactly that reachable region, nothing lands off-screen and there is no display
+window to configure.
+
 Requested-but-absent windows are skipped with a warning naming them (00 §1: we evaluate what
 inference produced; we never re-run models).
 
@@ -121,7 +131,8 @@ For each configured window:
    both sides.
 4. For each probability outcome: run `evaluate_framed`/`evaluate_count` on generated (per
    replicate) and on observed truth; probability pipeline (§1.1) → `probabilities.parquet`;
-   calibration table + null band, tie-corrected ROC-AUC, raw+corrected Brier, log-loss, and
+   calibration table (binned per `calibration_binning`, deciles by default), tie-corrected
+   ROC-AUC, raw+corrected Brier, log-loss, and
    (for framed outcomes) timing interval coverage via `timing_distribution`, per
    (window, outcome, condition).
 5. Compute configured aggregate metrics on generated (with `extra_by=GEN_KEYS` window/seed keys)
