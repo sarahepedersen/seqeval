@@ -205,13 +205,13 @@ diagonal.
 ### `ReplicateSpec` — how seed-stochasticity becomes probability (added with plan 02b)
 
 ```python
-ReplicateSpec(estimator="jeffreys", interval="jeffreys", level=0.95,
+ReplicateSpec(interval="jeffreys", level=0.95,
               min_replicates=5, bootstrap_n=200, bootstrap_seed=7, convergence_curve=True)
 ```
 
 Resolved from the top-level `replicates:` config block; consumed by every function in
 `core/replicates.py`. States the *policy* for turning per-run replicate counts (k of n) into
-probability estimates: which smoothed estimator, which interval, when to warn about thin
+probability estimates: which interval, when to warn about thin
 replicate counts, and how much resampling to spend on uncertainty bands. It is a policy object
 rather than loose keyword arguments so that 04 and 05 provably apply identical estimation
 settings — one spec, threaded everywhere. (`RUN_KEYS = GEN_KEYS minus seed` is a companion

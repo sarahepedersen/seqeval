@@ -15,12 +15,10 @@ persons:
   covariates: [education, region]
 
 replicates:
-  estimator: jeffreys
   interval: jeffreys
   level: 0.95
   min_replicates: 5
   bootstrap: {n: 200, seed: 7}
-  convergence_curve: true
 
 outcomes:
   first_birth: {event: birth, n: 1}
@@ -60,7 +58,7 @@ arms:
       - {event: birth, min_age: 15}
       - {event: birth, min_spacing: 0.6, severity: warn}
       - {event: birth, max_count: 10, severity: warn}
-    seed_stability:
+    replicate_variance:
       individual: true
       aggregate: [ccf]
 

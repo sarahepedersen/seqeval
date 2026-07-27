@@ -1,4 +1,4 @@
-"""Forecasting arm (05): smoke test + seed-stability definitional checks."""
+"""Forecasting arm (05): smoke test + replicate-variance definitional checks."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from seqeval.config import (
     resolve_rules,
 )
 from seqeval.io.loaders import Bundle
+from seqeval.units import years_to_days as yd
 from tests import synthetic as S
 
 _CFG = """
@@ -31,7 +32,7 @@ arms:
     illegal_moves:
       - {event: birth, max_age: 50}
       - {event: birth, min_spacing: 0.6, severity: warn}
-    seed_stability: {individual: true, aggregate: [ccf]}
+    replicate_variance: {individual: true, aggregate: [ccf], subgroup_by: [cohort]}
 """
 
 
@@ -72,11 +73,13 @@ def test_arm_writes_all_tables_and_figures(tmp_path):
         "lexis_cohort_combined.parquet",
         "violations.parquet",
         "violation_rates.parquet",
-        "seed_stability_individual.parquet",
-        "seed_stability_aggregate.parquet",
+        "replicate_variance_individual.parquet",
+        "replicate_variance_aggregate.parquet",
     } <= names
     # both period (year x age) and cohort (birth-cohort x age) Lexis heatmaps render
     assert {"lexis_combined.png", "lexis_cohort_combined.png"} <= names
+    # within-seed variance histograms: population-wide + faceted by the requested subgroup
+    assert {"within_seed_variance.png", "within_seed_variance_by_cohort.png"} <= names
     for p in out.written:
         assert p.exists() and p.stat().st_size > 0
 
@@ -88,17 +91,35 @@ def test_violation_rates_report_observed_baseline(tmp_path):
     assert set(vr["source"]) == {"generated", "observed"}
 
 
-def test_seed_stability_disagreement_is_bernoulli_variance(tmp_path):
+def test_occurrence_probability_lives_in_its_own_outcome_labelled_table(tmp_path):
     out = _run(tmp_path)
-    ss = pd.read_parquet(out.dir / "seed_stability_individual.parquet")
-    # occurrence disagreement IS p_hat(1-p_hat) on the smoothed estimate, and lies in [0, 0.25]
-    np.testing.assert_allclose(ss["disagreement"], ss["p_hat"] * (1 - ss["p_hat"]), atol=1e-12)
-    assert (ss["disagreement"] >= 0).all() and (ss["disagreement"] <= 0.25 + 1e-9).all()
+    ind = pd.read_parquet(out.dir / "replicate_variance_individual.parquet")
+    occ = pd.read_parquet(out.dir / "replicate_occurrence.parquet")
+    # the dispersion table is about the birth count only — nothing outcome-specific rides along
+    assert not {"p_hat", "p_within_horizon", "timing_spread"} & set(ind.columns)
+    # the occurrence table names the outcome it is about, and the horizon the event must fall inside
+    assert set(occ["outcome"]) == {"first_birth"}
+    assert (occ["horizon"] == yd(50)).all()
+    assert (occ["timing_spread"] >= 0).all()
+    # p_hat is the raw replicate frequency, unsmoothed
+    np.testing.assert_allclose(occ["p_hat"], occ["n_occurred"] / occ["n"])
 
 
-def test_seed_stability_aggregate_ccf_band_covers_truth(tmp_path):
+def test_replicate_variance_aggregate_ccf_band_covers_truth(tmp_path):
     out = _run(tmp_path)
-    agg = pd.read_parquet(out.dir / "seed_stability_aggregate.parquet")
+    agg = pd.read_parquet(out.dir / "replicate_variance_aggregate.parquet")
     truth = S.expected_ccf(S.default_hazards())
-    row = agg.iloc[0]
+    row = agg[agg["cohort"].isna()].iloc[0]  # pooled (all-cohorts) row for the first window
     assert row["ci_lo"] <= truth <= row["ci_hi"]  # forecast CCF band brackets the known truth
+
+
+def test_replicate_variance_aggregate_flags_forecast_provenance(tmp_path):
+    out = _run(tmp_path)
+    agg = pd.read_parquet(out.dir / "replicate_variance_aggregate.parquet")
+    # provenance, not completeness: how much of each CCF is model output rather than history
+    assert ((agg["forecast_share"] >= 0) & (agg["forecast_share"] <= 1)).all()
+    # both windows jump off well inside the fertile ages, so every CCF leans on the forecast
+    assert (agg["forecast_share"] > 0).all()
+    # the later jump-off (age 30) has more observed history, so less of its CCF is forecast
+    pooled = agg[agg["cohort"].isna()].set_index("age_stop")["forecast_share"]
+    assert pooled.loc[pooled.index.max()] < pooled.loc[pooled.index.min()]

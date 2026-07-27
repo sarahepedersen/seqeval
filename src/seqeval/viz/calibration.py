@@ -1,8 +1,4 @@
-"""Calibration figures: the reliability diagram (04 viz).
-
-Seed-convergence of the scalar metrics is written as the ``convergence`` table only — it is a
-sufficiency check to read off, not a figure worth carrying in the report.
-"""
+"""Calibration figures: the reliability diagram (04 viz)."""
 
 from __future__ import annotations
 

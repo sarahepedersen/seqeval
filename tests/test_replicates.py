@@ -1,4 +1,4 @@
-"""Replicate engine: exact estimators, MC-error correction, null band, resampling diagnostics."""
+"""Replicate engine: exact estimates, MC-error correction, null band, resampling diagnostics."""
 
 from __future__ import annotations
 
@@ -32,11 +32,12 @@ def _summary(k, n):
     )
 
 
-# --- exact estimator / interval / logit values --------------------------------------------------
-def test_estimators_exact_including_edges():
+# --- exact estimate / interval / logit values ---------------------------------------------------
+def test_point_estimate_is_the_unsmoothed_replicate_frequency():
     summ = _summary([0, 1, 3, 5], 5)
-    est = R.estimate_probability(summ, spec=ReplicateSpec(estimator="jeffreys")).set_index("k")
-    np.testing.assert_allclose(est["p_hat"], [0.5 / 6, 1.5 / 6, 3.5 / 6, 5.5 / 6])
+    est = R.estimate_probability(summ, spec=ReplicateSpec()).set_index("k")
+    # p_hat is k/n exactly, boundaries included — no smoothing pulls 0 and 1 off the edges
+    np.testing.assert_allclose(est["p_hat"], [0.0, 0.2, 0.6, 1.0])
     np.testing.assert_allclose(
         est["logit_emp"], [np.log(0.5 / 5.5), np.log(1 / 3), np.log(1.4), np.log(11)]
     )
@@ -46,21 +47,11 @@ def test_estimators_exact_including_edges():
     )
 
 
-def test_estimator_variants():
-    summ = _summary([1], 5)
-    mle = R.estimate_probability(summ, spec=ReplicateSpec(estimator="mle")).iloc[0]
-    lap = R.estimate_probability(summ, spec=ReplicateSpec(estimator="laplace")).iloc[0]
-    assert mle["p_hat"] == pytest.approx(0.2)
-    assert lap["p_hat"] == pytest.approx(2 / 7)
-    # logit_emp is Haldane-Anscombe regardless of estimator
-    assert mle["logit_emp"] == pytest.approx(np.log(1 / 3))
-    assert lap["logit_emp"] == pytest.approx(np.log(1 / 3))
-
-
-def test_coherence_logit_equals_logit_of_phat_for_jeffreys():
-    summ = _summary([0, 1, 2, 3, 4, 5], 5)
-    est = R.estimate_probability(summ, spec=ReplicateSpec(estimator="jeffreys"))
-    np.testing.assert_allclose(est["logit_emp"], logit(est["p_hat"]), atol=1e-12)
+def test_logit_emp_stays_finite_where_the_point_estimate_saturates():
+    """logit_emp is Haldane-Anscombe: defined at k = 0 and k = n, where logit(p_hat) is not."""
+    est = R.estimate_probability(_summary([0, 5], 5), spec=ReplicateSpec())
+    assert np.isfinite(est["logit_emp"]).all()
+    assert np.isinf(logit(est["p_hat"].to_numpy())).all()
 
 
 def test_jeffreys_interval_boundaries():
@@ -82,7 +73,7 @@ def test_wilson_interval_in_unit_range():
 def test_dynamic_range_bound():
     # |logit_emp| <= ln(2n + 1)
     for n in (5, 50):
-        est = R.estimate_probability(_summary([0, n], n), spec=ReplicateSpec(estimator="jeffreys"))
+        est = R.estimate_probability(_summary([0, n], n), spec=ReplicateSpec())
         assert np.abs(est["logit_emp"]).max() == pytest.approx(np.log(2 * n + 1))
 
 
@@ -120,14 +111,12 @@ def test_ragged_n_warns(caplog):
 
 
 # --- MC error: Brier correction (the load-bearing test) -----------------------------------------
-def _calibration_pipeline(
-    hazards_gen, obs, pers, window, jumpoff, spec_cq, n_seeds, rng, estimator
-):
+def _calibration_pipeline(hazards_gen, obs, pers, window, jumpoff, spec_cq, n_seeds, rng):
     gen = S.simulate_generated(obs, pers, hazards_gen, [window], n_seeds, rng)
     sp = O.observation_spans(gen, GK)
     ev = O.evaluate_count(gen, GK, spec_cq, sp, jumpoff=jumpoff)
     summ = R.replicate_summary(ev, run_keys=RK)
-    est = R.estimate_probability(summ, spec=ReplicateSpec(estimator=estimator))
+    est = R.estimate_probability(summ, spec=ReplicateSpec())
     return summ, est
 
 
@@ -148,8 +137,8 @@ def test_perfect_model_brier_inflation_and_correction():
     spec = CountQuery("b1w10", "birth", 1, Frame("within", yd(10)))
     y = _observed_y(obs, spec, jo)
 
-    s5, e5 = _calibration_pipeline(h, obs, pers, window, jo, spec, 5, rng, "mle")
-    _, e50 = _calibration_pipeline(h, obs, pers, window, jo, spec, 50, rng, "mle")
+    s5, e5 = _calibration_pipeline(h, obs, pers, window, jo, spec, 5, rng)
+    _, e50 = _calibration_pipeline(h, obs, pers, window, jo, spec, 50, rng)
 
     def brier(est):
         m = est.set_index("person_id")
@@ -167,7 +156,7 @@ def test_perfect_model_brier_inflation_and_correction():
 # --- null calibration band ----------------------------------------------------------------------
 def _band_coverage(summ, est, y, n_bins=10):
     rng = np.random.default_rng(0)
-    band = R.null_calibration_band(summ, n_bins=n_bins, n_sims=300, rng=rng, estimator="jeffreys")
+    band = R.null_calibration_band(summ, n_bins=n_bins, n_sims=300, rng=rng)
     p = est.set_index("person_id")["p_hat"].to_numpy()
     yy = y
     edges = np.linspace(0, 1, n_bins + 1)
@@ -191,7 +180,7 @@ def test_null_band_covers_calibrated_data():
         n = 20
         k = r.binomial(n, p_true)
         summ = _summary(k, n)
-        est = R.estimate_probability(summ, spec=ReplicateSpec(estimator="jeffreys"))
+        est = R.estimate_probability(summ, spec=ReplicateSpec())
         y = (r.random(3000) < p_true).astype(float)
         covs.append(_band_coverage(summ, est, y))
     assert np.mean(covs) >= 0.85  # ~95% nominal; loose for MC + finite bins
@@ -205,7 +194,7 @@ def test_null_band_flags_miscalibration():
     n = 20
     k = r.binomial(n, p_model)
     summ = _summary(k, n)
-    est = R.estimate_probability(summ, spec=ReplicateSpec(estimator="jeffreys"))
+    est = R.estimate_probability(summ, spec=ReplicateSpec())
     y = (r.random(3000) < p_true).astype(float)
     assert _band_coverage(summ, est, y) < 0.6  # curve exits the band
 
@@ -222,7 +211,6 @@ def test_null_band_widens_at_small_n():
             n_bins=10,
             n_sims=400,
             rng=np.random.default_rng(3),
-            estimator="jeffreys",
         )
         mid = band.iloc[5]  # bin containing 0.5
         widths[n] = mid["hi"] - mid["lo"]
@@ -300,19 +288,3 @@ def test_seed_bootstrap_ci_covers_truth():
     ).iloc[0]
     assert bs["ci_lo"] <= bs["estimate"] <= bs["ci_hi"]
     assert bs["ci_lo"] <= S.expected_ccf(h) <= bs["ci_hi"]
-
-
-def test_convergence_dispersion_decreases():
-    rng = np.random.default_rng(5)
-    h = S.default_hazards()
-    obs, pers = S.simulate_cohort(1500, (1960, 1990), h, None, rng)
-    gen = S.simulate_generated(obs, pers, h, [(0.0, 0.0)], 20, rng)
-    cc = R.convergence_curve(
-        gen,
-        seed_col="seed",
-        stat_fn=_ccf_stat,
-        sizes=[2, 5, 10, 20],
-        n_rep=15,
-        rng=np.random.default_rng(2),
-    ).set_index("m")
-    assert cc.loc[2, "std"] > cc.loc[20, "std"]  # dispersion shrinks with more seeds

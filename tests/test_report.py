@@ -61,10 +61,10 @@ def test_report_embeds_figures_and_samples_persons(demo_config, tmp_path):
     results = _run(demo_config, tmp_path / "results")
     html = (results / report.REPORT_NAME).read_text()
     assert "data:image/png;base64," in html
-    # per-person tables (individual seed stability, violations) are down-sampled, not fully dumped
+    # per-person tables (replicate variance, violations) are down-sampled, not fully dumped
     forecasting = html.split('<h2 id="forecasting"')[1]
     assert "sampled persons" in forecasting
-    assert "seed_stability_individual" in forecasting
+    assert "replicate_variance_individual" in forecasting
 
 
 def test_build_report_missing_arm_dir_is_graceful(demo_config, tmp_path):

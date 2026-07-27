@@ -108,7 +108,7 @@ system as actually used. Conventions that follow from this:
   only contract is uniqueness within a (person, window) run. A deterministic model has one
   replicate and the machinery degrades gracefully (p̂ ∈ {0,1}, calibration → accuracy, with
   loud `min_replicates` warnings).
-- **Smoothed estimators, not raw fractions**, are the default (Jeffreys `(k+½)/(n+1)`), and the
+- **Raw replicate fractions, not smoothed estimates**, are what get reported (`p̂ = k/n`), and the
   **empirical logit** `ln((k+½)/(n−k+½))` is always emitted — raw k/n hits exact 0/1 where
   logits and log-loss are undefined, and lives on a coarse 1/n grid.
 - **Estimation is strictly per run — never pooled.** A run's probability estimate uses only
@@ -260,8 +260,7 @@ persons:
   covariates: [education, region]        # allowlist of extra persons columns to load
 
 replicates:                              # how seed-stochasticity becomes probability (00 §3b,
-  estimator: jeffreys                    #   plan 02b). jeffreys | mle | laplace
-  interval: jeffreys                     # jeffreys | wilson
+  interval: jeffreys                     #   plan 02b). jeffreys | wilson
   level: 0.95
   min_replicates: 5                      # warn below this (probability grid coarser than 0.2)
   bootstrap: {n: 200, seed: 7}           # seed-bootstrap CIs on aggregate metrics; n: 0 = off

@@ -31,7 +31,6 @@ persons:
 replicates:
   min_replicates: 5
   bootstrap: {n: 0, seed: 7}
-  convergence_curve: true
 outcomes:
   first_birth: {event: birth, n: 1}
   second_birth: {event: birth, n: 2, origin: first_birth}
@@ -56,7 +55,7 @@ arms:
     illegal_moves:
       - {event: birth, max_age: 45}
       - {event: birth, min_spacing: 0.6, severity: warn}
-    seed_stability: {individual: true, aggregate: [ccf]}
+    replicate_variance: {individual: true, aggregate: [ccf]}
 output:
   dir: results/
   figure_format: png

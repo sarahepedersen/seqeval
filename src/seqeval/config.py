@@ -41,8 +41,8 @@ from seqeval.units import years_to_days
 
 logger = logging.getLogger("seqeval")
 
-#: Aggregate metric names that may appear in ``aggregate_targets`` / ``seed_stability.aggregate``
-#: without a ``km:`` prefix.
+#: Aggregate metric names that may appear in ``aggregate_targets`` /
+#: ``replicate_variance.aggregate`` without a ``km:`` prefix.
 _AGGREGATE_BASE = {"ccf", "asfr_period", "asfr_cohort", "ppr"}
 
 
@@ -129,12 +129,10 @@ class BootstrapConfig(_Strict):
 class ReplicatesConfig(_Strict):
     """``replicates:`` block — how seed-stochasticity becomes probability (00 section 3b)."""
 
-    estimator: Literal["jeffreys", "mle", "laplace"] = "jeffreys"
     interval: Literal["jeffreys", "wilson"] = "jeffreys"
     level: float = 0.95
     min_replicates: int = 5
     bootstrap: BootstrapConfig = BootstrapConfig()
-    convergence_curve: bool = True
 
 
 class TimingOutcomeConfig(_Strict):
@@ -306,11 +304,12 @@ class LexisConfig(_Strict):
     subgroup_by: list[str] = []
 
 
-class SeedStabilityConfig(_Strict):
-    """``forecasting.seed_stability`` block."""
+class ReplicateVarianceConfig(_Strict):
+    """``forecasting.replicate_variance`` block."""
 
     individual: bool = False
     aggregate: list[str] = []
+    subgroup_by: list[str] = []
 
 
 class ForecastingConfig(_Strict):
@@ -319,7 +318,7 @@ class ForecastingConfig(_Strict):
     windows: Literal["all"] | list[WindowConfig] = "all"
     lexis: LexisConfig | None = None
     illegal_moves: list[RuleConfig] = []
-    seed_stability: SeedStabilityConfig | None = None
+    replicate_variance: ReplicateVarianceConfig | None = None
 
 
 class ArmsConfig(_Strict):
@@ -483,11 +482,14 @@ class Config(_Strict):
                     f"declared outcomes are: {', '.join(outcome_names) or '(none)'}"
                 )
             self._check_stratifiers(fc.lexis.subgroup_by, "arms.forecasting.lexis.subgroup_by")
-        if fc.seed_stability is not None:
-            for i, tgt in enumerate(fc.seed_stability.aggregate):
+        if fc.replicate_variance is not None:
+            for i, tgt in enumerate(fc.replicate_variance.aggregate):
                 self._check_aggregate_target(
-                    tgt, outcome_names, f"arms.forecasting.seed_stability.aggregate[{i}]"
+                    tgt, outcome_names, f"arms.forecasting.replicate_variance.aggregate[{i}]"
                 )
+            self._check_stratifiers(
+                fc.replicate_variance.subgroup_by, "arms.forecasting.replicate_variance.subgroup_by"
+            )
         # descriptives stratifiers (validated here too, after covariates are known).
         if self.arms.descriptives is not None:
             self._check_stratifiers(
@@ -640,13 +642,11 @@ def resolve_replicates(cfg: Config) -> ReplicateSpec:
     """Pure passthrough of the ``replicates:`` block to a :class:`ReplicateSpec` (with defaults)."""
     rc = cfg.replicates
     return ReplicateSpec(
-        estimator=rc.estimator,
         interval=rc.interval,
         level=rc.level,
         min_replicates=rc.min_replicates,
         bootstrap_n=rc.bootstrap.n,
         bootstrap_seed=rc.bootstrap.seed,
-        convergence_curve=rc.convergence_curve,
     )
 
 

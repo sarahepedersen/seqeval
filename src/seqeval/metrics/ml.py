@@ -1,6 +1,6 @@
 """ML/probability metrics for backtesting (04) — thin composition over the replicate engine (02b).
 
-This module contains **no** probability-estimation statistics of its own: point estimators,
+This module contains **no** probability-estimation statistics of its own: point estimates,
 intervals, MC-error corrections, null bands, and bootstraps all come from
 :mod:`seqeval.core.replicates`. Here we (a) run the probability pipeline (evaluator output ->
 run-level probability table), (b) join model probabilities to observed truth, and (c) score them
@@ -153,10 +153,10 @@ def brier(joined: pd.DataFrame) -> dict[str, float]:
 def mse(joined: pd.DataFrame) -> float:
     """Mean squared error of the raw replicate rate ``k/n`` against the observed outcome.
 
-    Unlike :func:`brier` (which squares the smoothed ``p_hat`` and subtracts a finite-seed
-    correction), this uses the unsmoothed empirical rate — it needs only the replicate counts and
-    the observed outcome, no estimator / logit machinery. Equivalently, the Brier score of the MLE
-    probability ``k/n``.
+    Computed from the counts alone, with no probability machinery in the path. Since ``p_hat`` is
+    itself ``k/n``, this equals ``brier["raw"]``; the two differ only in that :func:`brier` also
+    reports a finite-seed-corrected value. Kept as the plain, self-contained form and as the
+    numerator :func:`r2` rescales.
     """
     rate = joined["k"].to_numpy() / joined["n"].to_numpy()
     y = joined["y_true"].to_numpy()
@@ -180,7 +180,12 @@ def r2(joined: pd.DataFrame) -> float:
 
 
 def log_loss(joined: pd.DataFrame, *, eps: float = 1e-12) -> float:
-    """Binary log-loss on the smoothed ``p_hat`` (defined everywhere; never on raw ``k/n``)."""
+    """Binary log-loss on ``p_hat``, clipped to ``[eps, 1-eps]``.
+
+    ``p_hat`` is the unsmoothed ``k/n``, so runs at 0 or 1 that go the other way are pinned at
+    ``-ln(eps)`` rather than infinite. The clip is what keeps the score finite; read a log-loss
+    dominated by boundary runs as "too few replicates", not as a calibration result.
+    """
     p = np.clip(joined["p_hat"].to_numpy(), eps, 1 - eps)
     y = joined["y_true"].to_numpy()
     return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))

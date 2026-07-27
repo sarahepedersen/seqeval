@@ -245,7 +245,7 @@ def test_resolve_rules_days_and_severity():
 def test_resolve_replicates_passthrough():
     cfg = C.load_config(_REF)
     spec = C.resolve_replicates(cfg)
-    assert spec.estimator == "jeffreys"
+    assert spec.interval == "jeffreys"
     assert spec.bootstrap_n == 200
     assert spec.bootstrap_seed == 7
 

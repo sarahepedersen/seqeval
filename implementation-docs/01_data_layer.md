@@ -117,7 +117,7 @@ these models as-is.
 
 Models: `ModelConfig` (`name` required — stamped as a `model` column into every result table by
 `OutputWriter` and into the manifest), `DataConfig`, `EventConfig` (`dict[str, int | str]` — generic, no
-required keys — a flat alias map, e.g. `{birth: 42}`), `PersonsConfig`, `ReplicatesConfig` (`estimator`, `interval`,
+required keys — a flat alias map, e.g. `{birth: 42}`), `PersonsConfig`, `ReplicatesConfig` (`interval`,
 `level`, `min_replicates`, `bootstrap {n, seed}`, `convergence_curve` — resolved to
 `ReplicateSpec`, consumed by `core/replicates.py`, plan 02b), `TimingOutcomeConfig` (`event`,
 `n`, optional `origin` — **no window/frame keys exist on this model**, per 00 §5 rule 5),
@@ -179,7 +179,6 @@ class Condition:
 
 @dataclass(frozen=True)
 class ReplicateSpec:                             # resolved from replicates: config (plan 02b)
-    estimator: Literal["jeffreys", "mle", "laplace"] = "jeffreys"
     interval: Literal["jeffreys", "wilson"] = "jeffreys"
     level: float = 0.95
     min_replicates: int = 5

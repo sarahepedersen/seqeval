@@ -8,7 +8,7 @@ Three ideas recur and are worth reading first:
 
 - **Probabilities are recovered from seeds, not read off logits.** The models seqeval evaluates
   expose no probabilities. For each (person, window) we run the model under several random `seed`s
-  and count how often the event happens. That empirical frequency, lightly smoothed, *is* the
+  and count how often the event happens. That empirical frequency *is* the
   predicted probability. Everything downstream flows from this. (`src/seqeval/core/replicates.py`)
 - **Estimation is strictly per run.** A run's probability is estimated only from its own replicates
   — never pooled or shrunk toward other people. All cross-run work (calibration binning, bootstraps)
@@ -24,15 +24,16 @@ Three ideas recur and are worth reading first:
 For one (person, window) let `k` = number of replicate seeds in which the event occurred and `n` =
 number of seeds. Code: `replicate_summary` → `estimate_probability` in `core/replicates.py`.
 
-**Point estimate (default: Jeffreys posterior mean)**
+**Point estimate (MLE, unsmoothed)**
 
 ```
-p̂ = (k + ½) / (n + 1)
+p̂ = k / n
 ```
 
-Alternatives selectable by config: Laplace `(k+1)/(n+2)`, or MLE `k/n`. The MLE is unbiased but hits
-exactly 0 and 1, where log-loss and logits blow up — which is why a smoothed estimator is the
-default.
+`p̂` is the replicate frequency and nothing else, so it reads straight back as "the event happened
+in `k` of `n` runs". It is unbiased, and it reaches exactly 0 and 1 — where `logit(p̂)` is undefined
+and log-loss is finite only because it clips. That boundary behaviour is accepted deliberately: no
+smoothing is applied anywhere to the point estimate.
 
 **Empirical logit (Haldane–Anscombe) and its variance (Gart–Zweifel 1967)**
 
@@ -43,7 +44,8 @@ var_logit = 1/(k + ½) + 1/(n − k + ½)
 
 The additive-½ is the unique first-order bias-cancelling continuity correction. `var_logit` is
 emitted so anyone regressing on empirical logits has the correct weights (important under ragged
-`n`). When the estimator is Jeffreys, `logit_emp == logit(p̂)` exactly.
+`n`). It is the one smoothed quantity here — the ½ is what makes a log-odds finite at `k = 0` and
+`k = n` at all — so `logit_emp != logit(p̂)`.
 
 **Grid resolution.** Because `p̂` sits on a `1/n` grid, the report records `auc_grid_resolution =
 1/median_n` next to AUC. This is the tie granularity, not an error bar.
@@ -95,18 +97,16 @@ a large gap is itself a signal that you have too few seeds.
 
 ### 2.2b Plain MSE of the raw rate — `mse` (`metrics/ml.py`)
 
-*What it answers:* the same squared-error question as Brier, but with **no estimator machinery** — it
-uses the unsmoothed empirical rate `k/n` directly, so it depends only on the replicate counts and
-the observed outcome (no Jeffreys smoothing, no logit, no finite-seed correction).
+*What it answers:* the same squared-error question as Brier, computed straight from the counts —
+no probability machinery in the path, no finite-seed correction.
 
 ```
 mse = mean( (k/n − y_true)² )
 ```
 
-Reported alongside Brier so you can see the estimator's effect explicitly: `mse` is the Brier score
-of the MLE probability, `brier_raw` is the same on the smoothed `p̂`, and `brier_corrected` further
-removes the finite-seed inflation. At large `n` all three converge; at small `n` `mse` will read
-slightly higher because the raw rate saturates at 0/1 where the truth rarely is.
+Since `p̂` is itself `k/n`, `mse == brier_raw` exactly; `brier_corrected` is the same value with the
+finite-seed inflation removed, so the gap between them is the whole of the correction. `mse` is kept
+as the self-contained form and as the numerator `r2` rescales.
 
 ### 2.2c R² of the raw rate — `r2` (`metrics/ml.py`)
 
@@ -176,27 +176,26 @@ into an individual level and an aggregate level (`arms/forecasting.py`, `core/re
 
 ### 3.1 Individual seed stability — `_seed_stability_individual` (`arms/forecasting.py`)
 
-Per (person, window), three dispersion measures, one per outcome type. All are computed strictly
-from that person's own replicates.
+Per (person, window), computed strictly from that person's own replicates, and split across two
+tables by *what the measure is about*.
 
-- **Occurrence — `disagreement`.** How much the seeds disagree on the yes/no question "does the
-  target event occur within the horizon?" This is the Bernoulli variance of the smoothed occurrence
-  probability:
+**`replicate_occurrence`** — the named outcome. Labelled with `outcome` (the name from
+`arms.forecasting.lexis.outcome`, else the first configured outcome) and `horizon`, the cut-off in
+days the event must fall inside, so a row is readable on its own.
 
-  ```
-  disagreement = p̂ · (1 − p̂)          # ranges [0, 0.25]
-  ```
-
-  0 = every seed agrees (fully stable); 0.25 = a coin flip at `p̂ = 0.5` (maximally unstable).
+- **Occurrence — `p_hat`.** The probability the outcome happens within the horizon, as the raw
+  replicate frequency `n_occurred/n`. `n` and `n_occurred` are carried alongside.
 
 - **Timing — `timing_spread`.** Inter-quantile width of the predicted age at first occurrence across
   seeds: `q90 − q10`. Wider = the seeds disagree more about *when*.
 
-- **Count — `count_var`.** Predictive variance across seeds of the completed event count for that
-  person.
+**`replicate_variance_individual`** — the birth-event count, independent of any configured outcome.
 
-These are plug-in dispersions, **not** resampling procedures. In the report the individual table is
-down-sampled to five randomly chosen persons (the full table is in the parquet).
+- **Count — `expected_quantum`, `within_seed_var`, `within_seed_cv`.** Predictive mean, variance and
+  coefficient of variation across seeds of that person's completed event count.
+
+These are plug-in dispersions, **not** resampling procedures. In the report both tables are
+down-sampled to five randomly chosen persons (the full tables are in the parquet).
 
 ### 3.2 Aggregate seed stability
 
@@ -257,7 +256,7 @@ A cell with `n_evaluable = 0` produces no score and is flagged in the report.
 
 | Concern | Code |
 |---|---|
-| Per-run probability, estimators, logit/variance | `core/replicates.py` (`replicate_summary`, `estimate_probability`) |
+| Per-run probability, logit/variance | `core/replicates.py` (`replicate_summary`, `estimate_probability`) |
 | AUC, Brier, log-loss, ECE, calibration table, timing coverage | `metrics/ml.py` |
 | Brier finite-seed correction | `core/replicates.py` (`brier_noise_correction`) |
 | Calibration null band | `core/replicates.py` (`null_calibration_band`) |

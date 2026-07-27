@@ -223,10 +223,9 @@ class ReplicateSpec:
 
     Parameters
     ----------
-    estimator : {"jeffreys", "mle", "laplace"}, default "jeffreys"
-        Smoothed point estimator for the per-run probability.
     interval : {"jeffreys", "wilson"}, default "jeffreys"
-        Interval method for the per-run probability.
+        Interval method for the per-run probability. The point estimate is always the unsmoothed
+        MLE ``k/n``.
     level : float, default 0.95
         Confidence level for intervals.
     min_replicates : int, default 5
@@ -235,14 +234,10 @@ class ReplicateSpec:
         Number of seed-bootstrap resamples for aggregate-metric CIs; 0 disables.
     bootstrap_seed : int, default 7
         Seed for the bootstrap RNG.
-    convergence_curve : bool, default True
-        Whether to emit metric-vs-number-of-seeds convergence diagnostics.
     """
 
-    estimator: Literal["jeffreys", "mle", "laplace"] = "jeffreys"
     interval: Literal["jeffreys", "wilson"] = "jeffreys"
     level: float = 0.95
     min_replicates: int = 5
     bootstrap_n: int = 200
     bootstrap_seed: int = 7
-    convergence_curve: bool = True

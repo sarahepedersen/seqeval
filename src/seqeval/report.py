@@ -98,11 +98,9 @@ def input_records(cfg) -> dict[str, dict]:
 def coverage_block(bundle, cfg) -> dict:
     """Population + window×replicate grid for the manifest and report run-summary.
 
-    Windows are emitted in **years** (user-facing) with an ``under_min_replicates`` flag per window
-    (00 section 3b: too few replicates make the probability grid coarser than calibration bins).
+    Windows are emitted in **years**.
     """
     summary = bundle.population_summary()
-    min_reps = cfg.replicates.min_replicates
     windows = []
     for row in bundle.available_windows().itertuples(index=False):
         windows.append(
@@ -111,14 +109,12 @@ def coverage_block(bundle, cfg) -> dict:
                 "age_stop": round(days_to_years(int(row.age_stop)), 2),
                 "n_seeds": int(row.n_seeds),
                 "n_persons": int(row.n_persons),
-                "under_min_replicates": bool(int(row.n_seeds) < min_reps),
             }
         )
     return {
         "n_persons": summary["n_persons"],
         "sex_breakdown": summary["sex_breakdown"],
         "cohort_range": summary["cohort_range"],
-        "min_replicates": min_reps,
         "windows": windows,
     }
 
@@ -204,7 +200,9 @@ code { background: #f2f2f2; padding: .1rem .3rem; border-radius: 3px; }
 _RELIABILITY_RE = re.compile(r"^reliability_(.+)_w(\d+)$")
 
 #: Day-valued columns that the forecasting tables display converted to years.
-_DAY_COLUMNS = ("age", "age_start", "age_stop", "duration", "timing_spread", "q10", "q90")
+_DAY_COLUMNS = (
+    "age", "age_start", "age_stop", "duration", "horizon", "timing_spread", "q10", "q90",
+)
 
 
 def _to_years_display(df: pd.DataFrame) -> pd.DataFrame:
@@ -260,7 +258,7 @@ def _coverage_summary(results_dir: Path) -> str:
     condition, how many persons actually contribute a score (``n_evaluable``) versus how many were
     excluded because the answer was fixed at jump-off (``n_settled``) or the sequence ran out before
     the frame closed (``n_uncovered``). Cells with zero evaluable persons are flagged — they produce
-    no score, reliability, or convergence figure. Returns ``""`` when the arm did not run.
+    no score or reliability figure. Returns ``""`` when the arm did not run.
     """
     path = results_dir / "backtesting" / "coverage.parquet"
     if not path.exists():
@@ -342,22 +340,13 @@ def _run_summary_section(manifest: dict, results_dir: Path) -> str:
 
     windows = cov.get("windows", [])
     if windows:
-        wr = [
-            "<tr><th>age_start</th><th>age_stop</th><th>n_seeds</th><th>n_persons</th>"
-            "<th>replicates</th></tr>"
-        ]
+        wr = ["<tr><th>age_start</th><th>age_stop</th><th>n_seeds</th><th>n_persons</th></tr>"]
         for w in windows:
-            flag = '<span class="flag">below min</span>' if w.get("under_min_replicates") else "ok"
             wr.append(
                 f"<tr><td>{w['age_start']}</td><td>{w['age_stop']}</td>"
-                f"<td>{w['n_seeds']}</td><td>{w['n_persons']}</td><td>{flag}</td></tr>"
+                f"<td>{w['n_seeds']}</td><td>{w['n_persons']}</td></tr>"
             )
-        note = (
-            f'<p class="muted">Windows below {cov.get("min_replicates")} replicates give a '
-            "probability grid coarser than 1/n; calibration bins finer than that are not "
-            "meaningful.</p>"
-        )
-        out.append(f"<h3>Windows × replicates</h3><table>{''.join(wr)}</table>{note}")
+        out.append(f"<h3>Windows × replicates</h3><table>{''.join(wr)}</table>")
 
     return "\n".join(out)
 
@@ -428,9 +417,9 @@ def _backtest_metrics_table(path: Path, *, bootstrap_n: int | None = None) -> st
         )
         ci_note = f" Parentheses are 95% CIs{reps}."
     note = (
-        '<p class="muted">Brier is the finite-seed-corrected Brier score (uses the smoothed '
-        "<code>p̂</code>); MSE is the plain squared error of the raw rate <code>k/n</code> against "
-        "the observed outcome; R² rescales that by the outcome variance (1 = perfect, 0 = base "
+        '<p class="muted">Brier is the finite-seed-corrected Brier score; MSE is the same '
+        "squared error of <code>p̂ = k/n</code> against the observed outcome without that "
+        "correction; R² rescales MSE by the outcome variance (1 = perfect, 0 = base "
         f"rate); AUC is rank-based (tie-corrected).{ci_note} One row per outcome × jump-off.</p>"
     )
     return f"<h3>Backtest metrics</h3><table>{header}{''.join(rows)}</table>{note}"
@@ -485,8 +474,10 @@ def _gen_vs_obs_section(arm_dir: Path) -> str:
         return ""
     return (
         '<h3 id="gen-vs-obs">Generated vs observed</h3>'
-        '<p class="muted">Observed "truth" (black) under the generated across-seed median and IQR '
-        "band (orange), per jump-off.</p>" + "".join(blocks)
+        '<p class="muted">Observed "truth" (black) under the generated across-seed mean and its '
+        "replicate-uncertainty band (orange), per jump-off. The band is the Monte-Carlo error of "
+        "the plotted mean (<code>±z·sd/&radic;K</code> across seeds), the same quantity reported "
+        "as <code>se</code> in the forecasting arm's aggregate CCF table.</p>" + "".join(blocks)
     )
 
 
@@ -547,27 +538,32 @@ def _sample_persons_html(path: Path, n_people: int = 5, *, to_years: bool = Fals
     return caption + table
 
 
-def _forecasting_section(arm_dir: Path, *, bootstrap_n: int | None = None) -> str:
+def _forecasting_section(arm_dir: Path) -> str:
     """Forecasting: figures, per-person tables sampled to 5 individuals, and aggregate tables."""
     figures = sorted(p for p in arm_dir.iterdir() if p.suffix in _EMBED_SUFFIXES)
     parts = ['<h2 id="forecasting">Forecasting</h2>']
     parts.extend(_figure_html(fig) for fig in figures)
     # per-person tables → sample 5 individuals; aggregate tables → full. Ages/times shown in years.
-    for name in ("seed_stability_individual", "violations"):
+    for name in ("replicate_variance_individual", "replicate_occurrence", "violations"):
         p = arm_dir / f"{name}.parquet"
         if p.exists():
             parts.append(_sample_persons_html(p, to_years=True))
-    for name in ("seed_stability_aggregate", "violation_rates"):
+            if name == "replicate_occurrence":
+                parts.append(
+                    '<p class="muted">Per-person replicate summary of the named '
+                    "<code>outcome</code>: whether it occurs inside <code>horizon</code>, and how "
+                    "much the seeds disagree about when (<code>timing_spread</code>, the q90–q10 "
+                    "width). <code>p_hat</code> is the raw replicate frequency "
+                    "<code>n_occurred/n</code>.</p>"
+                )
+    for name in ("replicate_variance_aggregate", "violation_rates"):
         p = arm_dir / f"{name}.parquet"
         if p.exists():
             parts.append(_table_html(p, to_years=True))
-            if name == "seed_stability_aggregate":
-                reps = (
-                    f"{bootstrap_n} seed-bootstrap resamples" if bootstrap_n else "seed bootstrap"
-                )
+            if name == "replicate_variance_aggregate":
                 parts.append(
-                    f'<p class="muted">Aggregate seed-stability CIs come from {reps} '
-                    "(seed labels resampled with replacement within each window).</p>"
+                    '<p class="muted">Aggregate CIs come from the replicate-variance '
+                    "decomposition (between-person plus within-person seed variance).</p>"
                 )
     return "\n".join(parts) if len(parts) > 1 else ""
 
@@ -592,7 +588,7 @@ def build_report(results_dir: str | Path) -> Path:
     results_dir = Path(results_dir)
     manifest = read_manifest(results_dir) or {}
 
-    # Bootstrap-resample count backs both the backtest-metric CIs and the seed-stability CIs.
+    # Bootstrap-resample count backs the backtest-metric CIs.
     boot_n = (
         manifest.get("config_resolved", {})
         .get("replicates", {})
@@ -602,7 +598,7 @@ def build_report(results_dir: str | Path) -> Path:
     arm_renderers = {
         "descriptives": _descriptives_section,
         "backtesting": lambda d: _backtesting_section(d, bootstrap_n=boot_n),
-        "forecasting": lambda d: _forecasting_section(d, bootstrap_n=boot_n),
+        "forecasting": lambda d: _forecasting_section(d),
     }
     sections = [_run_summary_section(manifest, results_dir)]
     present_arms = []

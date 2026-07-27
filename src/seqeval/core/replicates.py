@@ -2,7 +2,7 @@
 
 Models expose no logits, so **probabilities are recovered empirically from the distribution of
 outcomes across replicate runs** — multiple ``seed`` values per (person, window). Everything
-probabilistic downstream (calibration, ROC-AUC, Brier, timing calibration, seed stability,
+probabilistic downstream (calibration, ROC-AUC, Brier, timing calibration, replicate variance,
 uncertainty bands) flows through this one engine, and the recovered probability is the event
 probability *under the inference-time sampling procedure* (temperature, top-k, …) — the generative
 system as actually used, not any internal softmax.
@@ -18,14 +18,17 @@ For ``k ~ Binomial(n, p)``:
   so **c = ½ is the unique first-order-bias-cancelling choice for all p**. Gart's variance
   ``var_logit = 1/(k+½) + 1/(n−k+½)`` is emitted as a required column (users regressing on empirical
   logits need it as weights, especially under ragged n).
-- **Smoothed point estimators:** Jeffreys posterior mean ``(k+½)/(n+1)`` (default), Laplace
-  ``(k+1)/(n+2)``, MLE ``k/n``.
-- **Intervals:** Jeffreys (``Beta(k+½, n−k+½)`` quantiles; default) or Wilson. The normal
+- **Point estimate:** the MLE ``k/n``, unsmoothed. ``p_hat`` is the replicate frequency and
+  nothing else, so a table entry can always be read straight back as "the outcome happened in
+  ``k`` of ``n`` runs". The cost is the boundaries: ``p_hat`` reaches exactly 0 and 1, where
+  logits are undefined and log-loss is only finite because it clips.
+- **Intervals:** Jeffreys (``Beta(k+½, n−k+½)`` quantiles; default) or Wilson. These are interval
+  methods, not smoothing — the point estimate they surround stays ``k/n``. The normal
   approximation is intentionally unsupported (poor at small n / extreme p).
 
-Coherence identity (tested): ``logit_emp == logit(p_hat)`` exactly when ``estimator == "jeffreys"``
-(both reduce to ``(k+½)`` vs ``(n−k+½)``); with ``mle``/``laplace``, ``logit_emp`` stays
-Haldane–Anscombe by definition.
+``logit_emp`` is the one deliberately smoothed quantity: the Haldane–Anscombe correction is what
+makes a log-odds finite at ``k = 0`` and ``k = n`` at all, so it is defined independently of
+``p_hat`` and ``logit_emp != logit(p_hat)`` in general.
 
 Estimation is strictly per run
 ------------------------------
@@ -46,9 +49,8 @@ n     ``|logit| ≤``    approx p range
 200   6.00             ~[0.002, 0.998]
 ===== ================ =====================
 
-Rare outcomes at small n saturate the estimator (heavy shrinkage toward zero log-odds); the
-convergence curve (:func:`convergence_curve`) is how a researcher discovers they need more
-replicates.
+Rare outcomes at small n saturate ``logit_emp`` (heavy shrinkage toward zero log-odds); a p_hat
+that has not stabilized as replicates accumulate is how a researcher discovers they need more.
 
 Informative-censoring guard
 ---------------------------
@@ -88,7 +90,6 @@ __all__ = [
     "brier_noise_correction",
     "null_calibration_band",
     "seed_bootstrap",
-    "convergence_curve",
     "AUC_TIE_NOTE",
 ]
 
@@ -143,29 +144,18 @@ def _warn_ragged_n(summary: pd.DataFrame) -> None:
         )
 
 
-def _point_estimate(k: np.ndarray, n: np.ndarray, estimator: str) -> np.ndarray:
-    """Smoothed per-run probability by estimator name."""
-    if estimator == "jeffreys":
-        return (k + 0.5) / (n + 1)
-    if estimator == "laplace":
-        return (k + 1) / (n + 2)
-    if estimator == "mle":
-        return k / n
-    raise ValueError(f"unknown estimator {estimator!r}; use jeffreys | laplace | mle")
-
-
 def estimate_probability(summary: pd.DataFrame, *, spec: ReplicateSpec) -> pd.DataFrame:
     """Add probability columns to a run summary (strictly per run — no pooling).
 
-    Returns ``[*run_keys, k, n, p_hat, logit_emp, var_logit, ci_lo, ci_hi]``: ``p_hat`` per
-    ``spec.estimator``; ``logit_emp``/``var_logit`` always Haldane–Anscombe; the CI per
+    Returns ``[*run_keys, k, n, p_hat, logit_emp, var_logit, ci_lo, ci_hi]``: ``p_hat`` is the
+    unsmoothed MLE ``k/n``; ``logit_emp``/``var_logit`` are Haldane–Anscombe; the CI is per
     ``spec.interval`` at ``spec.level``.
     """
     run_keys = [c for c in summary.columns if c not in ("k", "n")]
     k = summary["k"].to_numpy().astype(np.float64)
     n = summary["n"].to_numpy().astype(np.float64)
 
-    p_hat = _point_estimate(k, n, spec.estimator)
+    p_hat = k / n
     logit_emp = np.log((k + 0.5) / (n - k + 0.5))
     var_logit = 1.0 / (k + 0.5) + 1.0 / (n - k + 0.5)
     ci_lo, ci_hi = _interval(k, n, spec.interval, spec.level)
@@ -254,9 +244,11 @@ def count_distribution(
 
 
 def count_moments(count_table: pd.DataFrame, *, run_keys: list[str], seed_col: str) -> pd.DataFrame:
-    """Per-run predictive ``mean`` and ``var`` of the ``count`` column (population variance)."""
+    """Per-run predictive ``mean``, ``var`` and replicate count ``k`` of the ``count`` column.
+    """
     grouped = count_table.groupby(run_keys, observed=True)["count"]
-    out = grouped.agg(mean="mean", var=lambda s: s.var(ddof=0)).reset_index()
+    # ddof = 0 because this is a descriptive property of the distribution for the individual 
+    out = grouped.agg(mean="mean", var=lambda s: s.var(ddof=0), k="size").reset_index()
     return out.sort_values(run_keys).reset_index(drop=True)
 
 
@@ -287,31 +279,28 @@ def null_calibration_band(
     strategy: str = "uniform",
     n_sims: int = 200,
     rng: np.random.Generator,
-    estimator: str = "jeffreys",
     band_level: float = 0.95,
 ) -> pd.DataFrame:
     """Reliability-diagram scatter envelope expected under **perfect** calibration.
 
-    Treating each run's own smoothed ``p_hat`` (its stated probability, under ``estimator``) as the
-    true probability, simulate ``k* ~ Binomial(n, p_true)`` (the model's noisy re-estimate) and an
-    independent realized outcome ``y* ~ Bernoulli(p_true)``, bin runs by the re-estimated
-    probability, and record the observed frequency per bin. Repeated ``n_sims`` times, this yields
-    the per-bin ``(lo, hi)`` envelope a perfectly calibrated model would produce at the observed
-    ``n`` profile. A model is only demonstrably miscalibrated where its curve exits this band — the
-    guard against over-reading MC noise as miscalibration. Anchoring on the smoothed ``p_hat``
-    rather than raw ``k/n`` avoids a degenerate band at small n (where many runs have ``k/n`` at
-    exactly 0 or 1). Returns ``[bin, bin_left, bin_right, lo, hi]``.
+    Treating each run's own ``p_hat = k/n`` as the true probability, simulate
+    ``k* ~ Binomial(n, p_true)`` (the model's noisy re-estimate) and an independent realized
+    outcome ``y* ~ Bernoulli(p_true)``, bin runs by the re-estimated probability, and record the
+    observed frequency per bin. Repeated ``n_sims`` times, this yields the per-bin ``(lo, hi)``
+    envelope a perfectly calibrated model would produce at the observed ``n`` profile. A model is
+    only demonstrably miscalibrated where its curve exits this band — the guard against
+    over-reading MC noise as miscalibration. Returns ``[bin, bin_left, bin_right, lo, hi]``.
 
-    Limitation: because the only truth signal available is each run's own ``p_hat``, the band
-    captures the estimation- and finite-sample scatter but *not* the estimator's own small-n
-    shrinkage bias — at very small n (e.g. 5) ``p_hat`` is a coarse, shrunk view of the true
-    probability, so a perfectly-calibrated model's reliability curve can still exit the band. At
-    that point the reliability diagram itself is unreliable; :func:`convergence_curve` is the
-    correct tool to decide whether more replicates are needed.
+    Limitation: the only truth signal available is each run's own ``p_hat``, which at small n is a
+    coarse view of the true probability that piles up on exactly 0 and 1. The outer bins are then
+    anchored on runs whose ``p_true`` is degenerate, and the band there collapses toward the bin
+    edge — so a perfectly-calibrated model's reliability curve can still exit it. At that point the
+    reliability diagram itself is unreliable, and the fix is to generate more replicates before
+    reading it.
     """
     k = summary["k"].to_numpy().astype(np.float64)
     n = summary["n"].to_numpy().astype(np.float64)
-    p_true = _point_estimate(k, n, estimator)
+    p_true = k / n
 
     if strategy == "uniform":
         edges = np.linspace(0.0, 1.0, n_bins + 1)
@@ -325,7 +314,7 @@ def null_calibration_band(
     freqs = np.full((n_sims, n_bins), np.nan)
     for s in range(n_sims):
         k_star = rng.binomial(n.astype(int), p_true)
-        p_pred = _point_estimate(k_star.astype(np.float64), n, estimator)
+        p_pred = k_star.astype(np.float64) / n
         y_star = (rng.random(len(n)) < p_true).astype(np.float64)
         idx = np.clip(np.digitize(p_pred, edges, right=False) - 1, 0, n_bins - 1)
         for b in range(n_bins):
@@ -436,58 +425,3 @@ def seed_bootstrap(
     point = _melt_stat(stat_fn(df), value_cols).rename(columns={"__value__": "estimate"})
     merge_keys = [c for c in point.columns if c != "estimate"]
     return ci.merge(point, on=merge_keys, how="left")
-
-
-def convergence_curve(
-    df: pd.DataFrame,
-    *,
-    seed_col: str,
-    stat_fn: Callable[[pd.DataFrame], pd.DataFrame],
-    sizes: list[int] | None = None,
-    n_rep: int,
-    rng: np.random.Generator,
-    value_cols: list[str] | None = None,
-) -> pd.DataFrame:
-    """Dispersion of an aggregate ``stat_fn`` vs number of seeds ``m`` — the actionable diagnostic.
-
-    For each ``m`` in ``sizes`` (default ``2..n``), subsample ``m`` seeds *without replacement*
-    within each window ``n_rep`` times, recompute ``stat_fn``, and report the mean and standard
-    deviation across repetitions. ``value_cols`` names the statistic columns explicitly (needed
-    when grouping keys are numeric). Because inference is upstream, "your estimate has not
-    stabilized at m seeds" tells the researcher to generate more replicates — a replicate-count
-    power analysis.
-    Returns ``[*keys, metric, m, mean, std]``.
-    """
-    _, groups = _window_seed_groups(df, seed_col)
-    seed_index = {
-        key: {s: sub for s, sub in g.groupby(seed_col, observed=True)} for key, g in groups.items()
-    }
-    n_seeds = min(len(v) for v in seed_index.values())
-    if sizes is None:
-        sizes = list(range(2, n_seeds + 1))
-
-    rows = []
-    for m in sizes:
-        if m > n_seeds:
-            continue
-        reps = []
-        for _ in range(n_rep):
-            parts = []
-            for per_seed in seed_index.values():
-                seeds = np.array(list(per_seed.keys()))
-                chosen = rng.choice(seeds, size=m, replace=False)
-                parts.extend(per_seed[s] for s in chosen)
-            reps.append(_melt_stat(stat_fn(pd.concat(parts, ignore_index=True)), value_cols))
-        stacked = pd.concat(reps, ignore_index=True)
-        keys = [c for c in stacked.columns if c != "__value__"]
-        agg = (
-            stacked.groupby(keys, observed=True)["__value__"]
-            .agg(mean="mean", std=lambda s: s.std(ddof=0))
-            .reset_index()
-        )
-        agg["m"] = m
-        rows.append(agg)
-
-    out = pd.concat(rows, ignore_index=True)
-    front = [c for c in out.columns if c not in ("m", "mean", "std")]
-    return out[[*front, "m", "mean", "std"]]

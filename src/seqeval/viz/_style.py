@@ -21,8 +21,13 @@ def new_fig(figsize: tuple[float, float] = FIGSIZE) -> tuple[Figure, plt.Axes]:
     return fig, ax
 
 
-def stratum_colors(n: int) -> list:
-    """``n`` evenly-spaced colors from the shared colormap, for one line per stratum."""
+def stratum_colors(n: int, *, lo: float = 0.0, hi: float = 1.0) -> list:
+    """``n`` evenly-spaced colors from the shared colormap, for one line per stratum.
+
+    ``lo``/``hi`` restrict the span of the ramp. The default is the whole map; pass a narrowed
+    range (e.g. ``lo=0.1, hi=0.85``) for line work on white, where viridis's pale yellow end is
+    too low-contrast to read as a curve.
+    """
     if n <= 1:
-        return [_CMAP(0.5)]
-    return [_CMAP(i / (n - 1)) for i in range(n)]
+        return [_CMAP((lo + hi) / 2)]
+    return [_CMAP(lo + (hi - lo) * i / (n - 1)) for i in range(n)]

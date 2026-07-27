@@ -40,7 +40,7 @@ def _pipeline(gen_hazards, n_seeds, *, seed=0, n=2500):
     gen = S.simulate_generated(obs, pers, gen_hazards, [WIN], n_seeds, rng)
     ev = O.evaluate_count(gen, GK, SPEC, O.observation_spans(gen, GK), jumpoff=JO)
     summ = rep.replicate_summary(ev, run_keys=RK)
-    est = rep.estimate_probability(summ, spec=ReplicateSpec(estimator="jeffreys"))
+    est = rep.estimate_probability(summ, spec=ReplicateSpec())
     oev = O.evaluate_count(
         obs, ["person_id"], SPEC, O.observation_spans(obs, ["person_id"]), jumpoff=JO
     )
@@ -49,7 +49,7 @@ def _pipeline(gen_hazards, n_seeds, *, seed=0, n=2500):
 
 def _band_coverage(summ, joined, rng):
     band = rep.null_calibration_band(
-        summ, n_bins=10, strategy="uniform", n_sims=300, rng=rng, estimator="jeffreys"
+        summ, n_bins=10, strategy="uniform", n_sims=300, rng=rng
     )
     cal = ml.calibration_table(joined, n_bins=10, strategy="uniform").merge(band, on="bin")
     valid = cal[cal["n"] >= 10]
@@ -111,7 +111,7 @@ model: {name: perfect}
 data: {observed: o.parquet, age_unit: days}
 events: {birth: birth}
 persons: {cohort_width: 5}
-replicates: {min_replicates: 5, bootstrap: {n: 0, seed: 7}, convergence_curve: false}
+replicates: {min_replicates: 5, bootstrap: {n: 0, seed: 7}}
 outcomes:
   first_birth: {event: birth, n: 1}
 arms:
@@ -214,7 +214,7 @@ def test_no_scalar_metric_figures_are_emitted(tmp_path):
     """AUC/Brier live in the report's metrics table; the arm draws no line charts for them."""
     out = _run_arm(tmp_path)
     figs = {p.name for p in out.written if p.suffix == ".png"}
-    assert not [f for f in figs if f.startswith(("metric_vs_jumpoff", "convergence"))]
+    assert not [f for f in figs if f.startswith("metric_vs_jumpoff")]
     assert (out.dir / "scores.parquet").exists()  # the numbers themselves are still written
 
 

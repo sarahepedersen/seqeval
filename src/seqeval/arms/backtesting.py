@@ -68,7 +68,7 @@ def run(
     ``outcomes``/``conditions``/``prob_outcomes``/``replicate_spec`` are the resolved objects from
     ``config.resolve_*`` (passed in, like the descriptives registry, because they live at the top
     level of the config). Writes ``probabilities``, ``calibration``, ``scores``,
-    ``aggregate_error``, ``coverage`` and (when configured) ``convergence`` parquet tables.
+    ``aggregate_error`` and ``coverage`` parquet tables.
     """
     if bundle.generated is None:
         logger.warning("backtesting: no generated file; arm skipped")
@@ -89,9 +89,11 @@ def run(
             "scores",
             "aggregate_error",
             "coverage",
-            "convergence",
         )
     }
+    # Overlay curves kept across the window loop, keyed by family ("ccf" / "km:<outcome>"), so the
+    # per-jump-off figures can be joined into one cross-window comparison panel at the end.
+    panels: dict[str, dict] = {}
 
     for t1, t2 in windows:
         gen_w = bundle.generated[
@@ -137,11 +139,11 @@ def run(
                 replicate_spec,
                 acc,
                 out,
+                panels,
             )
 
-    # No metric-vs-jump-off or seed-convergence figures: AUC/Brier read better as numbers than as
-    # lines, so the report's per-outcome metrics table (from `scores`) is the single home for them;
-    # `convergence` stays a table for anyone who wants to check seed sufficiency directly.
+    _emit_jumpoff_panels(panels, out, replicate_spec.level)
+
     for name, frames in acc.items():
         if frames:
             out.frame(name, pd.concat(frames, ignore_index=True))
@@ -208,11 +210,6 @@ def _score_probability_outcome(
     scores = _score_row(spec, joined, summary, gen_w, observed, t1, t2, binning)
     cis = _score_cis(gen_eval, obs_eval, replicate_spec, binning)
     acc["scores"].append(_stamp_scores(scores, label, cis))
-
-    if replicate_spec.convergence_curve:
-        conv = _convergence(gen_eval, obs_eval, replicate_spec)
-        if conv is not None:
-            acc["convergence"].append(_stamp(conv, label))
 
 
 def _evaluate_observed(spec, observed, spans_obs, t2) -> pd.DataFrame:
@@ -419,41 +416,6 @@ def _emit_timing_calibration(spec, gen_w, observed, t1, t2, out, desc, scored) -
     )
 
 
-def _convergence(gen_eval, obs_eval, spec) -> pd.DataFrame | None:
-    truth = obs_eval.loc[obs_eval["evaluable"], ["person_id", "occurred"]].rename(
-        columns={"occurred": "y_true"}
-    )
-    truth["y_true"] = truth["y_true"].astype(int)
-
-    def stat_fn(df: pd.DataFrame) -> pd.DataFrame:
-        summ = rep.replicate_summary(df, run_keys=_RUN_KEYS)
-        est = rep.estimate_probability(summ, spec=spec)
-        j = est.merge(truth, on="person_id", how="inner")
-        if j.empty or j["y_true"].nunique() < 2:
-            return pd.DataFrame({"auc": [np.nan], "brier": [np.nan], "ece": [np.nan]})
-        return pd.DataFrame(
-            {
-                "auc": [ml.roc_auc(j)],
-                "brier": [ml.brier(j)["corrected"]],
-                "ece": [ml.ece(ml.calibration_table(j, strategy="uniform"))],
-            }
-        )
-
-    n_seeds = int(gen_eval["seed"].nunique())
-    if n_seeds < 3:
-        return None
-    sizes = sorted({2, 3, 5, 10, n_seeds} & set(range(2, n_seeds + 1)))
-    return rep.convergence_curve(
-        gen_eval,
-        seed_col="seed",
-        stat_fn=stat_fn,
-        sizes=sizes,
-        n_rep=10,
-        rng=np.random.default_rng(spec.bootstrap_seed),
-        value_cols=["auc", "brier", "ece"],
-    )
-
-
 # =================================================================================================
 # aggregate targets
 # =================================================================================================
@@ -471,6 +433,7 @@ def _score_aggregate_target(
     replicate_spec,
     acc,
     out,
+    panels,
 ) -> None:
     if persons is None and target != "ppr":
         logger.warning("backtesting: skipping aggregate target %r — needs persons", target)
@@ -501,21 +464,26 @@ def _score_aggregate_target(
     err.insert(0, "target", target)
     acc["aggregate_error"].append(_stamp(err, _cell_label(t1, t2, target, None)))
 
-    # Generated-vs-observed overlays: the observed "truth" under the generated across-seed band.
+    # Generated-vs-observed overlays: the observed "truth" under the generated replicate-CI band.
     jumpoff_y = round(days_to_years(t2))
     if target.startswith("km:"):
-        _emit_km_overlay(target[len("km:") :], combined, observed, outcomes, t2, out)
+        _emit_km_overlay(
+            target[len("km:") :], combined, observed, outcomes, t2, out,
+            replicate_spec.level, panels,
+        )
     elif target == "ccf":
         out.figure(
             f"ccf_overlay_w{jumpoff_y}",
             viz_backtest.plot_ccf_seed_band(
-                obs_m, gen_m, title=f"CCF by cohort — jump-off {jumpoff_y}y"
+                obs_m, gen_m, title=f"CCF by cohort — jump-off {jumpoff_y}y",
+                level=replicate_spec.level,
             ),
         )
+        _stash_panel(panels, "ccf", obs_m, gen_m, t2)
 
 
-def _emit_km_overlay(name, combined, observed, outcomes, t2, out) -> None:
-    """Emit the observed KM curve overlaid with the generated across-seed median + IQR band."""
+def _emit_km_overlay(name, combined, observed, outcomes, t2, out, level, panels) -> None:
+    """Emit the observed KM curve under the generated across-seed mean + Monte-Carlo CI band."""
     spec = outcomes[name]
     obs_km = sv.kaplan_meier(time_to_event(observed, OBS_KEYS, spec), by=[])
     gen_km = sv.kaplan_meier(time_to_event(combined, GEN_KEYS, spec), by=["seed"])
@@ -523,9 +491,46 @@ def _emit_km_overlay(name, combined, observed, outcomes, t2, out) -> None:
     out.figure(
         f"km_overlay_{name}_w{jumpoff_y}",
         viz_backtest.plot_km_seed_band(
-            obs_km, gen_km, title=f"{name} survival — jump-off {jumpoff_y}y"
+            obs_km, gen_km, title=f"{name} survival — jump-off {jumpoff_y}y", level=level
         ),
     )
+    _stash_panel(panels, f"km:{name}", obs_km, gen_km, t2)
+
+
+def _stash_panel(panels: dict, key: str, obs: pd.DataFrame, gen: pd.DataFrame, t2: int) -> None:
+    """Keep one window's curves for the cross-jump-off panel emitted after the window loop.
+
+    The observed curve does not depend on the jump-off (it is computed from ``observed`` alone), so
+    the first window's copy is kept and later ones discarded rather than stored per window.
+    """
+    entry = panels.setdefault(key, {"obs": obs, "gen": {}})
+    entry["gen"][int(t2)] = gen
+
+
+def _emit_jumpoff_panels(panels: dict, out, level: float) -> None:
+    """One all-jump-offs comparison figure per overlay family, when there are ≥2 windows to compare.
+
+    With a single window the panel would duplicate that window's own figure, so it is skipped.
+    """
+    for key, entry in sorted(panels.items()):
+        if len(entry["gen"]) < 2:
+            continue
+        if key == "ccf":
+            out.figure(
+                "ccf_overlay_all_jumpoffs",
+                viz_backtest.plot_ccf_jumpoff_panel(
+                    entry["obs"], entry["gen"], title="CCF by cohort — all jump-offs", level=level
+                ),
+            )
+        else:
+            name = key[len("km:") :]
+            out.figure(
+                f"km_overlay_{name}_all_jumpoffs",
+                viz_backtest.plot_km_jumpoff_panel(
+                    entry["obs"], entry["gen"],
+                    title=f"{name} survival — all jump-offs", level=level,
+                ),
+            )
 
 
 class _UnsupportedTarget(Exception):

@@ -87,6 +87,80 @@ def _ccf(cohorts, values, complete, seeds=None):
     return frame
 
 
+def test_seed_ci_is_the_standard_error_of_the_across_seed_mean():
+    """The band is mean ± z·sd/√K on the population sd — it shrinks as seeds are added."""
+    values = np.array([[1.0, 2.0, 3.0, 4.0], [2.0, 2.0, 2.0, 2.0], [3.0, 2.0, 1.0, 0.0]])
+    mean, lo, hi = B._seed_ci(values, 0.95)
+    np.testing.assert_allclose(mean, [2.0, 2.0, 2.0, 2.0])
+    half = 1.959963985 * values.std(axis=0, ddof=0) / np.sqrt(3)
+    np.testing.assert_allclose(hi - mean, half)
+    np.testing.assert_allclose(mean - lo, half)
+
+
+def test_seed_ci_matches_the_analytic_aggregate_ccf_standard_error():
+    """The plotted band and ``replicate_variance_aggregate.se`` estimate the same quantity.
+
+    The table computes ``sqrt(Σ_i s²_i/K)/n`` from per-person moments; the figure computes
+    ``sd/√K`` from the K per-seed CCFs. They agree because persons are independent within a seed,
+    which is what makes the two panels' uncertainty comparable at all.
+    """
+    rng = np.random.default_rng(11)
+    n_persons, k_seeds = 500, 20
+    counts = rng.poisson(2.1, size=(n_persons, k_seeds)).astype(float)  # person x seed
+
+    ccf_per_seed = counts.mean(axis=0)  # what the figure sees
+    _, lo, hi = B._seed_ci(ccf_per_seed, 0.95)
+    figure_se = (hi - lo) / 2 / 1.959963985
+
+    s2 = counts.var(axis=1, ddof=0)  # what the table sees: per-person moments
+    table_se = np.sqrt(np.sum(s2 / k_seeds)) / n_persons
+
+    assert abs(figure_se / table_se - 1) < 0.15
+
+
+def test_ccf_jumpoff_panel_draws_one_labelled_curve_per_window():
+    obs = _ccf([1950, 1960], [2.1, 2.0], [True, True])
+    gen = {
+        yd(25): _ccf([1950, 1960] * 2, [2.0, 1.9, 2.2, 2.1], [True] * 4, seeds=[0, 0, 1, 1]),
+        yd(30): _ccf([1950, 1960] * 2, [2.05, 1.95, 2.15, 2.05], [True] * 4, seeds=[0, 0, 1, 1]),
+    }
+    labels = [ln.get_label() for ln in B.plot_ccf_jumpoff_panel(obs, gen).axes[0].lines]
+    assert labels == ["jump-off 25y", "jump-off 30y", "observed"]  # ordered by jump-off
+
+
+def test_jumpoff_panels_colour_windows_in_jumpoff_order():
+    """Colour encodes the jump-off's rank, so it must not depend on insertion order."""
+    obs = _ccf([1950, 1960], [2.1, 2.0], [True, True])
+
+    def one(t2, v):
+        return _ccf([1950, 1960] * 2, [v, v, v, v], [True] * 4, seeds=[0, 0, 1, 1])
+
+    forward = {yd(25): one(25, 2.0), yd(30): one(30, 2.1)}
+    reversed_ = {yd(30): one(30, 2.1), yd(25): one(25, 2.0)}
+    colors = [
+        [ln.get_color() for ln in B.plot_ccf_jumpoff_panel(obs, g).axes[0].lines]
+        for g in (forward, reversed_)
+    ]
+    assert colors[0] == colors[1]
+
+
+def test_km_jumpoff_panel_marks_each_windows_jumpoff():
+    obs_km = pd.DataFrame({"time": [yd(20), yd(30)], "survival": [0.9, 0.5]})
+    gen = {
+        yd(25): pd.DataFrame(
+            {"time": [yd(26), yd(30)] * 2, "survival": [0.8, 0.4, 0.85, 0.45], "seed": [0, 0, 1, 1]}
+        ),
+        yd(30): pd.DataFrame(
+            {"time": [yd(31), yd(35)] * 2, "survival": [0.7, 0.3, 0.75, 0.35], "seed": [0, 0, 1, 1]}
+        ),
+    }
+    ax = B.plot_km_jumpoff_panel(obs_km, gen).axes[0]
+    # one vertical rule per window, at the jump-off age in years
+    rules = sorted(ln.get_xdata()[0] for ln in ax.lines if len(set(ln.get_xdata())) == 1)
+    assert rules == pytest.approx([25.0, 30.0], abs=0.02)
+    assert "observed" in [ln.get_label() for ln in ax.lines]
+
+
 def test_ccf_overlay_marks_incomplete_cohorts_on_both_curves():
     obs = _ccf([1950, 1960, 1970], [2.1, 2.0, 1.2], [True, True, False])
     # two seeds: 1970 is incomplete in both, so the majority rule marks it incomplete
@@ -98,7 +172,7 @@ def test_ccf_overlay_marks_incomplete_cohorts_on_both_curves():
     )
     labels = [ln.get_label() for ln in B.plot_ccf_seed_band(obs, gen).axes[0].lines]
     assert "observed (incomplete cohorts)" in labels
-    assert "generated median (incomplete cohorts)" in labels
+    assert "generated mean (incomplete cohorts)" in labels
 
 
 def test_ccf_overlay_generated_incompleteness_is_by_majority_of_seeds():
@@ -111,7 +185,7 @@ def test_ccf_overlay_generated_incompleteness_is_by_majority_of_seeds():
         seeds=[0, 0, 1, 1, 2, 2],
     )
     labels = [ln.get_label() for ln in B.plot_ccf_seed_band(obs, gen).axes[0].lines]
-    assert "generated median (incomplete cohorts)" not in labels
+    assert "generated mean (incomplete cohorts)" not in labels
 
 
 def test_ccf_overlay_without_complete_column_draws_one_solid_curve():

@@ -5,7 +5,7 @@
 > built on the empirical probabilities/logits from `core/replicates.py`, and the backtesting
 > harness that sweeps jump-off points, prediction horizons, and count conditioning, reusing the
 > metric functions from 03 unchanged. This module contains NO probability-estimation statistics
-> of its own — estimators, intervals, MC-error corrections, and bootstraps all come from 02b.
+> of its own — point estimates, intervals, MC-error corrections, and bootstraps all come from 02b.
 
 ## Deliverables
 
@@ -45,7 +45,7 @@ def roc_auc(joined) -> float          # rank-based with tie correction (p_hat li
                                       # grid); record grid resolution (1/median_n) alongside
 def brier(joined) -> dict             # {"raw": ..., "corrected": ...} — corrected via
                                       # replicates.brier_noise_correction (02b §3)
-def log_loss(joined) -> float         # on smoothed p_hat (defined everywhere by construction;
+def log_loss(joined) -> float         # on p_hat = k/n, clipped so boundary runs stay finite;
                                       # NEVER on raw k/n)
 def timing_coverage(timing_dist, obs_tte, *, q=(0.10, 0.90)) -> float
     # predictive-interval coverage of observed durations (02b §2) — the timing-calibration

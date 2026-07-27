@@ -1,4 +1,4 @@
-"""ML/probability metrics (04) — composition over 02b; the estimator stats are tested in 02b."""
+"""ML/probability metrics (04) — composition over 02b; the probability stats are tested in 02b."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def _gen_eval(k_by_person, n):
 def test_probability_table_columns_and_warning(caplog):
     gen = _gen_eval([0, 2, 5], n=5)
     with caplog.at_level(logging.WARNING, logger="seqeval"):
-        probs = ml.probability_table(gen, ReplicateSpec(estimator="jeffreys", min_replicates=10))
+        probs = ml.probability_table(gen, ReplicateSpec(min_replicates=10))
     assert list(probs.columns[-6:]) == [
         "k",
         "n",

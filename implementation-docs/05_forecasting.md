@@ -104,7 +104,7 @@ def seed_stability(births, spans, tte_tables, *, keys=GEN_KEYS,
     # individual, per (person_id, window):
     #   (a) occurrence disagreement: for "any target event in forecast horizon", this IS the
     #       Bernoulli variance p_hat(1−p_hat) from replicates.estimate_probability — report it
-    #       as such, on smoothed p_hat, so it is comparable across replicate counts;
+    #       as such, on p_hat = k/n;
     #   (b) timing dispersion: quantile spread (q90−q10) of age at first target occurrence,
     #       from replicates.timing_distribution;
     #   (c) count dispersion: predictive variance of completed event count, from

@@ -87,16 +87,9 @@ def _summarize(bundle: Bundle, cfg: Config) -> list[str]:
     if cov["windows"]:
         lines.append("windows (years) × replicates:")
         for w in cov["windows"]:
-            flag = "  [below min_replicates]" if w["under_min_replicates"] else ""
             lines.append(
                 f"  ({w['age_start']}, {w['age_stop']}): {w['n_seeds']} seeds, "
-                f"{w['n_persons']} persons{flag}"
-            )
-        if any(w["under_min_replicates"] for w in cov["windows"]):
-            lines.append(
-                f"  note: {cov['min_replicates']} replicates → probability grid of "
-                f"{1 / cov['min_replicates']:.2g}; calibration bins finer than that are not "
-                "meaningful."
+                f"{w['n_persons']} persons"
             )
     else:
         lines.append("windows: none (no generated file — descriptives only)")

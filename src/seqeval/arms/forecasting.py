@@ -1,14 +1,13 @@
-"""Future/generated forecasting arm: Lexis surfaces, illegal moves, seed stability (05).
+"""Future/generated forecasting arm: Lexis surfaces, illegal moves, replicate variance (05).
 
 Evaluates generated futures with **no ground truth**: it completes the Lexis surface for incomplete
 cohorts (observed cells + model-forecast cells), screens output for demographically impossible or
-implausible "illegal moves" (a data-driven rules engine), and quantifies seed-to-seed stability of
-trajectories as views over the replicate engine (02b) — this arm holds no statistics of its own.
+implausible "illegal moves" (a data-driven rules engine), and quantifies replicate-to-replicate variance of trajectories.
 
 Forecasting wants the longest futures, so it uses every generated window by default; point it at
 conditions-at-birth / late-jump-off runs with a ``windows:`` filter (same semantics as 04). The
-Lexis forecast is built from the earliest jump-off available (the longest future). Seed stability
-and illegal-move screening run across all resolved windows.
+Lexis forecast is built from the earliest jump-off available (the longest future). Replicate
+variance and illegal-move screening run across all resolved windows.
 """
 
 from __future__ import annotations
@@ -17,17 +16,19 @@ import logging
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 from seqeval.arms._common import OutputWriter, combine_prefix
 from seqeval.config import DEFAULT_COHORT_WIDTH, ForecastingConfig
 from seqeval.core import replicates as rep
 from seqeval.core.outcomes import births, observation_spans, time_to_event
-from seqeval.core.slicing import AgeBins
+from seqeval.core.slicing import AgeBins, cohort_bins
 from seqeval.core.specs import ReplicateSpec, Rule, TTESpec
 from seqeval.io.loaders import Bundle
 from seqeval.io.schema import GEN_KEYS, OBS_KEYS
 from seqeval.metrics import fertility as fe
 from seqeval.metrics import plausibility as pl
+from seqeval.viz import dispersion as viz_dispersion
 from seqeval.viz import lexis as viz_lexis
 
 logger = logging.getLogger("seqeval")
@@ -45,12 +46,12 @@ def run(
     replicate_spec: ReplicateSpec,
     cohort_width: int = DEFAULT_COHORT_WIDTH,
 ) -> None:
-    """Run the forecasting arm; write Lexis surfaces, violations, and seed-stability tables.
+    """Run the forecasting arm; write Lexis surfaces, violations, and replicate-variance tables.
 
     ``outcomes``/``rules``/``replicate_spec`` are the resolved objects from ``config.resolve_*``
     (passed in, like the other arms). Writes both period and cohort Lexis surfaces
     (``lexis_{observed,forecast,combined}`` and ``lexis_cohort_{...}``), ``violations``,
-    ``violation_rates`` and ``seed_stability_{individual,aggregate}`` parquet tables plus figures.
+    ``violation_rates`` and ``replicate_variance_{individual,aggregate}`` tables plus figures.
     """
     if bundle.generated is None:
         logger.warning("forecasting: no generated file; arm skipped")
@@ -74,8 +75,10 @@ def run(
         _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width)
     if cfg.illegal_moves:
         _run_illegal_moves(observed, generated, rules, out)
-    if cfg.seed_stability is not None:
-        _run_seed_stability(bundle, cfg, generated, windows, outcomes, replicate_spec, out)
+    if cfg.replicate_variance is not None:
+        _run_replicate_variance(
+            bundle, cfg, generated, windows, outcomes, replicate_spec, out, cohort_width
+        )
 
 
 # =================================================================================================
@@ -186,54 +189,116 @@ def _run_illegal_moves(observed, generated, rules, out) -> None:
 
 
 # =================================================================================================
-# 3. seed stability (views over 02b)
+# 3. replicate variance (per-individual dispersion + upstream-metric roll-up)
 # =================================================================================================
-def _run_seed_stability(bundle, cfg, generated, windows, outcomes, spec, out) -> None:
-    scfg = cfg.seed_stability
+def _run_replicate_variance(
+    bundle, cfg, generated, windows, outcomes, spec, out, cohort_width
+) -> None:
+    scfg = cfg.replicate_variance
     target_name = cfg.lexis.outcome if cfg.lexis is not None else next(iter(outcomes))
     tte_spec = outcomes[target_name]
     birth_token = tte_spec.target
     horizon = _fertile_upper_days()
 
     if scfg.individual:
-        ind = _seed_stability_individual(generated, tte_spec, birth_token, horizon, spec)
-        out.frame("seed_stability_individual", ind)
+        subgroups = _person_subgroups(bundle.persons, scfg.subgroup_by, cohort_width)
+        ind = _replicate_variance_individual(generated, birth_token, subgroups)
+        out.frame("replicate_variance_individual", ind)
+        out.frame(
+            "replicate_occurrence",
+            _replicate_occurrence(generated, tte_spec, target_name, horizon, spec),
+        )
+        out.figure(
+            "within_seed_variance",
+            viz_dispersion.plot_within_seed_variance(ind, color_by="age_stop"),
+        )
+        for col in scfg.subgroup_by:
+            if col in ind.columns:
+                out.figure(
+                    f"within_seed_variance_by_{col}",
+                    viz_dispersion.plot_within_seed_variance(
+                        ind, color_by=col, facet_by="age_stop"
+                    ),
+                )
 
     if scfg.aggregate:
-        agg = _seed_stability_aggregate(
-            bundle, generated, windows, scfg.aggregate, birth_token, spec
+        agg = _replicate_variance_aggregate(
+            bundle, generated, windows, scfg.aggregate, birth_token, spec, cohort_width
         )
         if agg is not None:
-            out.frame("seed_stability_aggregate", agg)
+            out.frame("replicate_variance_aggregate", agg)
 
 
-def _seed_stability_individual(generated, tte_spec, birth_token, horizon, spec) -> pd.DataFrame:
-    """Per (person, window): occurrence disagreement p_hat(1-p_hat), timing IQR, count variance."""
+def _replicate_occurrence(generated, tte_spec, outcome_name, horizon, spec) -> pd.DataFrame:
+    """Per-(person, jump-off) whether and when ``outcome_name`` occurs within ``horizon``.
+
+    Everything the replicates say about one *named* outcome: ``[outcome, *_RUN_KEYS, horizon, n,
+    n_occurred, p_hat, timing_spread]``. ``outcome`` is the configured outcome name and ``horizon``
+    the cut-off the event must fall inside (days), so a row states which event it is about without
+    reference to the calling context.
+
+    ``p_hat = n_occurred/n`` is the raw replicate frequency. ``timing_spread`` is the ``q90 - q10``
+    width of the predicted age at occurrence — how much the replicates disagree about *when*, given
+    that it happens.
+    """
     tte = time_to_event(generated, GEN_KEYS, tte_spec)
 
-    # (a) occurrence disagreement — Bernoulli variance of "target occurs within horizon".
     occ = tte[_RUN_KEYS].copy()
     occ["occurred"] = tte["observed"].to_numpy() & (tte["duration"].to_numpy() <= horizon)
-    summary = rep.replicate_summary(occ, run_keys=_RUN_KEYS)
-    est = rep.estimate_probability(summary, spec=spec)
-    est["disagreement"] = est["p_hat"] * (1 - est["p_hat"])
+    est = rep.estimate_probability(rep.replicate_summary(occ, run_keys=_RUN_KEYS), spec=spec)
 
-    # (b) timing dispersion — q10-q90 spread of the age at first occurrence.
     td = rep.timing_distribution(tte, run_keys=_RUN_KEYS, seed_col="seed", horizon=horizon)
     td["timing_spread"] = td["q90"] - td["q10"]
 
-    # (c) count dispersion — predictive variance of the completed event count.
-    counts = _counts_per_run(generated, birth_token)
-    cm = rep.count_moments(counts, run_keys=_RUN_KEYS, seed_col="seed").rename(
-        columns={"mean": "count_mean", "var": "count_var"}
-    )
+    out = est[[*_RUN_KEYS, "n", "k", "p_hat"]].rename(columns={"k": "n_occurred"})
+    out["horizon"] = int(horizon)
+    out.insert(0, "outcome", outcome_name)
+    out = out.merge(td[[*_RUN_KEYS, "timing_spread"]], on=_RUN_KEYS, how="left")
+    out = _restrict_to_common_windows(out)  # same population as the dispersion table
+    cols = ["outcome", *_RUN_KEYS, "horizon", "n", "n_occurred", "p_hat", "timing_spread"]
+    return out[cols].sort_values(_RUN_KEYS).reset_index(drop=True)
 
-    out = (
-        est[[*_RUN_KEYS, "p_hat", "disagreement"]]
-        .merge(td[[*_RUN_KEYS, "timing_spread", "p_within_horizon"]], on=_RUN_KEYS, how="left")
-        .merge(cm, on=_RUN_KEYS, how="left")
+
+def _replicate_variance_individual(generated, birth_token, subgroups=None) -> pd.DataFrame:
+    """Per-(person, jump-off) replicate dispersion of the completed ``birth_token`` count.
+
+    ``within_seed_var`` / ``within_seed_cv`` are the variance and coefficient of variation across a
+    person's replicates for quantum completed fertility.
+    """
+    ind_counts = _counts_per_run(generated, birth_token)
+    ind_cm = rep.count_moments(ind_counts, run_keys=_RUN_KEYS, seed_col="seed").rename(
+        columns={"mean": "expected_quantum", "var": "within_seed_var"}
     )
+    mu = ind_cm["expected_quantum"].to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cv = np.sqrt(ind_cm["within_seed_var"].to_numpy()) / mu
+    ind_cm["within_seed_cv"] = np.where(mu > 0, cv, np.nan)
+
+    out = ind_cm[[*_RUN_KEYS, "expected_quantum", "within_seed_var", "within_seed_cv"]]
+    out = _restrict_to_common_windows(out)
+    if subgroups is not None:
+        out = out.merge(subgroups, on="person_id", how="left")
     return out.sort_values(_RUN_KEYS).reset_index(drop=True)
+
+
+def _person_subgroups(persons, subgroup_by, cohort_width) -> pd.DataFrame | None:
+    """``[person_id, *subgroup_by]`` map; ``cohort`` via :func:`cohort_bins`, else from persons."""
+    if not subgroup_by or persons is None:
+        return None
+    out = persons[["person_id"]].copy()
+    for col in subgroup_by:
+        if col == "cohort":
+            out = out.merge(cohort_bins(persons, width=cohort_width).reset_index(), on="person_id")
+        else:
+            out = out.merge(persons[["person_id", col]], on="person_id")
+    return out
+
+
+def _restrict_to_common_windows(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only persons that appear in every (age_start, age_stop) window."""
+    n_windows = df[["age_start", "age_stop"]].drop_duplicates().shape[0]
+    per_person = df.groupby("person_id").size()
+    return df[df["person_id"].isin(per_person[per_person == n_windows].index)]
 
 
 def _counts_per_run(generated, birth_token) -> pd.DataFrame:
@@ -251,36 +316,71 @@ def _counts_per_run(generated, birth_token) -> pd.DataFrame:
     return counts
 
 
-def _seed_stability_aggregate(bundle, generated, windows, targets, birth_token, spec):
-    """Seed-bootstrap uncertainty bands on aggregate metrics (currently CCF) per window."""
+def _replicate_variance_aggregate(
+    bundle, generated, windows, targets, birth_token, spec, cohort_width
+):
+    """Analytic replicate uncertainty for CCF (completed cohort fertility), per cohort per prediction window.
+
+    Utilizes each person's expected completed fertility and replicate variance to estimate
+    ``CCF = mean_i mu_i`` for each cohort. Uses a variance decomposition (between-person + mean
+    within-person variance / K).
+
+    ``forecast_share`` is the fraction of each estimate contributed by post-jump-off generated
+    events: 0.0 rests entirely on observed history, 1.0 entirely on model output.
+    """
     if "ccf" not in targets or bundle.persons is None:
         return None
-    persons = bundle.persons
+    cohorts = cohort_bins(bundle.persons, width=cohort_width).reset_index()  # [person_id, cohort]
+    z = norm.ppf(1 - (1 - spec.level) / 2)
+
     frames = []
     for t1, t2 in windows:
         gen_w = generated[(generated["age_start"] == t1) & (generated["age_stop"] == t2)]
         if gen_w.empty:
             continue
         combined = combine_prefix(bundle.observed, gen_w, t1, t2)
-
-        def ccf_stat(df, _persons=persons, _token=birth_token):
-            b = df[df["event"] == _token]
-            n_seeds = df["seed"].nunique()
-            n_persons = df["person_id"].nunique()
-            return pd.DataFrame({"ccf": [len(b) / n_seeds / n_persons]})
-
-        boot = rep.seed_bootstrap(
-            combined,
-            seed_col="seed",
-            stat_fn=ccf_stat,
-            n_boot=max(spec.bootstrap_n, 100),
-            rng=np.random.default_rng(spec.bootstrap_seed),
-            value_cols=["ccf"],
+        counts = _counts_per_run(combined, birth_token)
+        moments = rep.count_moments(counts, run_keys=["person_id"], seed_col="seed").rename(
+            columns={"mean": "mu", "var": "s2", "k": "K"}
         )
-        boot.insert(0, "age_stop", int(t2))
-        boot.insert(0, "age_start", int(t1))
-        frames.append(boot)
+        # mu_gen: the post-jump-off (model-generated) part of each person's expected count. The
+        # prefix is the same in every seed, so mu - mu_gen is that person's observed births.
+        mu_gen = (
+            _counts_per_run(gen_w, birth_token)
+            .groupby("person_id", observed=True)["count"]
+            .mean()
+            .rename("mu_gen")
+        )
+        moments = moments.merge(cohorts, on="person_id").merge(mu_gen, on="person_id")
+
+        rows = [
+            {"cohort": int(c), **_ccf_row(sub, z)}
+            for c, sub in moments.groupby("cohort", observed=True)
+        ]
+        rows.append({"cohort": pd.NA, **_ccf_row(moments, z)})  # pooled
+        frame = pd.DataFrame(rows)
+        frame["cohort"] = frame["cohort"].astype("Int64")
+        frame.insert(0, "age_stop", int(t2))
+        frame.insert(0, "age_start", int(t1))
+        frames.append(frame)
     return pd.concat(frames, ignore_index=True) if frames else None
+
+
+def _ccf_row(sub: pd.DataFrame, z: float) -> dict:
+    """One CCF point estimate, its analytic seed-uncertainty CI, and its forecast provenance."""
+    mu, s2, k = sub["mu"].to_numpy(), sub["s2"].to_numpy(), sub["K"].to_numpy()
+    n = len(sub)
+    ccf = float(mu.mean())
+    ccf_forecast = float(sub["mu_gen"].to_numpy().mean())  # model-contributed births per woman
+    se = float(np.sqrt(np.sum(s2 / k) / n**2))  # Monte-Carlo (replicate) uncertainty only
+    return {
+        "n_women": n,
+        "ccf": ccf,
+        "se": se,
+        "ci_lo": ccf - z * se,
+        "ci_hi": ccf + z * se,
+        "forecast_share": float(ccf_forecast / ccf) if ccf > 0 else np.nan,
+    }
 
 
 def _fertile_upper_days() -> int:

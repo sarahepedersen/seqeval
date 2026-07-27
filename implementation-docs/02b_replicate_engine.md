@@ -5,7 +5,7 @@
 > recovered empirically from the distribution of outcomes across replicate runs** (multiple
 > seeds per (person, window)). Everything probabilistic downstream — calibration, ROC-AUC,
 > Brier, timing calibration, seed stability, uncertainty bands on aggregate forecasts — flows
-> through this one engine. Getting the statistics right here (smoothed estimators, empirical
+> through this one engine. Getting the statistics right here (the point estimate, empirical
 > logits, Monte-Carlo error quantification and correction) is what makes few-seed evaluations
 > honest and many-seed evaluations efficient.
 
@@ -28,13 +28,13 @@ ages across replicates — into probability estimates with honest uncertainty.
 
 Key statistical facts the implementation must encode (cite in docstrings):
 
-- **MLE p̂ = k/n** is unbiased but lives on a grid of width 1/n (n=5 → {0, .2, .4, .6, .8, 1});
-  it hits exact 0 and 1, where log-loss and logits are undefined.
+- **MLE p̂ = k/n** is the reported point estimate: unbiased, and readable straight back as
+  "k of n runs". It lives on a grid of width 1/n (n=5 → {0, .2, .4, .6, .8, 1}) and hits exact
+  0 and 1, where logits are undefined and log-loss survives only by clipping. Accepted
+  deliberately — no smoothing is applied to the point estimate.
 - **Empirical logit** (Haldane–Anscombe): `logit_emp = ln((k + ½) / (n − k + ½))` — defined for
   all k, the standard smoothed logit for binomial data. This is the "empirical logit
   probability" of the proposal.
-- **Smoothed estimators:** Jeffreys posterior mean `(k + ½)/(n + 1)` (default), Laplace
-  `(k + 1)/(n + 2)`, MLE `k/n`. Configurable; all three columns cheap to emit.
 - **Intervals:** Jeffreys (Beta(k+½, n−k+½) quantiles; default) or Wilson. Normal approximation
   intentionally unsupported (terrible at small n / extreme p).
 - **MC error propagation:** Var(p̂ | p) = p(1−p)/n. This inflates downstream metrics in known
@@ -56,12 +56,12 @@ def replicate_summary(outcome_table, *, run_keys=RUN_KEYS, seed_col="seed") -> p
 
 def estimate_probability(summary, *, spec: ReplicateSpec) -> pd.DataFrame
     # [*run_keys, k, n, p_hat, logit_emp, var_logit, ci_lo, ci_hi]
-    # p_hat per spec.estimator; logit_emp always Haldane–Anscombe; CI per spec.interval at
+    # p_hat = k/n; logit_emp always Haldane–Anscombe; CI per spec.interval at
     # spec.level. Vectorized (scipy.stats.beta for Jeffreys quantiles).
 ```
 
 `ReplicateSpec` (frozen dataclass in `core/specs.py`, resolved from the top-level `replicates:`
-config block; add to 00a): `estimator`, `interval`, `level`, `min_replicates`, `bootstrap_n`,
+config block; add to 00a): `interval`, `level`, `min_replicates`, `bootstrap_n`,
 `bootstrap_seed`, `convergence_curve: bool`.
 
 `RUN_KEYS = ["person_id", "age_start", "age_stop"]` — GEN_KEYS minus seed; define next to the
@@ -158,7 +158,7 @@ evaluation per bootstrap draw (evaluate once per replicate; resample the rows).
 
 ## 6. Tests
 
-- Exact-value tests for all estimators/intervals/logit on constructed (k, n) tables, including
+- Exact-value tests for the point estimate/intervals/logit on constructed (k, n) tables, including
   k=0 and k=n.
 - **Perfect-model few-seed test** (the load-bearing one): `simulate_generated` with n=5 seeds —
   raw Brier exceeds the true Brier (computable from known hazards) by ≈ mean p(1−p)/5;
@@ -171,16 +171,15 @@ evaluation per bootstrap draw (evaluate once per replicate; resample the rows).
   across repeated simulations (small repetition count, sanity not certification).
 - Convergence curve monotone-in-expectation dispersion decrease; ragged-n and n==0 handling.
 
-## 7. Appendix: estimator specification (reproduce as module docstring material)
+## 7. Appendix: probability specification (reproduce as module docstring material)
 
 For k ~ Binomial(n, p), the additive-c family `ln((k+c)/(n−k+c))` has expectation
 `logit(p) + (c − ½)(1/(np) − 1/(n(1−p))) + O(n⁻²)` (Gart & Zweifel 1967): **c = ½ (Haldane–
 Anscombe) is the unique first-order-bias-cancelling choice for all p**, with Gart's variance
 `1/(k+½) + 1/(n−k+½)` emitted as `var_logit` (a required column in the probability table:
-users regressing on empirical logits need it as weights, especially with ragged n). Coherence
-identity to preserve and test: `logit_emp == logit(p_hat)` exactly when `estimator: jeffreys`
-(both reduce to (k+½) vs (n−k+½)); with `mle`/`laplace`, `logit_emp` stays Haldane–Anscombe by
-definition — say so in the docstring.
+users regressing on empirical logits need it as weights, especially with ragged n).
+`logit_emp` is Haldane–Anscombe by definition and independent of `p_hat = k/n`, so
+`logit_emp != logit(p_hat)`; the ½ is what makes the log-odds finite at the boundaries at all.
 
 **Estimation is strictly per run.** Never pool, shrink, or borrow strength across runs or
 persons when estimating a run's probability: the purpose of replicate probabilities is to
@@ -191,7 +190,7 @@ binning, bootstraps), never inside estimation.
 **Dynamic range** (this table belongs in the module docstring): |logit_emp| ≤ ln(2n+1), so
 replicate data cannot express probabilities more extreme than ≈ 1/(2n+2) from the boundary —
 n=5 → |logit| ≤ 2.40 (p ∈ ~[0.08, 0.92]); n=50 → 4.62 (~[0.01, 0.99]); n=200 → 6.00. Rare
-outcomes at small n saturate the estimator (heavy shrinkage toward zero log-odds); the
+outcomes at small n saturate `logit_emp` (heavy shrinkage toward zero log-odds); the
 convergence curve (§4) is how a researcher discovers they need more replicates.
 
 **Informative censoring guard:** spans always derive from the last age in the data (00 §4.2)
