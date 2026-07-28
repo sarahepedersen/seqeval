@@ -14,11 +14,12 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from seqeval.core import replicates as rep
 from seqeval.core.outcomes import exposure
 from seqeval.core.slicing import AgeBins, bin_ages, calendar_year, cohort_bins
 from seqeval.units import DAYS_PER_YEAR, years_to_days
 
-__all__ = ["ccf", "asfr", "ppr", "tfr", "lexis_surface", "FERTILE_UPPER_YEARS"]
+__all__ = ["ccf", "ccf_variance", "asfr", "ppr", "tfr", "lexis_surface", "FERTILE_UPPER_YEARS"]
 
 #: Upper edge of the childbearing window (years); a cohort is "complete" once observed to here.
 FERTILE_UPPER_YEARS = 50.0
@@ -75,6 +76,46 @@ def ccf(
     out["ccf"] = out["total_births"] / out["n_women"]
     cols = [*group, "n_women", "ccf", "complete"]
     return out[cols].sort_values(group).reset_index(drop=True) if group else out[cols]
+
+
+def ccf_variance(
+    births: pd.DataFrame,
+    spans: pd.DataFrame,
+    persons: pd.DataFrame,
+    *,
+    seed_col: str = "seed",
+    cohort_width: int = 1,
+) -> pd.DataFrame:
+    """Variance of the per-cohort :func:`ccf`, split into replicate and between-woman parts.
+
+    Returns ``[cohort, n_women, ccf, within_var, between_var, total_var]``, the decomposition of
+    :func:`~seqeval.core.replicates.mean_variance_components` applied per cohort. ``births`` and
+    ``spans`` are seed-replicated (``spans`` is the population, so women with no births are counted
+    in the denominator exactly as :func:`ccf` counts them); ``ccf`` here is the across-seed mean and
+    agrees with :func:`ccf` averaged over seeds.
+    """
+    cohorts = cohort_bins(persons, width=cohort_width).reset_index()
+    pop = spans[["person_id", seed_col]].drop_duplicates()
+    got = births.groupby(["person_id", seed_col], observed=True).size().rename("count")
+    counts = pop.merge(got, on=["person_id", seed_col], how="left")
+    counts["count"] = counts["count"].fillna(0).astype(np.float64)
+    moments = rep.count_moments(counts, run_keys=["person_id"], seed_col=seed_col).merge(
+        cohorts, on="person_id", how="left"
+    )
+    rows = []
+    for cohort, sub in moments.groupby("cohort", observed=True):
+        comp = rep.mean_variance_components(sub["mean"], sub["var"], sub["k"])
+        rows.append(
+            {
+                "cohort": cohort,
+                "n_women": comp["n"],
+                "ccf": comp["mean"],
+                "within_var": comp["within_var"],
+                "between_var": comp["between_var"],
+                "total_var": comp["total_var"],
+            }
+        )
+    return pd.DataFrame(rows).sort_values("cohort").reset_index(drop=True)
 
 
 def asfr(

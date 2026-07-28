@@ -120,3 +120,37 @@ def test_ppr_min_exposure_excludes_recent_reachers():
     # excluded (0y after); p2 (24->29), p3 (22->31), p5 (27->33) survive -> 3 at risk.
     ppr = FE.ppr(births, spans, max_parity=2, min_exposure_after_k=yd(5)).set_index("parity_from")
     assert ppr.loc[1, "n_at_risk"] == 3
+
+
+def test_ccf_variance_splits_seed_noise_from_between_woman_spread():
+    """The components add to the total, and each cohort's mean matches :func:`ccf` over seeds."""
+    rng = np.random.default_rng(7)
+    h = S.default_hazards()
+    obs, pers = S.simulate_cohort(400, (1960, 1969), h, None, rng, no_event_fraction=1.0)
+    gen = S.simulate_generated(obs, pers, h, [(0.0, 25.0)], 8, rng)
+    births, spans = _tables(gen, GEN_KEYS)
+
+    var = FE.ccf_variance(births, spans, pers, cohort_width=5)
+    np.testing.assert_allclose(var["within_var"] + var["between_var"], var["total_var"])
+    assert (var["within_var"] > 0).all() and (var["between_var"] >= 0).all()
+    # the reported centre is the across-seed CCF, so the band it feeds sits on the plotted curve
+    per_seed = FE.ccf(births, spans, pers, by_cohort=True, extra_by=("seed",), cohort_width=5)
+    np.testing.assert_allclose(
+        var.set_index("cohort")["ccf"],
+        per_seed.groupby("cohort", observed=True)["ccf"].mean(),
+        rtol=1e-12,
+    )
+
+
+def test_ccf_variance_counts_childless_women_in_the_denominator():
+    """Spans define the population, so a childless woman lowers the mean and widens the spread."""
+    obs, pers = tiny.observed_fixture(), tiny.persons_fixture()
+    births, spans = _tables(obs)
+    var = FE.ccf_variance(
+        births.assign(seed=0), spans.assign(seed=0), pers, cohort_width=100
+    ).iloc[0]
+    assert var["n_women"] == spans["person_id"].nunique()
+    assert var["ccf"] == pytest.approx(tiny.EXPECTED_CCF)
+    # one seed: nothing varies across replicates, so the whole spread is between women
+    assert var["within_var"] == pytest.approx(0.0)
+    assert var["between_var"] == pytest.approx(var["total_var"])

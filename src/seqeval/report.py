@@ -475,9 +475,10 @@ def _gen_vs_obs_section(arm_dir: Path) -> str:
     return (
         '<h3 id="gen-vs-obs">Generated vs observed</h3>'
         '<p class="muted">Observed "truth" (black) under the generated across-seed mean and its '
-        "replicate-uncertainty band (orange), per jump-off. The band is the Monte-Carlo error of "
-        "the plotted mean (<code>±z·sd/&radic;K</code> across seeds), the same quantity reported "
-        "as <code>se</code> in the forecasting arm's aggregate CCF table.</p>" + "".join(blocks)
+        "uncertainty band (orange), per jump-off. The survival bands are Monte-Carlo error in the "
+        "plotted mean (<code>±z·sd/&radic;K</code> across seeds). The CCF bands are "
+        "<code>±z·&radic;total_var</code>, which is a sum of both the within-individual "
+        "inference variation and the between-people outcome uncertainty.</p>" + "".join(blocks)
     )
 
 
@@ -562,8 +563,13 @@ def _forecasting_section(arm_dir: Path) -> str:
             parts.append(_table_html(p, to_years=True))
             if name == "replicate_variance_aggregate":
                 parts.append(
-                    '<p class="muted">Aggregate CIs come from the replicate-variance '
-                    "decomposition (between-person plus within-person seed variance).</p>"
+                    '<p class="muted">The variance of each CCF, split by source and stated in '
+                    "variance units of the CCF itself. <code>within_var</code> is replicate-only — "
+                    "rerunning inference on these same women with other seeds; "
+                    "<code>between_var</code> is outcome uncertainty (quantum: number of "
+                    "children). They add to <code>total_var</code>, which is what "
+                    "<code>se_total</code>, <code>ci_total</code> and the CCF figure band all "
+                    "report.</p>"
                 )
     return "\n".join(parts) if len(parts) > 1 else ""
 

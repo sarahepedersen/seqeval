@@ -22,7 +22,12 @@ import numpy as np
 import pandas as pd
 
 from seqeval.arms._common import OutputWriter, combine_prefix
-from seqeval.config import DEFAULT_COHORT_WIDTH, BacktestingConfig
+from seqeval.config import (
+    DEFAULT_COHORT_WIDTH,
+    FERTILITY_TARGETS,
+    FERTILITY_TARGETS_NEEDING_PERSONS,
+    BacktestingConfig,
+)
 from seqeval.core import replicates as rep
 from seqeval.core.outcomes import (
     births,
@@ -435,13 +440,14 @@ def _score_aggregate_target(
     out,
     panels,
 ) -> None:
-    if persons is None and target != "ppr":
+    if persons is None and target in FERTILITY_TARGETS_NEEDING_PERSONS:
         logger.warning("backtesting: skipping aggregate target %r — needs persons", target)
         return
     combined = combine_prefix(observed, gen_w, t1, t2)
-    gen_births = births(combined, GEN_KEYS, birth_event=birth_token)
-    gen_spans = observation_spans(combined, GEN_KEYS)
-    obs_births = births(observed, OBS_KEYS, birth_event=birth_token)
+    fertility = target in FERTILITY_TARGETS
+    gen_births = births(combined, GEN_KEYS, birth_event=birth_token) if fertility else None
+    obs_births = births(observed, OBS_KEYS, birth_event=birth_token) if fertility else None
+    gen_spans = observation_spans(combined, GEN_KEYS) if fertility else None
 
     try:
         gen_m, obs_m, value_col, on = _aggregate_tables(
@@ -472,14 +478,15 @@ def _score_aggregate_target(
             replicate_spec.level, panels,
         )
     elif target == "ccf":
+        var_m = fe.ccf_variance(gen_births, gen_spans, persons, cohort_width=cohort_width)
         out.figure(
             f"ccf_overlay_w{jumpoff_y}",
             viz_backtest.plot_ccf_seed_band(
-                obs_m, gen_m, title=f"CCF by cohort — jump-off {jumpoff_y}y",
+                obs_m, gen_m, variance=var_m, title=f"CCF by cohort — jump-off {jumpoff_y}y",
                 level=replicate_spec.level,
             ),
         )
-        _stash_panel(panels, "ccf", obs_m, gen_m, t2)
+        _stash_panel(panels, "ccf", obs_m, gen_m, t2, variance=var_m)
 
 
 def _emit_km_overlay(name, combined, observed, outcomes, t2, out, level, panels) -> None:
@@ -497,14 +504,15 @@ def _emit_km_overlay(name, combined, observed, outcomes, t2, out, level, panels)
     _stash_panel(panels, f"km:{name}", obs_km, gen_km, t2)
 
 
-def _stash_panel(panels: dict, key: str, obs: pd.DataFrame, gen: pd.DataFrame, t2: int) -> None:
+def _stash_panel(
+    panels: dict, key: str, obs: pd.DataFrame, gen: pd.DataFrame, t2: int, *, variance=None
+) -> None:
     """Keep one window's curves for the cross-jump-off panel emitted after the window loop.
-
-    The observed curve does not depend on the jump-off (it is computed from ``observed`` alone), so
-    the first window's copy is kept and later ones discarded rather than stored per window.
     """
-    entry = panels.setdefault(key, {"obs": obs, "gen": {}})
+    entry = panels.setdefault(key, {"obs": obs, "gen": {}, "variance": {}})
     entry["gen"][int(t2)] = gen
+    if variance is not None:
+        entry["variance"][int(t2)] = variance
 
 
 def _emit_jumpoff_panels(panels: dict, out, level: float) -> None:
@@ -519,7 +527,8 @@ def _emit_jumpoff_panels(panels: dict, out, level: float) -> None:
             out.figure(
                 "ccf_overlay_all_jumpoffs",
                 viz_backtest.plot_ccf_jumpoff_panel(
-                    entry["obs"], entry["gen"], title="CCF by cohort — all jump-offs", level=level
+                    entry["obs"], entry["gen"], variance_by_jumpoff=entry["variance"],
+                    title="CCF by cohort — all jump-offs", level=level,
                 ),
             )
         else:
@@ -616,7 +625,9 @@ def _km_at_grid(df, keys, spec, by) -> pd.DataFrame:
 # small helpers
 # =================================================================================================
 def _needs_births(cfg: BacktestingConfig) -> bool:
-    return bool(cfg.aggregate_targets)
+    """Whether any configured aggregate target requires `birth`s in the model.
+    """
+    return any(t in FERTILITY_TARGETS for t in cfg.aggregate_targets)
 
 
 def _cell_label(t1, t2, outcome, condition) -> dict:

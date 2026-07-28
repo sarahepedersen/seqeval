@@ -98,7 +98,7 @@ def test_seed_ci_is_the_standard_error_of_the_across_seed_mean():
 
 
 def test_seed_ci_matches_the_analytic_aggregate_ccf_standard_error():
-    """The plotted band and ``replicate_variance_aggregate.se`` estimate the same quantity.
+    """The plotted band and ``replicate_variance_aggregate.within_var`` are the same quantity.
 
     The table computes ``sqrt(Σ_i s²_i/K)/n`` from per-person moments; the figure computes
     ``sd/√K`` from the K per-seed CCFs. They agree because persons are independent within a seed,
@@ -193,3 +193,27 @@ def test_ccf_overlay_without_complete_column_draws_one_solid_curve():
     gen = pd.DataFrame({"cohort": [1950, 1960], "ccf": [2.0, 1.9], "seed": [0, 0]})
     labels = [ln.get_label() for ln in B.plot_ccf_seed_band(obs, gen).axes[0].lines]
     assert not any("incomplete" in str(lb) for lb in labels)
+
+
+def test_ccf_band_uses_the_total_variance_when_it_is_supplied():
+    """With a variance frame the band is ±z·sqrt(total_var), not the across-seed standard error."""
+    gen = _ccf(
+        [1950, 1960] * 3, [2.0, 1.9, 2.1, 1.8, 2.2, 1.7], [True] * 6, seeds=[0, 0, 1, 1, 2, 2]
+    )
+    var = pd.DataFrame({"cohort": [1950, 1960], "total_var": [0.04, 0.09]})
+    _, _, half, _ = B._ccf_band(gen, 0.95, var)
+    np.testing.assert_allclose(half, 1.959963985 * np.array([0.2, 0.3]))
+    # the replicate-only width is the fallback, and is the narrower of the two here
+    _, _, mc_half, _ = B._ccf_band(gen, 0.95)
+    assert (mc_half < half).all()
+
+
+def test_ccf_band_falls_back_to_replicate_width_for_cohorts_without_a_variance():
+    """A cohort missing from the variance frame keeps its replicate band rather than vanishing."""
+    gen = _ccf([1950, 1960] * 2, [2.0, 1.9, 2.2, 1.7], [True] * 4, seeds=[0, 0, 1, 1])
+    partial = pd.DataFrame({"cohort": [1950], "total_var": [0.04]})
+    _, _, half, _ = B._ccf_band(gen, 0.95, partial)
+    _, _, mc_half, _ = B._ccf_band(gen, 0.95)
+    assert half[0] == pytest.approx(1.959963985 * 0.2)
+    assert half[1] == pytest.approx(mc_half[1])
+    assert np.isfinite(half).all()

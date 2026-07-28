@@ -23,13 +23,10 @@ def _seed_ci(values: np.ndarray, level: float) -> tuple[np.ndarray, np.ndarray, 
     """Across-seed mean and its Monte-Carlo CI, from a ``(n_seeds, ...)`` stack.
 
     ``mean ± z·sd/√K`` with the population sd (``ddof=0``). This is the *same quantity* as
-    ``replicate_variance_aggregate.se``: that table's analytic decomposition
+    ``replicate_variance_aggregate.within_var``: that table's analytic decomposition
     ``sqrt(Σ_i s²_i/K)/n`` equals the standard error of the across-seed mean whenever persons are
     independent within a seed, and ``ddof=0`` makes the two agree exactly rather than up to a
     ``(K-1)/K`` factor.
-
-    What is plotted here is the uncertainty in the estimate actually being drawn — the across-seed
-    mean — which does shrink as √K.
     """
     k = values.shape[0]
     mean = values.mean(axis=0)
@@ -50,7 +47,7 @@ def plot_km_seed_band(
     ``gen_km`` carries a ``seed`` column (one KM curve per seed); its survival is sampled on a
     common day grid, then :func:`_seed_ci` gives the pointwise mean and ``±z·sd/√K`` band (years
     axes). The band is replicate uncertainty in the plotted curve, on the same footing as
-    ``replicate_variance_aggregate.se`` — not the spread of an individual seed's curve.
+    ``replicate_variance_aggregate.within_var`` — not the spread of an individual seed's curve.
     """
     grid = np.union1d(obs_km["time"].to_numpy(), gen_km["time"].to_numpy())
     per_seed = []
@@ -87,19 +84,20 @@ def plot_ccf_seed_band(
     obs_ccf: pd.DataFrame,
     gen_ccf: pd.DataFrame,
     *,
+    variance: pd.DataFrame | None = None,
     title: str | None = None,
     level: float = DEFAULT_LEVEL,
 ) -> Figure:
-    """Observed CCF by cohort overlaid with the generated across-seed mean and Monte-Carlo CI.
+    """Observed CCF by cohort overlaid with the generated across-seed mean and its CI.
 
-    ``gen_ccf`` carries a ``seed`` column (one CCF-by-cohort curve per seed); per cohort the mean
-    and its ``±z·sd/√K`` band are shaded (see :func:`_seed_ci` — the same replicate uncertainty
-    reported as ``replicate_variance_aggregate.se``). Both frames have ``[cohort, ccf]`` (plus seed
-    on generated).
+    ``gen_ccf`` carries a ``seed`` column (one CCF-by-cohort curve per seed); both frames have
+    ``[cohort, ccf]``. ``variance`` is :func:`~seqeval.metrics.fertility.ccf_variance` output —
+    supplied, the band is ``±z·sqrt(total_var)``, the full uncertainty in the cohort's CCF
+    (:func:`_ccf_band`).
     """
     fig, ax = new_fig()
     _draw_ccf_band(
-        ax, gen_ccf, level, color="tab:orange",
+        ax, gen_ccf, level, variance=variance, color="tab:orange",
         line_label="generated mean", band_label=f"generated {level:.0%} CI",
     )
     _draw_observed_ccf(ax, obs_ccf)
@@ -111,8 +109,15 @@ def plot_ccf_seed_band(
     return fig
 
 
-def _ccf_band(gen_ccf: pd.DataFrame, level: float):
-    """``(cohorts, mean, half_width, complete)`` for one seed-replicated CCF-by-cohort frame."""
+def _ccf_band(gen_ccf: pd.DataFrame, level: float, variance: pd.DataFrame | None = None):
+    """``(cohorts, mean, half_width, complete)`` for one seed-replicated CCF-by-cohort frame.
+
+    Without ``variance`` the half-width is the replicate-only ``z·sd/√K`` across seed curves. With
+    it, the half-width is ``z·sqrt(total_var)``: replicate noise *plus* the sampling error of a
+    finite cohort, which is the uncertainty in the CCF being estimated rather than in the average of
+    these particular seeds. Cohorts absent from ``variance`` (or too small for a sample variance)
+    keep the replicate-only width rather than losing their band.
+    """
     stats = (
         gen_ccf.groupby("cohort", observed=True)["ccf"]
         .agg(mean="mean", sd=lambda s: s.std(ddof=0), k="size")
@@ -120,19 +125,23 @@ def _ccf_band(gen_ccf: pd.DataFrame, level: float):
     )
     z = norm.ppf(1 - (1 - level) / 2)
     half = z * stats["sd"] / np.sqrt(stats["k"])
+    if variance is not None:
+        total = variance.set_index("cohort")["total_var"].reindex(stats.index)
+        half = (z * np.sqrt(total)).fillna(half)
     complete = _majority_complete(gen_ccf).reindex(stats.index, fill_value=True).to_numpy()
     return stats.index.to_numpy(), stats["mean"].to_numpy(), half.to_numpy(), complete
 
 
 def _draw_ccf_band(
-    ax, gen_ccf, level, *, color, line_label, band_label=None, alpha=0.3, incomplete_label=True
+    ax, gen_ccf, level, *, color, line_label, variance=None, band_label=None, alpha=0.3,
+    incomplete_label=True,
 ) -> None:
-    """One generated CCF curve: mean line (dashed where incomplete) inside its replicate CI.
+    """One generated CCF curve: mean line (dashed where incomplete) inside its CI.
 
     ``band_label=None`` leaves the shaded band out of the legend — right on the multi-window panel,
     where the level is stated once in the legend title instead of once per curve.
     """
-    cohorts, mean, half, complete = _ccf_band(gen_ccf, level)
+    cohorts, mean, half, complete = _ccf_band(gen_ccf, level, variance)
     if not len(cohorts):
         return
     ax.fill_between(
@@ -209,16 +218,18 @@ def plot_ccf_jumpoff_panel(
     obs_ccf: pd.DataFrame,
     gen_by_jumpoff: dict[int, pd.DataFrame],
     *,
+    variance_by_jumpoff: dict[int, pd.DataFrame] | None = None,
     title: str | None = None,
     level: float = DEFAULT_LEVEL,
 ) -> Figure:
     """Every jump-off's generated CCF-by-cohort curve on one axes, against one observed curve.
     """
     jumpoffs = sorted(gen_by_jumpoff)
+    variances = variance_by_jumpoff or {}
     fig, ax = new_fig()
     for t2, color in zip(jumpoffs, stratum_colors(len(jumpoffs), lo=0.1, hi=0.85), strict=True):
         _draw_ccf_band(
-            ax, gen_by_jumpoff[t2], level, color=color,
+            ax, gen_by_jumpoff[t2], level, variance=variances.get(t2), color=color,
             line_label=f"jump-off {days_to_years(t2):.0f}y", alpha=0.2, incomplete_label=False,
         )
     _draw_observed_ccf(ax, obs_ccf)
@@ -226,7 +237,8 @@ def plot_ccf_jumpoff_panel(
     ax.set_ylabel("CCF (mean births/woman)")
     if title:
         ax.set_title(title)
-    ax.legend(fontsize=8, title=f"bands: {level:.0%} replicate CI", title_fontsize=7)
+    kind = "CI" if variances else "replicate CI"
+    ax.legend(fontsize=8, title=f"bands: {level:.0%} {kind}", title_fontsize=7)
     return fig
 
 

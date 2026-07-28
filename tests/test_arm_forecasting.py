@@ -110,7 +110,22 @@ def test_replicate_variance_aggregate_ccf_band_covers_truth(tmp_path):
     agg = pd.read_parquet(out.dir / "replicate_variance_aggregate.parquet")
     truth = S.expected_ccf(S.default_hazards())
     row = agg[agg["cohort"].isna()].iloc[0]  # pooled (all-cohorts) row for the first window
-    assert row["ci_lo"] <= truth <= row["ci_hi"]  # forecast CCF band brackets the known truth
+    # the replicate-only band, rebuilt from within_var, brackets the truth
+    half = 1.959963984540054 * np.sqrt(row["within_var"])
+    assert row["ccf"] - half <= truth <= row["ccf"] + half
+
+
+def test_replicate_variance_aggregate_splits_the_variance_of_the_estimate(tmp_path):
+    """Seed noise and heterogeneity, in variance units of the CCF, adding to the total."""
+    agg = pd.read_parquet(_run(tmp_path).dir / "replicate_variance_aggregate.parquet")
+    pooled = agg[agg["cohort"].isna()]
+    # the split is exact and neither component is negative
+    np.testing.assert_allclose(pooled["within_var"] + pooled["between_var"], pooled["total_var"])
+    assert (pooled["within_var"] > 0).all() and (pooled["between_var"] >= 0).all()
+    # total_var is what the reported interval is built from
+    np.testing.assert_allclose(pooled["se_total"] ** 2, pooled["total_var"])
+    # the replicate-only uncertainty stays recoverable as sqrt(within_var), and is the smaller half
+    assert (np.sqrt(pooled["within_var"]) < pooled["se_total"]).all()
 
 
 def test_replicate_variance_aggregate_flags_forecast_provenance(tmp_path):

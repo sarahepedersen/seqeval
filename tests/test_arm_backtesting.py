@@ -236,3 +236,64 @@ def test_coverage_reports_settled_for_framed(tmp_path):
     # are settled (answer already in the observed prefix) and excluded.
     unconditioned = cov[(cov["outcome"] == "first_birth_by_age_40y") & (cov["condition"] == "-")]
     assert unconditioned["n_settled"].sum() > 0
+
+
+_KM_ONLY_YAML = """
+model: {name: perfect}
+data: {observed: o.parquet, age_unit: days}
+events: {union: birth}
+replicates: {min_replicates: 5, bootstrap: {n: 0, seed: 7}}
+outcomes:
+  first_union: {event: union, n: 1}
+arms:
+  backtesting:
+    probability_outcomes:
+      - {outcome: first_union, by_age: 40}
+    aggregate_targets: [km:first_union]
+    min_seeds: 5
+"""
+
+
+def test_km_only_targets_need_neither_births_nor_persons(tmp_path, caplog):
+    """A survival target is built from the outcome registry, not from fertility inputs.
+
+    This bundle declares no ``birth`` alias and carries no persons table, so a run that resolved
+    either would fail outright rather than degrade.
+    """
+    import logging
+
+    cfg = Config.model_validate(yaml.safe_load(_KM_ONLY_YAML))
+    rng = np.random.default_rng(0)
+    h = S.default_hazards()
+    obs, pers = S.simulate_cohort(800, (1960, 1985), h, None, rng, no_event_fraction=1.0)
+    gen = S.simulate_generated(obs, pers, h, [(0.0, 25.0)], 8, rng)
+    bundle = Bundle(
+        observed=obs, generated=gen, persons=None, event_defs=None,
+        events=EventConfig(union="birth"),
+    )
+    out = OutputWriter(base_dir=tmp_path, arm="backtesting", model="perfect")
+    with caplog.at_level(logging.WARNING, logger="seqeval"):
+        BT.run(
+            bundle,
+            cfg.arms.backtesting,
+            out,
+            outcomes=resolve_outcomes(cfg),
+            conditions=resolve_conditions(cfg),
+            prob_outcomes=resolve_probability_outcomes(cfg, resolve_outcomes(cfg)),
+            replicate_spec=resolve_replicates(cfg),
+            cohort_width=5,
+        )
+    err = pd.read_parquet(out.dir / "aggregate_error.parquet")
+    assert set(err["target"]) == {"km:first_union"}
+    assert not any("needs persons" in r.message for r in caplog.records)
+
+
+def test_needs_births_ignores_km_targets():
+    def cfg_for(targets):
+        y = _CFG_YAML.replace("aggregate_targets: [ccf]", f"aggregate_targets: {targets}")
+        return Config.model_validate(yaml.safe_load(y)).arms.backtesting
+
+    assert not BT._needs_births(cfg_for("[km:first_birth]"))
+    assert not BT._needs_births(cfg_for("[]"))
+    assert BT._needs_births(cfg_for("[ppr]"))
+    assert BT._needs_births(cfg_for("[km:first_birth, ccf]"))  # mixed: births still required

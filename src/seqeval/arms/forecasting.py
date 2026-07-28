@@ -322,8 +322,9 @@ def _replicate_variance_aggregate(
     """Analytic replicate uncertainty for CCF (completed cohort fertility), per cohort per prediction window.
 
     Utilizes each person's expected completed fertility and replicate variance to estimate
-    ``CCF = mean_i mu_i`` for each cohort. Uses a variance decomposition (between-person + mean
-    within-person variance / K).
+    ``CCF = mean_i mu_i`` for each cohort, splitting the variance of that estimate into
+    ``within_var`` (inference uncertainty) and ``between_var`` (outcome uncertainty), which add to
+    ``total_var`` — the variance ``se_total`` and ``ci_total`` report. See :func:`_ccf_row`.
 
     ``forecast_share`` is the fraction of each estimate contributed by post-jump-off generated
     events: 0.0 rests entirely on observed history, 1.0 entirely on model output.
@@ -367,18 +368,29 @@ def _replicate_variance_aggregate(
 
 
 def _ccf_row(sub: pd.DataFrame, z: float) -> dict:
-    """One CCF point estimate, its analytic seed-uncertainty CI, and its forecast provenance."""
-    mu, s2, k = sub["mu"].to_numpy(), sub["s2"].to_numpy(), sub["K"].to_numpy()
-    n = len(sub)
-    ccf = float(mu.mean())
+    """One CCF point estimate, the variance behind it split by source, and its forecast provenance.
+
+    Each woman contributes ``mu_i`` (her expected completed fertility over ``K_i`` seeds) and
+    ``s2_i`` (her variance across those seeds). :func:`~seqeval.core.replicates.
+    mean_variance_components` splits the variance of ``CCF = mean_i mu_i`` into ``within_var``
+    (seeds) and ``between_var`` (population heterogeneity), both in variance units *of the CCF
+    itself* — the same scale as the interval, not the scale of one woman's count. They add to
+    ``total_var``, which is what ``se_total``, ``ci_total`` and the CCF figure band all report; the
+    replicate-only interval stays available as ``ccf ± z*sqrt(within_var)``.
+    """
+    comp = rep.mean_variance_components(sub["mu"], sub["s2"], sub["K"])
+    ccf = comp["mean"]
     ccf_forecast = float(sub["mu_gen"].to_numpy().mean())  # model-contributed births per woman
-    se = float(np.sqrt(np.sum(s2 / k) / n**2))  # Monte-Carlo (replicate) uncertainty only
+    se_total = float(np.sqrt(comp["total_var"]))
     return {
-        "n_women": n,
+        "n_women": comp["n"],
         "ccf": ccf,
-        "se": se,
-        "ci_lo": ccf - z * se,
-        "ci_hi": ccf + z * se,
+        "within_var": comp["within_var"],
+        "between_var": comp["between_var"],
+        "total_var": comp["total_var"],
+        "se_total": se_total,
+        "ci_total_lo": ccf - z * se_total,
+        "ci_total_hi": ccf + z * se_total,
         "forecast_share": float(ccf_forecast / ccf) if ccf > 0 else np.nan,
     }
 

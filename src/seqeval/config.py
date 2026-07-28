@@ -41,9 +41,11 @@ from seqeval.units import years_to_days
 
 logger = logging.getLogger("seqeval")
 
-#: Aggregate metric names that may appear in ``aggregate_targets`` /
-#: ``replicate_variance.aggregate`` without a ``km:`` prefix.
-_AGGREGATE_BASE = {"ccf", "asfr_period", "asfr_cohort", "ppr"}
+# fertiity-specific --> require 'birth' token in sequence
+FERTILITY_TARGETS = {"ccf", "asfr_period", "asfr_cohort", "ppr"}
+
+# require `persons` table (exposure denominators)
+FERTILITY_TARGETS_NEEDING_PERSONS = FERTILITY_TARGETS - {"ppr"}
 
 
 class _Strict(BaseModel):
@@ -504,10 +506,10 @@ class Config(_Strict):
                     f"{path}: km target references unknown outcome {name!r}; declared outcomes "
                     f"are: {', '.join(outcome_names) or '(none)'}"
                 )
-        elif tgt not in _AGGREGATE_BASE:
+        elif tgt not in FERTILITY_TARGETS:
             raise ValueError(
                 f"{path}: unknown aggregate target {tgt!r}; valid targets are "
-                f"{', '.join(sorted(_AGGREGATE_BASE))} or km:<outcome>"
+                f"{', '.join(sorted(FERTILITY_TARGETS))} or km:<outcome>"
             )
 
     def _check_stratifiers(self, cols: list[str], path: str) -> None:

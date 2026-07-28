@@ -6,25 +6,26 @@ import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 
-from seqeval.viz._style import new_fig, stratum_colors
+from seqeval.viz._style import new_fig, stratum_colors, stratum_key
 
 
 def plot_asfr(asfr: pd.DataFrame, *, dim: str) -> Figure:
     """Age profile of ASFR, one line per period year or birth cohort.
 
     ``dim`` is the cell dimension column (``"year"`` for period, ``"cohort"`` for cohort);
-    ``age_bin`` labels are already in years.
+    ``age_bin`` labels are already in years. ``dim`` is ordered, so the lines run along a sequential
+    ramp and :func:`stratum_key` keys them by legend or colorbar depending on how many there are.
     """
     fig, ax = new_fig()
     groups = list(asfr.groupby(dim, observed=True))
-    for (key, grp), color in zip(groups, stratum_colors(len(groups)), strict=True):
+    colors = stratum_colors(len(groups))
+    for (key, grp), color in zip(groups, colors, strict=True):
         grp = grp.sort_values("age_bin")
         ax.plot(grp["age_bin"], grp["asfr"], color=color, label=str(key), lw=1.2)
     ax.set_xlabel("age (years)")
     ax.set_ylabel("age-specific fertility rate")
     ax.set_title(f"ASFR by {dim}")
-    if len(groups) <= 12:
-        ax.legend(title=dim, fontsize=7, ncol=2)
+    stratum_key(ax, [k for k, _ in groups], colors, label=dim)
     return fig
 
 

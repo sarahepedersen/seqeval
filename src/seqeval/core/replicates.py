@@ -247,9 +247,39 @@ def count_moments(count_table: pd.DataFrame, *, run_keys: list[str], seed_col: s
     """Per-run predictive ``mean``, ``var`` and replicate count ``k`` of the ``count`` column.
     """
     grouped = count_table.groupby(run_keys, observed=True)["count"]
-    # ddof = 0 because this is a descriptive property of the distribution for the individual 
+    # ddof = 0 because this is a descriptive property of the distribution for the individual
     out = grouped.agg(mean="mean", var=lambda s: s.var(ddof=0), k="size").reset_index()
     return out.sort_values(run_keys).reset_index(drop=True)
+
+
+def mean_variance_components(mu, s2, k) -> dict:
+    """Variance of ``mean_i mu_i`` split by source, in variance units of that mean.
+
+    Takes the per-individual moments of :func:`count_moments` — ``mu`` (predictive mean), ``s2``
+    (replicate variance, ``ddof=0``) and ``k`` (replicate count) — and returns
+    ``{n, mean, within_var, between_var, total_var}``:
+
+    - ``within_var = Σ_i s2_i/k_i / n²`` — inference uncertainty: rerunning inference on the *same* individual.
+    - ``total_var = var_i(mu_i)/n`` (``ddof=1``: a sample variance over individuals, used to infer
+      the population) — every source at once, because each ``mu_i`` already carries its own seed
+      noise.
+    - ``between_var`` — outcome heterogeneity, what is left once the replicate term comes out.
+
+    ``within_var + between_var == total_var`` exactly, except where ``between_var`` clamps at 0: a
+    group whose seeds explain everything can push the subtraction slightly negative. With ``n < 2``
+    there is no sample variance and the two population-facing terms are ``nan``.
+    """
+    mu, s2, k = np.asarray(mu, float), np.asarray(s2, float), np.asarray(k, float)
+    n = len(mu)
+    within_var = float(np.sum(s2 / k) / n**2) if n else np.nan
+    total_var = float(mu.var(ddof=1) / n) if n > 1 else np.nan
+    return {
+        "n": n,
+        "mean": float(mu.mean()) if n else np.nan,
+        "within_var": within_var,
+        "between_var": max(total_var - within_var, 0.0) if n > 1 else np.nan,
+        "total_var": total_var,
+    }
 
 
 # =================================================================================================
