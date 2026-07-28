@@ -88,7 +88,8 @@ def violation_rates(
 ) -> pd.DataFrame:
     """Per-rule violation rates, per event of the kind the rule governs, by seed (and window).
 
-    Returns ``[*by, rule, severity, n_violations, n_events, rate_per_event]``
+    Returns ``[*by, rule, severity, n_violations, n_events, rate_per_event, n_persons]``, where
+    ``n_persons`` is the distinct people in the cell.
     """
     _check_keys(df, keys)
     by = [c for c in by if c in df.columns]
@@ -96,6 +97,7 @@ def violation_rates(
     by = by + window
 
     cells = _group_size(df[keys].drop_duplicates(), by)  # one row per `by` cell
+    n_persons = _group_nunique(df, by, "person_id").reindex(cells.index, fill_value=0)
 
     rows = []
     for rule in violations["rule"].unique():
@@ -109,6 +111,7 @@ def violation_rates(
                 "severity": severity,
                 "n_violations": n_viol.to_numpy(),
                 "n_events": n_events.to_numpy(),
+                "n_persons": n_persons.to_numpy(),
             }
         )
         for i, col in enumerate(by):
@@ -116,7 +119,7 @@ def violation_rates(
         cell["rate_per_event"] = cell["n_violations"] / cell["n_events"].replace(0, np.nan)
         rows.append(cell)
 
-    cols = [*by, "rule", "severity", "n_violations", "n_events", "rate_per_event"]
+    cols = [*by, "rule", "severity", "n_violations", "n_events", "rate_per_event", "n_persons"]
     if not rows:
         return pd.DataFrame(columns=cols)
     out = pd.concat(rows, ignore_index=True)[cols]
@@ -129,6 +132,15 @@ def _group_size(frame: pd.DataFrame, by: list[str]) -> pd.Series:
         s = frame.groupby(by, observed=True).size()
         return s
     return pd.Series([len(frame)], index=[None])
+
+
+def _group_nunique(frame: pd.DataFrame, by: list[str], col: str) -> pd.Series:
+    """Distinct ``col`` per ``by`` cell, on the same index convention as :func:`_group_size`."""
+    if col not in frame.columns:
+        return _group_size(frame, by)
+    if by:
+        return frame.groupby(by, observed=True)[col].nunique()
+    return pd.Series([frame[col].nunique()], index=[None])
 
 
 def _check_keys(df: pd.DataFrame, keys: list[str]) -> None:

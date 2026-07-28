@@ -41,27 +41,30 @@ def describe_outcome(
     spec : FramedOutcome or CountQuery
         The resolved (day-valued, raw-token) outcome spec.
     jumpoff_days : int or None
-        The jump-off age (days) the outcome is evaluated at; named in the sentence when given.
+        The jump-off age (days) the outcome is evaluated at. Always named, either inside the
+        sentence or as a trailing clause: the same question asked at two jump-offs is two different
+        figures, and a shared title would read as one.
     label_fn : callable, default str
         Maps a raw event token to a human label (pass ``Bundle.label`` for real names).
     """
     jo = f"age {_yr(jumpoff_days)}" if jumpoff_days is not None else "the jump-off"
+    given = f" | {spec.given}" if spec.given else ""
 
     if isinstance(spec, CountQuery):
         event = label_fn(spec.event)
         w = _yr(spec.frame.value)
         if spec.frame.kind == "within":
-            return f"P(≥{spec.min_events} {event} within {w}y after {jo})"
-        return f"P(≥{spec.min_events} {event} after {jo}, by age {w})"
+            return f"P(≥{spec.min_events} {event} within {w}y after {jo}{given})"
+        return f"P(≥{spec.min_events} {event} after {jo}, by age {w}{given})"
 
     if isinstance(spec, FramedOutcome):
         occurrence = _describe_tte(spec.tte, label_fn)
         v = _yr(spec.frame.value)
         if spec.frame.kind == "by_age":
-            return f"P({occurrence} by age {v})"
+            return f"P({occurrence} by age {v}{given}) from {jo}"
         if spec.frame.kind == "within":
-            return f"P({occurrence} within {v}y after {jo})"
-        return f"P({occurrence} within {v}y of its origin)"
+            return f"P({occurrence} within {v}y after {jo}{given})"
+        return f"P({occurrence} within {v}y of its origin{given}) from {jo}"
 
     raise TypeError(f"cannot describe {type(spec).__name__}")
 

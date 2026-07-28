@@ -102,13 +102,17 @@ def draw_distribution_columns(
     quantity runs up the y axis and each group occupies a column at its own x position. Widths are
     within-group shares scaled so the widest bar in the figure fills most of the gap between
     columns, so groups stay comparable and never overlap. Returns the x positions drawn.
+
+    Every bar grows rightward from its group's tick rather than being centred on it, so within a
+    column the bins share a baseline and their lengths compare directly; a centred bar makes two
+    nearby shares look alike.
     """
     if cells.empty:
         return np.empty(0)
     groups = np.array(sorted(cells[x].dropna().unique()))
     spacing = float(np.min(np.diff(groups))) if len(groups) > 1 else 1.0
     shares = cells[count] / cells[total]
-    unit = 0.42 * spacing / float(shares.max() or 1.0)
+    unit = 0.8 * spacing / float(shares.max() or 1.0)
 
     for key in groups:
         sub = cells[cells[x] == key].sort_values(lo)
@@ -116,17 +120,18 @@ def draw_distribution_columns(
         height = (sub[hi] - sub[lo]).to_numpy()
         width = (sub[count].fillna(0).to_numpy().astype(float) / max(n_group, 1)) * unit
         ax.bar(
-            key - width / 2, height, width=width, bottom=sub[lo].to_numpy(), align="edge",
-            color=color, alpha=0.45, zorder=2,
+            np.full(len(width), key), height, width=width, bottom=sub[lo].to_numpy(),
+            align="edge", color=color, alpha=0.45, zorder=2,
         )
         hidden = sub[sub["suppressed"]]
         if len(hidden):
             cap = max(min_cell - 1, 0) / max(n_group, 1) * unit
             ax.bar(
-                np.full(len(hidden), key - cap / 2),
+                np.full(len(hidden), key),
                 (hidden[hi] - hidden[lo]).to_numpy(),
                 width=cap, bottom=hidden[lo].to_numpy(), align="edge",
                 facecolor="none", edgecolor="0.6", hatch=SUPPRESSED_HATCH, lw=0.4, zorder=2,
             )
     ax.set_xticks(groups)
+    ax.set_xlim(float(groups.min()) - 0.15 * spacing, float(groups.max()) + 1.0 * spacing)
     return groups

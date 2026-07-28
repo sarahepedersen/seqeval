@@ -60,7 +60,10 @@ def test_arm_writes_all_files(tmp_path):
         "ppr.parquet",
     }
     assert expected <= names
-    assert {"asfr_cohort.png", "km_first_birth.png"} <= names
+    assert {"asfr_cohort.png", "km_first_birth.png", "ccf_uncertainty.png"} <= names
+    # The plain CCF-by-cohort and PPR curves are dropped: ccf_uncertainty.png carries the same
+    # estimate, and both tables are still written.
+    assert not {"ccf.png", "ppr.png"} & names
     # Period fertility is written but never drawn: a calendar-year cell is part observed and part
     # forecast, so neither the year x age surface nor its TFR summary is reported.
     assert not {"asfr_period.png", "tfr.png", "tfr.parquet"} & names

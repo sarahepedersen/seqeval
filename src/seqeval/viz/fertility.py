@@ -1,4 +1,4 @@
-"""Fertility figures: ASFR age profiles, CCF by cohort, PPR bars (03 viz)."""
+"""Fertility figures: cohort ASFR age profiles and the CCF inference/outcome panel (03 viz)."""
 
 from __future__ import annotations
 
@@ -34,47 +34,6 @@ def plot_asfr(asfr: pd.DataFrame, *, dim: str) -> Figure:
     ax.set_ylabel("age-specific fertility rate")
     ax.set_title(f"ASFR by {dim}")
     stratum_key(ax, [k for k, _ in groups], colors, label=dim)
-    return fig
-
-
-def plot_tfr(tfr: pd.DataFrame) -> Figure:
-    """Period total fertility rate over calendar years — the one-number summary of period ASFR."""
-    fig, ax = new_fig()
-    df = tfr.sort_values("year")
-    ax.plot(df["year"], df["tfr"], "-", color="tab:blue")
-    ax.set_xlabel("calendar year")
-    ax.set_ylabel("total fertility rate")
-    ax.set_title("Period TFR by year")
-    return fig
-
-
-def plot_ccf(ccf: pd.DataFrame) -> Figure:
-    """CCF by birth cohort; incomplete cohorts drawn dashed so truncated means are visible."""
-    fig, ax = new_fig()
-    df = ccf.sort_values("cohort")
-    ax.plot(df["cohort"], df["ccf"], "o-", color="tab:blue", label="complete")
-    incomplete = df[~df["complete"].astype(bool)]
-    if len(incomplete):
-        ax.plot(incomplete["cohort"], incomplete["ccf"], "o--", color="tab:red", label="incomplete")
-    ax.set_xlabel("birth cohort")
-    ax.set_ylabel("completed cohort fertility")
-    ax.set_title("CCF by cohort")
-    ax.legend(fontsize=8)
-    return fig
-
-
-def plot_ppr(ppr: pd.DataFrame) -> Figure:
-    """Parity progression ratios as a bar chart, one bar per parity transition."""
-    fig, ax = new_fig()
-    df = ppr.sort_values("parity_from")
-    labels = [f"{a}→{b}" for a, b in zip(df["parity_from"], df["parity_to"], strict=True)]
-    ax.bar(np.arange(len(df)), df["ppr"], color="tab:green")
-    ax.set_xticks(np.arange(len(df)))
-    ax.set_xticklabels(labels)
-    ax.set_xlabel("parity transition")
-    ax.set_ylabel("progression ratio")
-    ax.set_ylim(0, 1.02)
-    ax.set_title("Parity progression ratios")
     return fig
 
 

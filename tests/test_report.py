@@ -28,14 +28,26 @@ def test_build_report_has_all_sections(demo_config, tmp_path):
     assert ".parquet" in html
 
 
-def test_backtesting_section_has_coverage(demo_config, tmp_path):
-    """The backtest-evaluability table lives in the backtesting section, with the metrics table."""
+def test_metrics_table_carries_the_coverage_counts(demo_config, tmp_path):
+    """Evaluability rides on the score's own row, not in a table of its own."""
     results = _run(demo_config, tmp_path / "results")
     html = (results / report.REPORT_NAME).read_text()
     backtest = html.split('<h2 id="backtesting"')[1].split('<h2 id="forecasting"')[0]
-    assert "Backtest coverage (evaluability)" in backtest
-    assert "n_evaluable" in backtest
-    assert "Backtest metrics" in backtest  # the brier/auc table replaces the line graphs
+    assert "Backtest metrics" in backtest
+    assert "Backtest coverage (evaluability)" not in backtest
+    header = backtest.split("</tr>")[0]
+    for col in ("n_condition", "n_evaluable", "n_settled", "n_uncovered"):
+        assert f"<th>{col}</th>" in header
+    # the corrected Brier is gone; MSE carries both names, since p_hat is k/n either way
+    assert "<th>MSE/Brier</th>" in header
+    assert "<th>Brier</th>" not in header
+
+
+def test_aggregate_target_error_table_is_not_reported(demo_config, tmp_path):
+    results = _run(demo_config, tmp_path / "results")
+    html = (results / report.REPORT_NAME).read_text()
+    assert 'id="aggregate-error"' not in html
+    assert (results / "backtesting" / "aggregate_error.parquet").exists()
 
 
 def test_timing_error_section_renders_when_figures_present(demo_config, tmp_path):
@@ -150,15 +162,3 @@ def test_metrics_table_carries_ece_without_an_interval(demo_config, tmp_path):
     # the value itself is rendered somewhere in the table
     assert f"{ece['value'].iloc[0]:.3f}" in section
 
-
-def test_aggregate_error_table_summarizes_every_target(demo_config, tmp_path):
-    """The aggregate targets are scored, so the report says how far off they were."""
-    results = _run(demo_config, tmp_path / "results")
-    html_out = (results / report.REPORT_NAME).read_text()
-    section = html_out.split('<h2 id="backtesting"')[1].split('<h2 id="forecasting"')[0]
-    assert 'id="aggregate-error"' in section
-    err = pd.read_parquet(results / "backtesting" / "aggregate_error.parquet")
-    for target in sorted(err["target"].unique()):
-        assert f"<td>{target}</td>" in section
-    # one row per (target, jump-off), not one per cell
-    assert section.count("<td>ccf</td>") == err.loc[err["target"] == "ccf", "age_stop"].nunique()

@@ -383,26 +383,23 @@ def _asfr_grid(cohorts: list) -> tuple[Figure, np.ndarray]:
     return fig, flat
 
 
-def _draw_asfr_panel(ax, gen_cohort, level, *, color, label, alpha=0.3) -> None:
-    """One cohort's generated age profile: across-seed mean inside its total-CI band."""
-    cells, mean, half = _total_band(
-        gen_cohort, value="asfr", var="asfr_var", by=["age_bin"], level=level
-    )
-    if not len(cells):
+def _draw_asfr_panel(ax, gen_cohort, *, color, label) -> None:
+    """One cohort's generated age profile: the across-seed mean, drawn without a band."""
+    if gen_cohort.empty:
         return
-    ages = cells.to_numpy().astype(float)
-    ax.fill_between(ages, mean - half, mean + half, alpha=alpha, color=color, label="_nolegend_")
-    ax.plot(ages, mean, color=color, lw=1.6, label=label)
+    profile = gen_cohort.groupby("age_bin", observed=True)["asfr"].mean().sort_index()
+    ax.plot(profile.index.to_numpy().astype(float), profile.to_numpy(), color=color, lw=1.6,
+            label=label)
 
 
-def _finish_asfr_grid(fig, axes, cohorts, *, title, legend_title) -> Figure:
+def _finish_asfr_grid(fig, axes, cohorts, *, title) -> Figure:
     for ax in axes[: len(cohorts)]:
         ax.grid(True, alpha=0.3, linewidth=0.5)
         ax.set_ylim(bottom=0)
     for ax in axes[: len(cohorts)]:
         ax.set_xlabel("age (years)", fontsize=8)
     axes[0].set_ylabel("ASFR (births/woman-year)", fontsize=8)
-    axes[0].legend(fontsize=7, title=legend_title, title_fontsize=6)
+    axes[0].legend(fontsize=7)
     if title:
         fig.suptitle(title)
     fig.tight_layout()
@@ -415,15 +412,13 @@ def plot_asfr_overlay(
     *,
     jumpoff_days: int | None = None,
     title: str | None = None,
-    level: float = DEFAULT_LEVEL,
 ) -> Figure:
-    """Observed cohort age-fertility profiles under the generated mean and its CI, one panel each.
+    """Observed cohort age-fertility profiles under the generated mean, one panel each.
 
     A cohort ASFR is a ``(cohort, age)`` surface, so it is drawn as small multiples: one panel per
-    birth cohort, age along x, the observed profile in black beneath the generated across-seed mean
-    and its :func:`_total_band` interval (Poisson sampling variance of each cell averaged over seeds
-    plus the across-seed variance over K). Panels share both axes so the cohorts can be compared by
-    eye.
+    birth cohort, age along x, the observed profile in black beneath the generated across-seed mean.
+    Panels share both axes so the cohorts can be compared by eye. No interval is drawn — at one-year
+    age bins the shape of the profile is the question, and a band per cell obscures it.
 
     ``jumpoff_days`` marks the jump-off **age** in every panel. The jump-off is an age, not a date,
     so the rule falls in the same place for every cohort: everything to its left is replayed
@@ -435,7 +430,7 @@ def plot_asfr_overlay(
     obs_by = dict(list(obs_asfr.groupby("cohort", observed=True)))
     for ax, cohort in zip(axes, cohorts, strict=False):
         sub = gen_asfr[gen_asfr["cohort"] == cohort]
-        _draw_asfr_panel(ax, sub, level, color="tab:orange", label="generated mean")
+        _draw_asfr_panel(ax, sub, color="tab:orange", label="generated mean")
         o = obs_by.get(cohort)
         if o is not None:
             o = o.sort_values("age_bin")
@@ -443,7 +438,7 @@ def plot_asfr_overlay(
         if jumpoff_days is not None:
             ax.axvline(days_to_years(jumpoff_days), color="0.4", lw=0.9, ls=":")
         ax.set_title(f"cohort {cohort}", fontsize=9, loc="left")
-    return _finish_asfr_grid(fig, axes, cohorts, title=title, legend_title=f"band: {level:.0%} CI")
+    return _finish_asfr_grid(fig, axes, cohorts, title=title)
 
 
 def plot_asfr_jumpoff_panel(
@@ -457,7 +452,8 @@ def plot_asfr_jumpoff_panel(
 
     Each jump-off gets a color, and a dotted rule of its own color marks the age it starts
     forecasting from — so a panel shows directly how much of a cohort's profile the model is being
-    asked to produce, and whether the fit degrades as that share grows.
+    asked to produce, and whether the fit degrades as that share grows. ``level`` is accepted so
+    every cross-jump-off panel has one signature; these profiles carry no band.
     """
     jumpoffs = sorted(gen_by_jumpoff)
     cohorts = sorted(
@@ -470,8 +466,8 @@ def plot_asfr_jumpoff_panel(
         for t2, color in zip(jumpoffs, colors, strict=True):
             gen = gen_by_jumpoff[t2]
             _draw_asfr_panel(
-                ax, gen[gen["cohort"] == cohort], level, color=color,
-                label=f"jump-off {days_to_years(t2):.0f}y", alpha=0.2,
+                ax, gen[gen["cohort"] == cohort], color=color,
+                label=f"jump-off {days_to_years(t2):.0f}y",
             )
             ax.axvline(days_to_years(t2), color=color, lw=0.9, ls=":", alpha=0.7)
         o = obs_by.get(cohort)
@@ -479,7 +475,7 @@ def plot_asfr_jumpoff_panel(
             o = o.sort_values("age_bin")
             ax.plot(o["age_bin"], o["asfr"], color="black", lw=1.4, label="observed")
         ax.set_title(f"cohort {cohort}", fontsize=9, loc="left")
-    return _finish_asfr_grid(fig, axes, cohorts, title=title, legend_title=f"bands: {level:.0%} CI")
+    return _finish_asfr_grid(fig, axes, cohorts, title=title)
 
 
 def majority_complete(gen_ccf: pd.DataFrame) -> pd.Series:

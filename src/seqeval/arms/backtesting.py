@@ -63,6 +63,9 @@ _EXTRA_BY = ("seed", "age_start", "age_stop")
 _FERTILE = (15.0, 50.0)
 # Width of a timing-error bin on the ridge; one year is the resolution a reader of ages expects.
 _ERROR_BIN_YEARS = 1.0
+# Width of a predicted-value bin. Fixed rather than equal-count, so the same predicted-age range is
+# the same ridge at every jump-off and the figures can be read against each other.
+_PRED_BIN_YEARS = 2.0
 # Accumulated tables keyed to individuals. The rest are per-bin or per-cell aggregates:
 # `calibration`/`coverage` count people in a bin, `timing_error`/`parity_distribution` in a cell.
 _PER_PERSON = {"probabilities"}
@@ -243,7 +246,8 @@ def _score_probability_outcome(
 
     scores = _score_row(joined, summary, tables, binning)
     cis = ml.score_cis(joined, level=replicate_spec.level)
-    acc["scores"].append(_stamp_scores(scores, label, cis))
+    n_persons = int(joined["person_id"].nunique()) if "person_id" in joined.columns else len(joined)
+    acc["scores"].append(_stamp_scores(scores, label, cis, n_persons))
 
 
 def _evaluate_observed(spec, observed, spans_obs, t2) -> pd.DataFrame:
@@ -315,6 +319,7 @@ def _coverage_row(obs_eval, gen_eval, cond_persons, all_persons, settled, label)
                 "n_seed_min": int(ns.min()) if len(ns) else 0,
                 "n_seed_median": float(ns.median()) if len(ns) else 0.0,
                 "n_seed_max": int(ns.max()) if len(ns) else 0,
+                "n_persons": n_evaluable,
             }
         ]
     )
@@ -373,7 +378,7 @@ def _emit_timing_ridge(spec, tables, t2, out, desc, scored, acc, label) -> None:
     td, obs_tte, horizon = tables
     err = ml.timing_error_distribution(
         td, obs_tte, horizon_days=horizon, persons=scored, error_bin_years=_ERROR_BIN_YEARS,
-        min_cell=out.min_cell,
+        pred_bin_years=_PRED_BIN_YEARS, min_cell=out.min_cell,
     )
     if err.empty:
         return
@@ -483,7 +488,7 @@ def _score_aggregate_target(
         out.figure(
             f"asfr_overlay_w{jumpoff_y}",
             viz_backtest.plot_asfr_overlay(
-                obs_m, gen_m, jumpoff_days=t2, level=replicate_spec.level,
+                obs_m, gen_m, jumpoff_days=t2,
                 title=f"Cohort ASFR — jump-off {jumpoff_y}y",
             ),
         )
@@ -638,7 +643,9 @@ def _km_at_grid(df, keys, spec, by) -> pd.DataFrame:
         # step function: survival at time = last recorded value at or before that time (1.0 before).
         idx = np.searchsorted(g["time"].to_numpy(), grid, side="right") - 1
         surv = np.where(idx >= 0, g["survival"].to_numpy()[np.clip(idx, 0, len(g) - 1)], 1.0)
-        block = pd.DataFrame({"time": grid, "survival": surv})
+        block = pd.DataFrame(
+            {"time": grid, "survival": surv, "n_persons": int(g["n_persons"].iloc[0])}
+        )
         if by:
             key_tuple = key if isinstance(key, tuple) else (key,)
             for col, val in zip(by, key_tuple, strict=True):
@@ -675,11 +682,15 @@ def _stamp(df: pd.DataFrame, label: dict) -> pd.DataFrame:
     return out
 
 
-def _stamp_scores(scores: dict, label: dict, cis: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Long scores rows ``[*label, metric, value, ci_lo, ci_hi]`` (CIs NaN if not bootstrapped)."""
+def _stamp_scores(
+    scores: dict, label: dict, cis: pd.DataFrame | None = None, n_persons: int = 0
+) -> pd.DataFrame:
+    """Long scores rows ``[*label, metric, value, ci_lo, ci_hi, n_persons]``."""
     df = pd.DataFrame([{**label, "metric": k, "value": v} for k, v in scores.items()])
     if cis is not None:
-        return df.merge(cis, on="metric", how="left")
-    df["ci_lo"] = np.nan
-    df["ci_hi"] = np.nan
+        df = df.merge(cis, on="metric", how="left")
+    else:
+        df["ci_lo"] = np.nan
+        df["ci_hi"] = np.nan
+    df["n_persons"] = n_persons
     return df

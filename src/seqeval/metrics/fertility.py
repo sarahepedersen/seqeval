@@ -47,9 +47,10 @@ def ccf(
 ) -> pd.DataFrame:
     """Completed cohort fertility: mean births per woman, by birth cohort.
 
-    Returns ``[*extra_by, (cohort,) n_women, ccf, complete]``. ``complete`` is ``False`` when the
-    cohort's observation does not reach the fertile upper bound (its members' spans all end before
-    :data:`FERTILE_UPPER_YEARS`), so callers can tell a true CCF from a truncated mean — important
+    Returns ``[*extra_by, (cohort,) n_women, ccf, complete, n_persons]``. ``complete`` is ``False``
+    when the cohort's observation does not reach the fertile upper bound (its members' spans all
+    end before :data:`FERTILE_UPPER_YEARS`), so callers can tell a true CCF from a truncated mean —
+    important
     when the same function runs on censored/backtest data. ``cohort_width`` is the birth-cohort band
     width in years.
     """
@@ -84,7 +85,8 @@ def ccf(
         )
     out["total_births"] = out["total_births"].fillna(0)
     out["ccf"] = out["total_births"] / out["n_women"]
-    cols = [*group, "n_women", "ccf", "complete"]
+    out["n_persons"] = out["n_women"]
+    cols = [*group, "n_women", "ccf", "complete", "n_persons"]
     return out[cols].sort_values(group).reset_index(drop=True) if group else out[cols]
 
 
@@ -108,11 +110,11 @@ def ccf_variance(
 ) -> pd.DataFrame:
     """Variance of the per-cohort :func:`ccf`, split into replicate and between-woman parts.
 
-    Returns ``[cohort, n_women, ccf, within_var, between_var, total_var]``, the decomposition of
-    :func:`~seqeval.core.replicates.mean_variance_components` applied per cohort. ``births`` and
-    ``spans`` may be seed-replicated (``spans`` is the population, so women with no births are
-    counted in the denominator exactly as :func:`ccf` counts them); ``ccf`` here is the across-seed
-    mean and agrees with :func:`ccf` averaged over seeds.
+    Returns ``[cohort, n_women, ccf, within_var, between_var, total_var, n_persons]``, the
+    decomposition of :func:`~seqeval.core.replicates.mean_variance_components` applied per cohort.
+    ``births`` and ``spans`` may be seed-replicated (``spans`` is the population, so women with no
+    births are counted in the denominator exactly as :func:`ccf` does); ``ccf`` here is the
+    across-seed mean and agrees with :func:`ccf` averaged over seeds.
 
     On unreplicated data — the observed history — there is nothing for seeds to disagree about:
     ``within_var`` is 0 and ``total_var`` is the plain sampling variance of the cohort mean.
@@ -137,6 +139,7 @@ def ccf_variance(
                 "within_var": comp["within_var"],
                 "between_var": comp["between_var"],
                 "total_var": comp["total_var"],
+                "n_persons": int(sub["person_id"].nunique()),
             }
         )
     return pd.DataFrame(rows).sort_values("cohort").reset_index(drop=True)
@@ -154,7 +157,9 @@ def parity_distribution(
 ) -> pd.DataFrame:
     """How completed parity is distributed across women in each cohort.
 
-    Returns ``[cohort, parity, n_replicates, n_women_equiv, share, n_women_total, suppressed]``.
+    Returns ``[cohort, parity, n_replicates, n_women_equiv, share, n_women_total, n_persons,
+    suppressed]``, where ``n_persons`` is the distinct women with any replicate in the cell (the
+    count suppression is judged on, withheld with the rest of the cell).
     Where :func:`ccf` gives a cohort's mean births per woman, this gives the spread that mean is
     averaging over — the outcome uncertainty a single woman faces, as opposed to the uncertainty in
     the estimate of the mean. ``Σ_k k·share_k`` reproduces that mean exactly whenever ``max_parity``
@@ -206,14 +211,17 @@ def parity_distribution(
     cells = cells.merge(totals, on="cohort", how="left")
     cells["share"] = cells["n_women_equiv"] / cells["n_women_total"]
 
+    cells = cells.rename(columns={"_n_women": "n_persons"})
     cells = suppress_small_cells(
         cells,
-        count_col="_n_women",
+        count_col="n_persons",
         by=["cohort"],
         min_cell=min_cell,
         also_null=("n_replicates", "n_women_equiv", "share"),
     )
-    cols = ["cohort", "parity", "n_replicates", "n_women_equiv", "share", "n_women_total"]
+    cols = [
+        "cohort", "parity", "n_replicates", "n_women_equiv", "share", "n_women_total", "n_persons",
+    ]
     return cells[[*cols, "suppressed"]].sort_values(["cohort", "parity"]).reset_index(drop=True)
 
 
@@ -231,7 +239,8 @@ def asfr(
 
     ``period`` cells are ``(year, age_bin)`` (calendar time from :func:`exposure` with
     ``by_year=True``); ``cohort`` cells are ``(cohort, age_bin)`` with ``cohort_width``-year bands.
-    Returns ``[*extra_by, year|cohort, age_bin, births, person_years, asfr, asfr_var]``.
+    Returns ``[*extra_by, year|cohort, age_bin, births, person_years, asfr, asfr_var, n_persons]``;
+    ``n_persons`` is the distinct people exposed in the cell.
 
     ``asfr_var`` is the sampling variance of that one cell's rate under a Poisson count of births on
     fixed exposure — ``births / person_years²``, ``NaN`` where the cell has no exposure. It is the
@@ -249,7 +258,9 @@ def asfr(
             cohort_bins(persons, width=cohort_width).reset_index(), on="person_id", how="left"
         )
     person_days = (
-        exp.groupby([*extra_by, dim, "age_bin"], observed=True)["person_days"].sum().reset_index()
+        exp.groupby([*extra_by, dim, "age_bin"], observed=True)
+        .agg(person_days=("person_days", "sum"), n_persons=("person_id", "nunique"))
+        .reset_index()
     )
 
     # Birth numerator, tagged with the same cell dimension.
@@ -275,7 +286,7 @@ def asfr(
     out["asfr_var"] = np.where(
         out["person_years"] > 0, out["births"] / out["person_years"] ** 2, np.nan
     )
-    cols = [*extra_by, dim, "age_bin", "births", "person_years", "asfr", "asfr_var"]
+    cols = [*extra_by, dim, "age_bin", "births", "person_years", "asfr", "asfr_var", "n_persons"]
     return out[cols].sort_values([*extra_by, dim, "age_bin"]).reset_index(drop=True)
 
 
@@ -289,7 +300,8 @@ def ppr(
 ) -> pd.DataFrame:
     """Parity progression ratios: of groups reaching parity ``k``, the fraction reaching ``k+1``.
 
-    Returns ``[*extra_by, parity_from, parity_to, n_at_risk, n_progressed, ppr, ppr_var]``.
+    Returns ``[*extra_by, parity_from, parity_to, n_at_risk, n_progressed, ppr, ppr_var,
+    n_persons]``, where ``n_persons`` is the distinct people at risk of the transition.
 
     ``ppr_var`` is the sampling variance of that one transition's ratio under a binomial count of
     progressions among those at risk — ``p(1−p)/n_at_risk``, ``NaN`` where nobody is at risk. It is
@@ -324,7 +336,15 @@ def ppr(
             grp = base.reset_index()
             grp["_at_risk"] = at_risk.to_numpy()
             grp["_prog"] = progressed.to_numpy()
-            agg = grp.groupby(extra_by, observed=True)[["_at_risk", "_prog"]].sum().reset_index()
+            agg = (
+                grp.groupby(extra_by, observed=True)[["_at_risk", "_prog"]].sum().reset_index()
+            )
+            persons = (
+                grp[grp["_at_risk"]].groupby(extra_by, observed=True)["person_id"].nunique()
+            )
+            agg["_persons"] = (
+                agg.set_index(extra_by).index.map(persons).to_numpy(na_value=0)
+            )
             for _, r in agg.iterrows():
                 rows.append(
                     {
@@ -333,6 +353,7 @@ def ppr(
                         "parity_to": k + 1,
                         "n_at_risk": int(r["_at_risk"]),
                         "n_progressed": int(r["_prog"]),
+                        "n_persons": int(r["_persons"]),
                     }
                 )
         else:
@@ -342,6 +363,7 @@ def ppr(
                     "parity_to": k + 1,
                     "n_at_risk": int(at_risk.sum()),
                     "n_progressed": int(progressed.sum()),
+                    "n_persons": int(base.index[at_risk.to_numpy()].nunique()),
                 }
             )
 
@@ -395,7 +417,11 @@ def lexis_surface(
     exp = exposure(spans, bins=bins, persons=persons, by_year=(basis == "period"))
     if basis == "cohort":
         exp = exp.merge(cohort_bins(persons, width=cohort_width).reset_index(), on="person_id")
-    den = exp.groupby([*extra_by, dim, "age_bin"], observed=True)["person_days"].sum().reset_index()
+    den = (
+        exp.groupby([*extra_by, dim, "age_bin"], observed=True)
+        .agg(person_days=("person_days", "sum"), n_persons=("person_id", "nunique"))
+        .reset_index()
+    )
 
     out = den.merge(num, on=[*extra_by, dim, "age_bin"], how="left")
     # A Lexis cell exists only where there is exposure — drop zero-exposure cells so that
@@ -407,7 +433,7 @@ def lexis_surface(
     out["rate"] = np.where(out["person_years"] > 0, out["n_events"] / out["person_years"], np.nan)
     if basis == "period":
         out = out[(out[dim] >= year_range[0]) & (out[dim] <= year_range[1])]
-    cols = [dim, "age_bin", *extra_by, "rate", "n_events", "person_years"]
+    cols = [dim, "age_bin", *extra_by, "rate", "n_events", "person_years", "n_persons"]
     return out[cols].sort_values([*extra_by, dim, "age_bin"]).reset_index(drop=True)
 
 

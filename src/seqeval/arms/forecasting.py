@@ -258,7 +258,10 @@ def _emit_dispersion_ridges(ind: pd.DataFrame, subgroup_by, out) -> None:
     out.frame("within_seed_variance_distribution", pop)
     out.figure(
         "within_seed_variance",
-        viz_dispersion.plot_within_seed_variance(pop, x="age_stop", min_cell=out.min_cell),
+        viz_dispersion.plot_within_seed_variance(
+            pop, x="age_stop", min_cell=out.min_cell,
+            title="Within-person replicate variance by jump-off",
+        ),
     )
     for col in subgroup_by:
         if col not in ind.columns:
@@ -268,7 +271,8 @@ def _emit_dispersion_ridges(ind: pd.DataFrame, subgroup_by, out) -> None:
         out.figure(
             f"within_seed_variance_by_{col}",
             viz_dispersion.plot_within_seed_variance(
-                dist, x=col, facet_by="age_stop", min_cell=out.min_cell
+                dist, x=col, facet_by="age_stop", min_cell=out.min_cell,
+                title=f"Within-person replicate variance by {col}, per jump-off",
             ),
         )
 
@@ -406,6 +410,7 @@ def _ccf_row(sub: pd.DataFrame, z: float) -> dict:
         "ci_total_lo": ccf - z * se_total,
         "ci_total_hi": ccf + z * se_total,
         "forecast_share": float(ccf_forecast / ccf) if ccf > 0 else np.nan,
+        "n_persons": int(sub["person_id"].nunique()) if "person_id" in sub.columns else comp["n"],
     }
 
 

@@ -56,12 +56,28 @@ def test_bar_width_is_a_within_group_share():
     assert widths[0] == pytest.approx(widths[2])  # same share, same width, 10x the people
 
 
-def test_columns_are_centred_on_their_group():
+def test_columns_start_at_their_group_tick():
+    """Bars share a left baseline per column, so bin shares compare as lengths."""
     dist = _dist([1960, 1965], {1960: [10, 30], 1965: [20, 20]})
     ax = D.plot_within_seed_variance(dist).axes[0]
+    assert ax.patches
     for p in ax.patches:
-        centre = p.get_x() + p.get_width() / 2
-        assert centre == pytest.approx(1960) or centre == pytest.approx(1965)
+        assert p.get_x() == pytest.approx(1960) or p.get_x() == pytest.approx(1965)
+        assert p.get_width() >= 0
+
+
+def test_bar_lengths_are_proportional_to_the_within_group_share():
+    """One scale for the whole figure, so columns compare to each other as well as within."""
+    dist = _dist([1960, 1965], {1960: [10, 30], 1965: [20, 20]})
+    ax = D.plot_within_seed_variance(dist).axes[0]
+    widths = {}
+    for p in ax.patches:
+        widths.setdefault(round(p.get_x()), []).append(p.get_width())
+    # cohort 1960 splits 10/30; its two bars are in that ratio
+    a, b = sorted(widths[1960])
+    assert b == pytest.approx(3 * a, rel=1e-6)
+    # cohort 1965 splits evenly, and its bars match 1960's larger one at equal share
+    assert widths[1965][0] == pytest.approx(widths[1965][1], rel=1e-6)
 
 
 def test_faceting_draws_one_panel_per_value():

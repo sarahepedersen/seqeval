@@ -100,13 +100,14 @@ def calibration_table(
     n_bins: int = 10,
     strategy: Literal["uniform", "quantile"] = "quantile",
 ) -> pd.DataFrame:
-    """Reliability table binned by ``p_hat``: ``[bin, bin_left, bin_right, p_mean, y_rate, n]``.
+    """Reliability table binned by ``p_hat``: ``[bin, ..., p_mean, y_rate, n, n_persons]``.
 
     Pair with :func:`seqeval.core.replicates.null_calibration_band` (02b) downstream so
     miscalibration is only claimed where the curve exits the perfect-calibration envelope.
     """
     p = joined["p_hat"].to_numpy()
     y = joined["y_true"].to_numpy()
+    pid = joined["person_id"].to_numpy() if "person_id" in joined.columns else None
     edges = _bin_edges(p, n_bins, strategy)
     idx = np.clip(np.digitize(p, edges) - 1, 0, len(edges) - 2)
     rows = []
@@ -122,6 +123,7 @@ def calibration_table(
                 "p_mean": float(p[sel].mean()),
                 "y_rate": float(y[sel].mean()),
                 "n": int(sel.sum()),
+                "n_persons": int(sel.sum()) if pid is None else int(len(np.unique(pid[sel]))),
             }
         )
     return pd.DataFrame(rows)
@@ -364,7 +366,7 @@ def timing_error_distribution(
     persons: Iterable | None = None,
     drop_projected_beyond: bool = True,
     error_bin_years: float = 1.0,
-    n_pred_bins: int = 6,
+    pred_bin_years: float = 2.0,
     min_cell: int = MIN_CELL,
 ) -> pd.DataFrame:
     """Binned distribution of timing error, by how early or late the model predicted.
@@ -374,9 +376,12 @@ def timing_error_distribution(
     identifier anywhere. The error is ``observed - predicted``: **positive means the event happened
     later than predicted**, so mass to the right of zero is a model that predicts too early.
 
-    Predicted bins are equal-count quantiles, so every row rests on the same number of people and
-    the bins are comparable to each other. Error bins are shared across all rows and anchored at a
-    multiple of the width, which puts **zero on a bin edge** — no cell can mix early with late.
+    Predicted bins are fixed ``pred_bin_years``-wide intervals anchored at a multiple of the width,
+    so the same predicted-age range is the same bin in every figure and jump-offs can be read
+    against each other. A later jump-off simply has fewer bins — the ones its people no longer
+    reach. Bins nobody lands in are dropped rather than drawn empty, and ``pred_bin`` is the global
+    index of the interval, so it stays comparable across tables. Error bins are shared across all
+    rows and likewise anchored, which puts **zero on a bin edge** — no cell can mix early with late.
     Cells are then suppressed per :func:`~seqeval.metrics._disclosure.suppress_small_cells`.
 
     The population is :func:`_timing_scope`'s, which is narrower than
@@ -390,11 +395,12 @@ def timing_error_distribution(
     width = years_to_days(error_bin_years)
     pred, error = pairs["pred"].to_numpy(), (pairs["obs"] - pairs["pred"]).to_numpy()
 
-    pred_edges = (
-        np.unique(np.quantile(pred, np.linspace(0, 1, n_pred_bins + 1))) if len(pred) else []
-    )
-    if len(pred_edges) < 2:  # a single predicted value spans no bin at all
+    if not len(pred):
         return pd.DataFrame({c: pd.Series(dtype="float64") for c in _TIMING_ERROR_COLUMNS})
+    pred_width = years_to_days(pred_bin_years)
+    first = int(np.floor(pred.min() / pred_width))
+    last = int(np.floor(pred.max() / pred_width))
+    pred_edges = (np.arange(first, last + 2) * pred_width).astype(float)
     pred_idx = np.clip(np.digitize(pred, pred_edges) - 1, 0, len(pred_edges) - 2)
 
     lo = np.floor(error.min() / width) * width
@@ -405,11 +411,13 @@ def timing_error_distribution(
     rows = []
     for b in range(len(pred_edges) - 1):
         in_bin = pred_idx == b
+        if not in_bin.any():
+            continue
         counts = np.bincount(error_idx[in_bin], minlength=len(error_edges) - 1)
         for e, n in enumerate(counts):
             rows.append(
                 {
-                    "pred_bin": b,
+                    "pred_bin": first + b,
                     "pred_lo": float(pred_edges[b]),
                     "pred_hi": float(pred_edges[b + 1]),
                     "pred_median": float(np.median(pred[in_bin])) if in_bin.any() else np.nan,
@@ -460,16 +468,19 @@ def aggregate_error(
     ``[*window_keys, *on, obs, gen_mean, gen_sd_over_seeds, bias, mae, rmse]``. Mismatched ``on``
     cells between the two sides raise (silent misalignment would corrupt every error).
     ``gen_sd_over_seeds`` is the seed-to-seed spread of the generated cell, which is the dispersion
-    a reader needs here; no interval is placed on ``bias``.
+    a reader needs here; no interval is placed on ``bias``. ``n_persons`` carries the observed
+    side's distinct-person count for the cell when the metric table reports one.
     """
     on = list(on)
     wkeys = [c for c in window_keys if c in gen_metric.columns]
 
+    obs_cols = [*on, value_col] + (["n_persons"] if "n_persons" in obs_metric.columns else [])
     merged = gen_metric.merge(
-        obs_metric[[*on, value_col]].rename(columns={value_col: "_obs"}),
+        obs_metric[obs_cols].rename(columns={value_col: "_obs", "n_persons": "_n_persons"}),
         on=on,
         how="outer",
         indicator=True,
+        suffixes=("", "_obs"),
     )
     if (merged["_merge"] != "both").any():
         bad = merged.loc[merged["_merge"] != "both", on].drop_duplicates().to_dict("records")
@@ -480,6 +491,7 @@ def aggregate_error(
     merged["error"] = merged[value_col] - merged["_obs"]
 
     grouped = merged.groupby([*wkeys, *on], observed=True)
+    aggs = {"n_persons": ("_n_persons", "first")} if "_n_persons" in merged.columns else {}
     out = grouped.agg(
         obs=("_obs", "first"),
         gen_mean=(value_col, "mean"),
@@ -487,6 +499,7 @@ def aggregate_error(
         bias=("error", "mean"),
         mae=("error", lambda e: e.abs().mean()),
         rmse=("error", lambda e: float(np.sqrt(np.mean(e**2)))),
+        **aggs,
     ).reset_index()
 
     return out.sort_values([*wkeys, *on]).reset_index(drop=True)

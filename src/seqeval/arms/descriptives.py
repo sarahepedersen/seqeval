@@ -153,9 +153,7 @@ def _run_fertility(bundle: Bundle, cfg, out, births, spans, cohort_width: int) -
     persons = bundle.persons
 
     if fcfg.ppr is not None:
-        ppr = fe.ppr(births, spans, max_parity=fcfg.ppr.max_parity)
-        out.frame("ppr", ppr)
-        out.figure("ppr", viz_fertility.plot_ppr(ppr))
+        out.frame("ppr", fe.ppr(births, spans, max_parity=fcfg.ppr.max_parity))
 
     if persons is None and (fcfg.ccf or fcfg.asfr):
         logger.warning(
@@ -167,8 +165,10 @@ def _run_fertility(bundle: Bundle, cfg, out, births, spans, cohort_width: int) -
     if fcfg.ccf:
         ccf = fe.ccf(births, spans, persons, by_cohort=True, cohort_width=cohort_width)
         variance = fe.ccf_variance(births, spans, persons, cohort_width=cohort_width)
-        out.frame("ccf", ccf.merge(variance.drop(columns=["n_women", "ccf"]), on="cohort"))
-        out.figure("ccf", viz_fertility.plot_ccf(ccf))
+        out.frame(
+            "ccf",
+            ccf.merge(variance.drop(columns=["n_women", "ccf", "n_persons"]), on="cohort"),
+        )
 
         # The same two-panel contrast the backtesting arm draws, on the observed history: the
         # interval is pure sampling error here (nothing is replicated), and the parity distribution

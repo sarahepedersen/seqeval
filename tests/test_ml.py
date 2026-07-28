@@ -214,7 +214,7 @@ def test_error_is_observed_minus_predicted():
     """Positive error means the event happened later than the model said."""
     pred = [30] * 5 + [31] * 5
     td, obs_tte = _timing_frames(pred, [p + 3 for p in pred])
-    out = ml.timing_error_distribution(td, obs_tte, n_pred_bins=1)
+    out = ml.timing_error_distribution(td, obs_tte, pred_bin_years=50)
     landed = out[out["n_persons"] == 10].iloc[0]
     assert landed["error_lo"] == pytest.approx(yd(3), abs=1)
 
@@ -228,10 +228,37 @@ def test_zero_is_always_a_bin_edge():
         assert not straddles.any()
 
 
-def test_predicted_bins_rest_on_equal_numbers_of_people():
-    td, obs_tte = _uniform_pairs(n_per_bin=10, n_bins=6)
-    out = ml.timing_error_distribution(td, obs_tte, n_pred_bins=6)
-    assert sorted(out.groupby("pred_bin")["n_pred_bin"].first()) == [10] * 6
+def test_predicted_bins_are_the_same_intervals_across_jumpoffs():
+    """Fixed-width bins, so the same predicted-age range is the same bin in every figure."""
+    early, obs_early = _uniform_pairs(n_per_bin=10, n_bins=10)          # predicted ages 25..34
+    late, obs_late = _timing_frames([32.0] * 40 + [33.0] * 40, [35.0] * 80)  # predicted ages 32..33
+
+    a = ml.timing_error_distribution(early, obs_early, pred_bin_years=2)
+    b = ml.timing_error_distribution(late, obs_late, pred_bin_years=2)
+    def edges(out):
+        return out.groupby("pred_bin")[["pred_lo", "pred_hi"]].first()
+
+    shared = edges(a).index.intersection(edges(b).index)
+    assert len(shared)
+    pd.testing.assert_frame_equal(edges(a).loc[shared], edges(b).loc[shared])
+    # the later jump-off simply covers fewer of them, and none of its own are new
+    assert set(edges(b).index) < set(edges(a).index)
+
+
+def test_predicted_bins_are_anchored_to_the_bin_width():
+    """Anchoring is absolute, not relative to the data, or two runs would not line up."""
+    td, obs_tte = _uniform_pairs(n_per_bin=5, n_bins=10)
+    out = ml.timing_error_distribution(td, obs_tte, pred_bin_years=2)
+    lo = out.groupby("pred_bin")["pred_lo"].first() / yd(2)
+    np.testing.assert_allclose(lo, np.round(lo), atol=1e-6)
+
+
+def test_empty_predicted_bins_are_dropped_not_drawn():
+    """A gap in predicted values leaves no blank ridge."""
+    td, obs_tte = _timing_frames([26.0] * 20 + [40.0] * 20, [28.0] * 40)
+    out = ml.timing_error_distribution(td, obs_tte, pred_bin_years=2)
+    assert (out.groupby("pred_bin")["n_pred_bin"].first() > 0).all()
+    assert out["pred_bin"].nunique() == 2
 
 
 def test_small_cells_are_withheld_and_unrecoverable():
@@ -239,7 +266,7 @@ def test_small_cells_are_withheld_and_unrecoverable():
     pred = [30, 31] * 10 + [30, 31, 30]
     obs = [p + 1 for p in pred[:20]] + [p + 6 for p in pred[20:]]
     td, obs_tte = _timing_frames(pred, obs)
-    out = ml.timing_error_distribution(td, obs_tte, n_pred_bins=1)
+    out = ml.timing_error_distribution(td, obs_tte, pred_bin_years=50)
     hidden = out[out["suppressed"]]
     assert len(hidden) >= 2  # the lone small cell drags a second one with it
     assert hidden["n_persons"].isna().all()
@@ -254,11 +281,17 @@ def test_output_carries_no_person_identifier():
     assert (out["n_persons"].dropna() >= 0).all()
 
 
-def test_too_few_distinct_predictions_returns_an_empty_frame():
-    """One predicted value gives nothing to compare across, so no ridge is drawn."""
+def test_a_single_predicted_value_still_gets_its_own_fixed_bin():
+    """Fixed bins need no spread in the predictions; the value falls where it falls."""
     td, obs_tte = _timing_frames([30] * 5, [31] * 5)
-    out = ml.timing_error_distribution(td, obs_tte, n_pred_bins=6)
-    assert out.empty
+    out = ml.timing_error_distribution(td, obs_tte, pred_bin_years=2, min_cell=0)
+    assert out["pred_bin"].nunique() == 1
+    assert out["pred_lo"].iloc[0] <= yd(30) < out["pred_hi"].iloc[0]
+
+
+def test_no_pairs_returns_an_empty_frame():
+    td, obs_tte = _timing_frames([], [])
+    assert ml.timing_error_distribution(td, obs_tte).empty
 
 
 # --- analytic score intervals -------------------------------------------------------------------

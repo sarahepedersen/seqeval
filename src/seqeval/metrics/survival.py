@@ -15,7 +15,12 @@ from scipy.stats import norm
 __all__ = ["kaplan_meier", "median_survival"]
 
 
-def _km_one(dur: np.ndarray, obs: np.ndarray, z: float) -> pd.DataFrame:
+def _n_persons(frame: pd.DataFrame) -> int:
+    """Distinct people behind a frame; the row count when it carries no ``person_id``."""
+    return int(frame["person_id"].nunique()) if "person_id" in frame.columns else len(frame)
+
+
+def _km_one(dur: np.ndarray, obs: np.ndarray, z: float, n_persons: int) -> pd.DataFrame:
     """Product-limit estimator for one group; Greenwood variance and log-log CIs."""
     n = len(dur)
     sorted_dur = np.sort(dur)
@@ -48,6 +53,7 @@ def _km_one(dur: np.ndarray, obs: np.ndarray, z: float) -> pd.DataFrame:
             "greenwood_var": np.where(np.isfinite(cum_v), surv**2 * cum_v, np.nan),
             "ci_lo": ci_lo,
             "ci_hi": ci_hi,
+            "n_persons": n_persons,
         }
     )
 
@@ -55,23 +61,28 @@ def _km_one(dur: np.ndarray, obs: np.ndarray, z: float) -> pd.DataFrame:
 def kaplan_meier(tte: pd.DataFrame, *, by: list[str] = ()) -> pd.DataFrame:
     """Product-limit survival curve from a :func:`time_to_event` table (durations in days).
 
-    Returns ``[*by, time, n_at_risk, n_events, survival, greenwood_var, ci_lo, ci_hi]`` with
-    ``time`` in days. ``by`` stratifies (cohort bins, ``sex``, or ``seed``/window for generated
+    Returns ``[*by, time, n_at_risk, n_events, survival, greenwood_var, ci_lo, ci_hi, n_persons]``
+    with ``time`` in days. ``by`` stratifies (cohort bins, ``sex``, or ``seed``/window for generated
     data); with no ``by`` the whole table is one curve. Confidence intervals use the Greenwood
     variance on the complementary log-log scale (valid for ``0 < S < 1``; ``NaN`` at the
     boundaries); ``greenwood_var`` is that variance on the survival scale, for callers combining it
-    with other variance components.
+    with other variance components. ``n_persons`` is the distinct people behind the curve, which
+    ``n_at_risk`` (a per-time denominator) does not report.
     """
     by = list(by)
     z = norm.ppf(0.975)
     if not by:
-        return _km_one(tte["duration"].to_numpy(), tte["observed"].to_numpy(), z)
+        return _km_one(
+            tte["duration"].to_numpy(), tte["observed"].to_numpy(), z, _n_persons(tte)
+        )
 
     parts = []
     # One vectorized KM per stratum; the loop is over strata (not subjects), which is unavoidable
     # for a per-group product-limit estimator.
     for key, grp in tte.groupby(by, observed=True):
-        one = _km_one(grp["duration"].to_numpy(), grp["observed"].to_numpy(), z)
+        one = _km_one(
+            grp["duration"].to_numpy(), grp["observed"].to_numpy(), z, _n_persons(grp)
+        )
         key_tuple = key if isinstance(key, tuple) else (key,)
         for col, val in zip(by, key_tuple, strict=True):
             one.insert(0, col, val)
