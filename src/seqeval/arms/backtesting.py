@@ -228,13 +228,9 @@ def _score_probability_outcome(
     acc["calibration"].append(_stamp(cal, label))
 
     desc = describe_outcome(spec, jumpoff_days=t2, label_fn=label_fn)
-    # The curve is binned either way; its histogram panel is keyed to the per-person probability
-    # table, so it goes when per-person output does. The bin counts survive in `calibration`.
     out.figure(
         f"reliability_{spec.name}_w{int(round(days_to_years(t2)))}",
-        viz_calibration.plot_reliability(
-            cal, probs=probs if out.individual_level else None, title=desc
-        ),
+        viz_calibration.plot_reliability(cal, title=desc),
     )
     # Timed outcomes also get a timing-error ridge, drawn on the same population this reliability
     # diagram scores: the condition minus the settled. The tables it needs also carry the timing

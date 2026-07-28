@@ -92,7 +92,9 @@ def plot_ccf_inference_vs_outcome(
         if observed is not None:
             _observed_split(ax, observed)
         ax.set_xlabel("birth cohort")
-        ax.set_xticks(cohorts)  # cohorts are labels, not a continuous scale to interpolate
+        # Cohorts are labels, not a continuous scale to interpolate — but one label per yearly
+        # cohort is unreadable, so only round ones are named.
+        ax.set_xticks(_cohort_ticks(cohorts))
 
     lo, hi = _padded_range(ccf - half, ccf + half)
     ax_inf.set_ylim(lo, hi)
@@ -111,6 +113,24 @@ def plot_ccf_inference_vs_outcome(
         fig.suptitle(title, fontsize=10)
     fig.tight_layout()
     return fig
+
+
+def _cohort_ticks(cohorts: np.ndarray, *, max_labels: int = 10) -> np.ndarray:
+    """The cohorts to label: every one when they are few, else round ones at a readable stride.
+
+    Yearly cohorts over a few decades give dozens of ticks that overprint into a smear. Preferring
+    multiples of 5 (then 10, then 25) keeps the labels on values a reader of birth cohorts expects,
+    rather than an arbitrary every-nth subset that starts wherever the data happens to.
+    """
+    cohorts = np.asarray(cohorts)
+    if len(cohorts) <= max_labels:
+        return cohorts
+    for step in (5, 10, 25, 50):
+        round_ones = cohorts[cohorts % step == 0]
+        if 0 < len(round_ones) <= max_labels:
+            return round_ones
+    stride = int(np.ceil(len(cohorts) / max_labels))
+    return cohorts[::stride]
 
 
 def _errorbar_split(ax, x, y, half, complete, *, color: str, label: str) -> None:
