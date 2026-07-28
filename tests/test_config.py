@@ -269,3 +269,31 @@ def test_resolve_windows_subset_and_missing(caplog):
         got = C.resolve_windows(spec, available)
     assert got == [(0, years_to_days(25))]
     assert any("absent" in r.message for r in caplog.records)
+
+
+def test_output_publication_policy_defaults_to_current_behaviour():
+    cfg = C.Config.model_validate(_ref_dict())
+    assert cfg.output.individual_level is True
+    assert cfg.output.min_cell == 5
+
+
+def test_output_publication_policy_is_configurable():
+    d = _ref_dict()
+    d["output"] = {"individual_level": False, "min_cell": 10}
+    cfg = C.Config.model_validate(d)
+    assert cfg.output.individual_level is False and cfg.output.min_cell == 10
+
+
+def test_negative_min_cell_is_rejected():
+    d = _ref_dict()
+    d["output"] = {"min_cell": -1}
+    with pytest.raises(ValidationError):
+        C.Config.model_validate(d)
+
+
+def test_publication_policy_changes_the_config_hash():
+    """A restricted run is a different run, and its manifest has to say so."""
+    base = C.Config.model_validate(_ref_dict()).hash()
+    d = _ref_dict()
+    d["output"] = {"individual_level": False}
+    assert C.Config.model_validate(d).hash() != base

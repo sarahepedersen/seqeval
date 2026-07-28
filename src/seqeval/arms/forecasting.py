@@ -26,6 +26,7 @@ from seqeval.core.slicing import AgeBins, cohort_bins
 from seqeval.core.specs import ReplicateSpec, Rule, TTESpec
 from seqeval.io.loaders import Bundle
 from seqeval.io.schema import GEN_KEYS, OBS_KEYS
+from seqeval.metrics import dispersion as md
 from seqeval.metrics import fertility as fe
 from seqeval.metrics import plausibility as pl
 from seqeval.viz import dispersion as viz_dispersion
@@ -179,7 +180,8 @@ def _run_illegal_moves(observed, generated, rules, out) -> None:
     gen_viol = gen_viol.assign(source="generated")
     obs_viol = obs_viol.assign(source="observed")
     # align columns (observed has no seed/window keys) before stacking
-    out.frame("violations", pd.concat([gen_viol, obs_viol], ignore_index=True))
+    # violation_rates below is the aggregate this table backs; only the row-level examples go.
+    out.frame("violations", pd.concat([gen_viol, obs_viol], ignore_index=True), individual=True)
 
     gen_rates = pl.violation_rates(gen_viol, generated, GEN_KEYS, by=("seed",)).assign(
         source="generated"
@@ -203,23 +205,13 @@ def _run_replicate_variance(
     if scfg.individual:
         subgroups = _person_subgroups(bundle.persons, scfg.subgroup_by, cohort_width)
         ind = _replicate_variance_individual(generated, birth_token, subgroups)
-        out.frame("replicate_variance_individual", ind)
+        out.frame("replicate_variance_individual", ind, individual=True)
         out.frame(
             "replicate_occurrence",
             _replicate_occurrence(generated, tte_spec, target_name, horizon, spec),
+            individual=True,
         )
-        out.figure(
-            "within_seed_variance",
-            viz_dispersion.plot_within_seed_variance(ind, color_by="age_stop"),
-        )
-        for col in scfg.subgroup_by:
-            if col in ind.columns:
-                out.figure(
-                    f"within_seed_variance_by_{col}",
-                    viz_dispersion.plot_within_seed_variance(
-                        ind, color_by=col, facet_by="age_stop"
-                    ),
-                )
+        _emit_dispersion_ridges(ind, scfg.subgroup_by, out)
 
     if scfg.aggregate:
         agg = _replicate_variance_aggregate(
@@ -257,6 +249,32 @@ def _replicate_occurrence(generated, tte_spec, outcome_name, horizon, spec) -> p
     out = _restrict_to_common_windows(out)  # same population as the dispersion table
     cols = ["outcome", *_RUN_KEYS, "horizon", "n", "n_occurred", "p_hat", "timing_spread"]
     return out[cols].sort_values(_RUN_KEYS).reset_index(drop=True)
+
+
+def _emit_dispersion_ridges(ind: pd.DataFrame, subgroup_by, out) -> None:
+    """Within-seed dispersion as binned distributions, plus one ridge figure per split.
+
+    The population figure stacks one ridge per jump-off; each requested subgroup adds a figure whose
+    ridges are that subgroup's values, one panel per jump-off — so a cohort's dispersion can be read
+    against the other cohorts at a jump-off, and against itself as the jump-off moves later.
+    """
+    pop = md.dispersion_distribution(ind, by=["age_stop"], min_cell=out.min_cell)
+    out.frame("within_seed_variance_distribution", pop)
+    out.figure(
+        "within_seed_variance",
+        viz_dispersion.plot_within_seed_variance(pop, x="age_stop", min_cell=out.min_cell),
+    )
+    for col in subgroup_by:
+        if col not in ind.columns:
+            continue
+        dist = md.dispersion_distribution(ind, by=[col, "age_stop"], min_cell=out.min_cell)
+        out.frame(f"within_seed_variance_distribution_by_{col}", dist)
+        out.figure(
+            f"within_seed_variance_by_{col}",
+            viz_dispersion.plot_within_seed_variance(
+                dist, x=col, facet_by="age_stop", min_cell=out.min_cell
+            ),
+        )
 
 
 def _replicate_variance_individual(generated, birth_token, subgroups=None) -> pd.DataFrame:

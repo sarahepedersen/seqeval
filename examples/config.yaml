@@ -74,7 +74,11 @@ arms:
     replicate_variance:
       individual: true
       aggregate: [ccf]
+      subgroup_by: [cohort]
 
 output:
   dir: results/
   figure_format: png
+  # withholds individual-level tables and figures
+  # requires cell n >= 5 to be shown in the report
+  individual_level: false

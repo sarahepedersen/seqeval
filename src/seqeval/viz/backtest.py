@@ -1,20 +1,23 @@
-"""Backtest overlay figures: observed-vs-generated KM/CCF bands and timing calibration (04).
+"""Backtest overlay figures: observed-vs-generated KM/CCF bands and the timing-error ridge (04).
 
 Scalar scores (AUC, Brier, ...) are deliberately *not* plotted here — they are reported as numbers
 in the report's per-outcome metrics table, where the value and its bootstrap CI are legible.
+
+Every figure here draws an aggregate: a band over seeds, a curve over cohorts, or a table of binned
+counts. None of them takes a per-person frame, which is what lets the whole set be published.
 """
 
 from __future__ import annotations
-
-from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 from scipy.stats import norm
 
+from seqeval.metrics._disclosure import MIN_CELL
 from seqeval.units import days_to_years
-from seqeval.viz._style import new_fig, stratum_colors
+from seqeval.viz._ridge import draw_ridges
+from seqeval.viz._style import SUPPRESSED_HATCH, new_fig, stratum_colors
 
 DEFAULT_LEVEL = 0.95
 
@@ -80,35 +83,6 @@ def plot_km_seed_band(
     return fig
 
 
-def plot_ccf_seed_band(
-    obs_ccf: pd.DataFrame,
-    gen_ccf: pd.DataFrame,
-    *,
-    variance: pd.DataFrame | None = None,
-    title: str | None = None,
-    level: float = DEFAULT_LEVEL,
-) -> Figure:
-    """Observed CCF by cohort overlaid with the generated across-seed mean and its CI.
-
-    ``gen_ccf`` carries a ``seed`` column (one CCF-by-cohort curve per seed); both frames have
-    ``[cohort, ccf]``. ``variance`` is :func:`~seqeval.metrics.fertility.ccf_variance` output —
-    supplied, the band is ``±z·sqrt(total_var)``, the full uncertainty in the cohort's CCF
-    (:func:`_ccf_band`).
-    """
-    fig, ax = new_fig()
-    _draw_ccf_band(
-        ax, gen_ccf, level, variance=variance, color="tab:orange",
-        line_label="generated mean", band_label=f"generated {level:.0%} CI",
-    )
-    _draw_observed_ccf(ax, obs_ccf)
-    ax.set_xlabel("birth cohort")
-    ax.set_ylabel("CCF (mean births/woman)")
-    if title:
-        ax.set_title(title)
-    ax.legend(fontsize=8)
-    return fig
-
-
 def _ccf_band(gen_ccf: pd.DataFrame, level: float, variance: pd.DataFrame | None = None):
     """``(cohorts, mean, half_width, complete)`` for one seed-replicated CCF-by-cohort frame.
 
@@ -128,7 +102,7 @@ def _ccf_band(gen_ccf: pd.DataFrame, level: float, variance: pd.DataFrame | None
     if variance is not None:
         total = variance.set_index("cohort")["total_var"].reindex(stats.index)
         half = (z * np.sqrt(total)).fillna(half)
-    complete = _majority_complete(gen_ccf).reindex(stats.index, fill_value=True).to_numpy()
+    complete = majority_complete(gen_ccf).reindex(stats.index, fill_value=True).to_numpy()
     return stats.index.to_numpy(), stats["mean"].to_numpy(), half.to_numpy(), complete
 
 
@@ -166,6 +140,172 @@ def _draw_observed_ccf(ax, obs_ccf: pd.DataFrame, *, incomplete_label: bool = Tr
         ax, o["cohort"].to_numpy(), o["ccf"].to_numpy(), complete, color="black",
         label="observed", incomplete_label=incomplete_label,
     )
+
+
+def plot_ccf_inference_vs_outcome(
+    variance: pd.DataFrame,
+    parity: pd.DataFrame,
+    *,
+    observed: pd.DataFrame | None = None,
+    complete: pd.Series | None = None,
+    level: float = DEFAULT_LEVEL,
+    title: str | None = None,
+) -> Figure:
+    """The uncertainty in the cohort mean beside the uncertainty a woman actually faces.
+
+    ``variance`` is :func:`~seqeval.metrics.fertility.ccf_variance` and ``parity`` is
+    :func:`~seqeval.metrics.fertility.parity_distribution`. Both panels carry the same estimate,
+    the same interval, and the same y unit — births per woman — so the only difference between them
+    is what is being counted: the *left* is the CCF and its ``±z·sqrt(total_var)`` interval, the
+    *right* adds the distribution of individual completed parity that the CCF averages over.
+
+    The interval is not rescaled to make it visible against the distribution. It is roughly thirty
+    times narrower, and that is the point of putting them side by side: a confident estimate of a
+    mean says almost nothing about how confidently one woman's outcome can be predicted. The left
+    panel is a magnification of the shaded band drawn on the right, and the annotation names the
+    ratio so the comparison does not rest on the reader eyeballing two axis scales.
+
+    ``complete`` (cohort -> bool, from :func:`majority_complete`) hollows the marker of any cohort
+    not observed to the end of the fertile window, on both panels: a truncated cohort's "CCF" is a
+    mean over an unfinished life course and must not read as a finished one. ``observed`` carries
+    its own ``complete`` column and is marked the same way.
+    """
+    import matplotlib.pyplot as plt
+
+    z = norm.ppf(1 - (1 - level) / 2)
+    var = variance.sort_values("cohort")
+    cohorts = var["cohort"].to_numpy()
+    ccf = var["ccf"].to_numpy()
+    half = z * np.sqrt(var["total_var"].to_numpy())
+    done = (
+        np.ones(len(cohorts), dtype=bool)
+        if complete is None
+        else complete.reindex(cohorts).fillna(True).to_numpy().astype(bool)
+    )
+
+    fig, (ax_inf, ax_out) = plt.subplots(1, 2, figsize=(9.5, 4.5), width_ratios=[1, 1.4])
+    for ax in (ax_inf, ax_out):
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+        _errorbar_split(
+            ax, cohorts, ccf, half, done, color="tab:orange", label=f"CCF ± {level:.0%} CI"
+        )
+        if observed is not None:
+            _observed_split(ax, observed)
+        ax.set_xlabel("birth cohort")
+        ax.set_xticks(cohorts)  # cohorts are labels, not a continuous scale to interpolate
+
+    lo, hi = _padded_range(ccf - half, ccf + half)
+    ax_inf.set_ylim(lo, hi)
+    ax_inf.set_ylabel("CCF (mean births/woman) — magnified")
+    ax_inf.set_title("inference uncertainty", fontsize=9)
+    ax_inf.legend(fontsize=7, loc="best")
+
+    _draw_parity_columns(ax_out, parity, cohorts)
+    ax_out.axhspan(lo, hi, color="tab:orange", alpha=0.12, zorder=0)
+    ax_out.annotate(
+        "← left panel",
+        xy=(0.995, hi), xycoords=("axes fraction", "data"),
+        fontsize=6.5, color="0.45", ha="right", va="bottom",
+    )
+    ax_out.set_ylabel("births per woman (individual)")
+    ax_out.set_title("outcome uncertainty", fontsize=9)
+    ax_out.annotate(
+        _uncertainty_ratio(half, parity),
+        xy=(0.5, -0.19), xycoords="axes fraction", ha="center", fontsize=7, color="0.35",
+    )
+    if title:
+        fig.suptitle(title, fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def _errorbar_split(ax, x, y, half, complete, *, color: str, label: str) -> None:
+    """Estimate + interval per cohort, hollow where the cohort's life course is unfinished."""
+    for sel, filled, suffix in ((complete, color, ""), (~complete, "white", " (incomplete)")):
+        if not sel.any():
+            continue
+        ax.errorbar(
+            x[sel], y[sel], yerr=half[sel], fmt="o", color=color, mfc=filled, ms=4, lw=1.4,
+            capsize=3, label=f"{label}{suffix}", zorder=6,
+        )
+
+
+def _observed_split(ax, observed: pd.DataFrame) -> None:
+    """The observed CCF per cohort, marked truncated on the same convention as the estimate."""
+    o = observed.sort_values("cohort")
+    done = (
+        o["complete"].astype(bool).to_numpy()
+        if "complete" in o.columns
+        else np.ones(len(o), dtype=bool)
+    )
+    x, y = o["cohort"].to_numpy(), o["ccf"].to_numpy()
+    for sel, marker, suffix in ((done, "o", ""), (~done, "s", " (incomplete)")):
+        if not sel.any():
+            continue
+        ax.plot(
+            x[sel], y[sel], marker, mfc="white", mec="black", ms=5,
+            label=f"observed{suffix}", zorder=7,
+        )
+
+
+def _padded_range(lo: np.ndarray, hi: np.ndarray) -> tuple[float, float]:
+    """A y range around the intervals with a little air, never a zero-height one."""
+    bottom, top = float(np.min(lo)), float(np.max(hi))
+    pad = max((top - bottom) * 0.25, 0.01)
+    return bottom - pad, top + pad
+
+
+def _draw_parity_columns(ax, parity: pd.DataFrame, cohorts: np.ndarray) -> None:
+    """Per cohort, the share of women at each completed parity, as bars centred on the cohort."""
+    if parity.empty:
+        return
+    spacing = float(np.min(np.diff(np.sort(cohorts)))) if len(cohorts) > 1 else 1.0
+    widest = float(parity["share"].max() or 1.0)
+    unit = 0.42 * spacing / widest
+    for cohort, sub in parity.groupby("cohort", observed=True):
+        shown = sub[~sub["suppressed"]]
+        width = shown["share"] * unit
+        ax.barh(
+            shown["parity"], width, height=0.72, left=cohort - width / 2,
+            color="tab:blue", alpha=0.35, zorder=2,
+        )
+        _draw_suppressed_parity(ax, sub, cohort, unit)
+    ax.set_yticks(sorted(parity["parity"].unique()))
+    labels = [str(p) for p in sorted(parity["parity"].unique())]
+    labels[-1] = f"{labels[-1]}+"  # the top category is inclusive-and-above
+    ax.set_yticklabels(labels)
+    ax.set_ylim(parity["parity"].min() - 0.7, parity["parity"].max() + 0.7)
+
+
+def _draw_suppressed_parity(ax, sub: pd.DataFrame, cohort, unit: float) -> None:
+    """Withheld parities hatched at the widest bar their threshold allows."""
+    hidden = sub[sub["suppressed"]]
+    if hidden.empty:
+        return
+    total = float(sub["n_women_total"].iloc[0]) or 1.0
+    cap = (MIN_CELL - 1) / total * unit
+    ax.barh(
+        hidden["parity"], cap, height=0.72, left=cohort - cap / 2,
+        facecolor="none", edgecolor="0.6", hatch=SUPPRESSED_HATCH, lw=0.4, zorder=2,
+    )
+
+
+def _uncertainty_ratio(half: np.ndarray, parity: pd.DataFrame) -> str:
+    """One line naming how much wider the outcome spread is than the interval on the mean."""
+    ci = float(np.median(half))
+    sds = []
+    for _, sub in parity.groupby("cohort", observed=True):
+        share = sub["share"].fillna(0).to_numpy()
+        k = sub["parity"].to_numpy().astype(float)
+        mass = share.sum()
+        if mass <= 0:
+            continue
+        mean = float(np.sum(k * share) / mass)
+        sds.append(float(np.sqrt(np.sum(share * (k - mean) ** 2) / mass)))
+    if not sds or ci <= 0:
+        return ""
+    sd = float(np.median(sds))
+    return f"CI half-width {ci:.3f} births · individual sd {sd:.2f} births ({sd / ci:.0f}×)"
 
 
 def plot_km_jumpoff_panel(
@@ -242,7 +382,7 @@ def plot_ccf_jumpoff_panel(
     return fig
 
 
-def _majority_complete(gen_ccf: pd.DataFrame) -> pd.Series:
+def majority_complete(gen_ccf: pd.DataFrame) -> pd.Series:
     """Per cohort: is the cohort complete in the majority of seeds? (all-complete if unmarked)."""
     if "complete" not in gen_ccf.columns:
         return pd.Series(dtype=bool)
@@ -280,118 +420,63 @@ def _plot_with_incomplete(
     )
 
 
-def timing_pairs(
-    td: pd.DataFrame,
-    obs_tte: pd.DataFrame,
+def plot_timing_ridge(
+    errors: pd.DataFrame,
     *,
-    horizon_days: int | None = None,
-    persons: Iterable | None = None,
-    drop_projected_beyond: bool = True,
-) -> pd.DataFrame:
-    """Per-person ``[person_id, pred, obs]`` waiting times in **years**, on the scored population.
-
-    The single place the predicted (seed-median) and observed waiting times are paired up, shared
-    by :func:`plot_timing_calibration` and by the arm's outlier accounting so both describe exactly
-    the same set of persons. A person contributes only when the comparison is a real prediction:
-
-    - the event was actually observed, and observed **within the frame horizon** — the model's
-      predictive distribution is defective and capped at ``horizon_days``, so it can never predict
-      a longer wait and comparing against unbounded observed times would be ill-posed;
-    - the person is in ``persons`` when given — the arm passes the scored population (its condition
-      minus those whose answer was already settled at the jump-off). Settled persons matter most:
-      their event sits in the observed prefix, which every replicate replays verbatim, so they
-      would land exactly on ``y = x`` and flatter the model for free;
-    - ``drop_projected_beyond`` (default) drops persons whose predicted median has reached the
-      horizon, i.e. the model projects the event *outside* the outcome's frame. Their ``q50`` is the
-      cap itself, not an estimated date, so they form a spurious vertical stripe at the frame edge
-      that drags the binned trend toward it. Whether the model gets those persons right is the
-      *probability* question, answered by the reliability diagram next door.
-    """
-    seen = obs_tte.loc[obs_tte["observed"], ["person_id", "duration"]]
-    m = td.merge(seen, on="person_id", how="inner")
-    if persons is not None:
-        m = m[m["person_id"].isin(set(persons))]
-    if horizon_days is not None:
-        m = m[m["duration"] <= horizon_days]
-        if drop_projected_beyond:
-            m = m[m["q50"] < horizon_days]
-    return pd.DataFrame(
-        {
-            "person_id": m["person_id"].to_numpy(),
-            "pred": days_to_years(m["q50"].to_numpy().astype(float)),
-            "obs": days_to_years(m["duration"].to_numpy().astype(float)),
-        }
-    )
-
-
-def plot_timing_calibration(
-    td: pd.DataFrame,
-    obs_tte: pd.DataFrame,
-    *,
-    horizon_days: int | None = None,
-    floor_days: int = 0,
-    persons: Iterable | None = None,
-    xlabel: str = "predicted waiting time (years, median across seeds)",
-    ylabel: str = "observed waiting time (years)",
+    xlabel: str = "observed − predicted (years)",
     title: str | None = None,
-    n_bins: int = 10,
+    min_cell: int = MIN_CELL,
 ) -> Figure:
-    """Predicted vs observed waiting time per person: the y=x ideal plus a binned median trend.
+    """Distribution of timing error, one ridge per bin of predicted value.
 
-    ``td`` is :func:`seqeval.core.replicates.timing_distribution` (per-person quantiles in days);
-    ``obs_tte`` is the observed time-to-event table. Gray points are individuals; the red trend is
-    the median observed time within equal-count bins of predicted time, with its inter-quartile
-    ribbon. Departure from the dashed ``y = x`` line is timing bias — **above** the line the model
-    predicts too early, **below** it predicts too late.
+    ``errors`` is :func:`seqeval.metrics.ml.timing_error_distribution` — binned counts and nothing
+    else, which is what makes this figure publishable. Each ridge is one equal-count bin of
+    predicted value drawn as within-bin proportions (:func:`~seqeval.viz._ridge.draw_ridges`); the
+    dashed line at zero is a perfectly timed prediction, and mass to its right is an event that
+    happened later than predicted.
 
-    Scope is :func:`timing_pairs` — persons whose event was observed inside the frame, who were
-    still unsettled at the jump-off, and whom the model does not project past the frame. The axes
-    span that same region: ``floor_days`` (the jump-off, where prediction begins, for an outcome
-    whose duration is an age; 0 otherwise) to ``horizon_days`` (where the frame closes). Nothing
-    can land outside it, so no part of the box is unreachable and there is nothing to clip.
+    Each ridge carries a tick at the bin holding its cumulative half — the bias reading the
+    ``y = x`` diagonal gives on a scatter, at bin resolution rather than interpolated.
     """
-    pairs = timing_pairs(td, obs_tte, horizon_days=horizon_days, persons=persons)
-
     fig, ax = new_fig()
     ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
     if title:
         ax.set_title(title, fontsize=10)
-    if pairs.empty:
+    if errors.empty:
         return fig
 
-    pred, obs = pairs["pred"].to_numpy(), pairs["obs"].to_numpy()
-    ax.scatter(pred, obs, s=8, alpha=0.15, color="tab:gray", linewidths=0)
+    def _label(key, n_bin: int) -> str:
+        sub = errors[errors["pred_bin"] == key]
+        lo, hi = days_to_years(sub["pred_lo"].iloc[0]), days_to_years(sub["pred_hi"].iloc[0])
+        return f"{lo:.1f}–{hi:.1f}y (n={n_bin})"
 
-    xlo = float(days_to_years(floor_days))
-    if horizon_days is not None:
-        lim = float(days_to_years(horizon_days))
-    else:
-        lim = float(max(pred.max(), obs.max())) * 1.05 or 1.0
-    ax.plot([xlo, lim], [xlo, lim], "k--", lw=1, label="ideal (y = x)")
+    bases = draw_ridges(
+        ax, errors, row="pred_bin", lo="error_lo", hi="error_hi",
+        count="n_persons", total="n_pred_bin",
+        label_fn=_label, x_transform=days_to_years, ylabel="predicted value", min_cell=min_cell,
+    )
+    colors = stratum_colors(len(bases), lo=0.1, hi=0.85)
+    for base, b, color in zip(bases, sorted(errors["pred_bin"].unique()), colors, strict=True):
+        _draw_bin_median(ax, errors[errors["pred_bin"] == b].sort_values("error_lo"), base, color)
 
-    edges = np.unique(np.quantile(pred, np.linspace(0, 1, n_bins + 1)))
-    if len(edges) > 2:
-        idx = np.clip(np.digitize(pred, edges) - 1, 0, len(edges) - 2)
-        centers, med, lo, hi = [], [], [], []
-        for b in range(len(edges) - 1):
-            sel = idx == b
-            if sel.sum() < 5:  # too few persons to summarise this bin
-                continue
-            centers.append(float(np.median(pred[sel])))
-            med.append(float(np.median(obs[sel])))
-            lo.append(float(np.percentile(obs[sel], 25)))
-            hi.append(float(np.percentile(obs[sel], 75)))
-        if centers:
-            ax.fill_between(centers, lo, hi, alpha=0.25, color="tab:red", label="binned IQR")
-            ax.plot(centers, med, "o-", color="tab:red", ms=5, label="binned median")
-
-    ax.set_xlim(xlo, lim)
-    ax.set_ylim(xlo, lim)
-    ax.set_aspect("equal")  # equal axes: y = x reads as a true 45° diagonal
-    ax.grid(True, alpha=0.3, linewidth=0.5)
-    ax.legend(fontsize=8)
+    ax.axvline(0, color="black", lw=1, ls="--", zorder=5)
+    ax.annotate(
+        "← predicts too late          predicts too early →",
+        xy=(0.5, -0.16), xycoords="axes fraction", ha="center", fontsize=7, color="0.35",
+    )
     return fig
+
+
+def _draw_bin_median(ax, sub: pd.DataFrame, base: float, color) -> None:
+    """Tick at the error bin holding the row's cumulative half — bin resolution, uninterpolated."""
+    counts = sub["n_persons"].fillna(0).to_numpy().astype(float)
+    total = counts.sum()
+    if total <= 0:
+        return
+    idx = int(np.searchsorted(np.cumsum(counts), total / 2.0))
+    idx = min(idx, len(sub) - 1)
+    mid = days_to_years((sub["error_lo"].iloc[idx] + sub["error_hi"].iloc[idx]) / 2)
+    ax.plot([mid, mid], [base, base + 0.12], color=color, lw=1.6, solid_capstyle="butt", zorder=4)
 
 
 def _step_sample(km_one: pd.DataFrame, grid: np.ndarray) -> np.ndarray:

@@ -53,6 +53,11 @@ logger = logging.getLogger("seqeval")
 _RUN_KEYS = ["person_id", "age_start", "age_stop"]
 _EXTRA_BY = ("seed", "age_start", "age_stop")
 _FERTILE = (15.0, 50.0)
+# Width of a timing-error bin on the ridge; one year is the resolution a reader of ages expects.
+_ERROR_BIN_YEARS = 1.0
+# Accumulated tables keyed to individuals. The rest are per-bin or per-cell aggregates:
+# `calibration`/`coverage` count people in a bin, `timing_error`/`parity_distribution` in a cell.
+_PER_PERSON = {"probabilities"}
 # Age grid (years) at which generated vs observed KM survival is compared for `km:*` targets.
 _KM_GRID_YEARS = list(range(16, 46, 2))
 
@@ -94,6 +99,8 @@ def run(
             "scores",
             "aggregate_error",
             "coverage",
+            "timing_error",
+            "parity_distribution",
         )
     }
     # Overlay curves kept across the window loop, keyed by family ("ccf" / "km:<outcome>"), so the
@@ -151,7 +158,7 @@ def run(
 
     for name, frames in acc.items():
         if frames:
-            out.frame(name, pd.concat(frames, ignore_index=True))
+            out.frame(name, pd.concat(frames, ignore_index=True), individual=name in _PER_PERSON)
 
 
 # =================================================================================================
@@ -196,23 +203,32 @@ def _score_probability_outcome(
     if joined.empty or joined["y_true"].nunique() < 1:
         return
 
-    acc["probabilities"].append(_stamp(probs, label))
+    if out.individual_level:
+        acc["probabilities"].append(_stamp(probs, label))
+    else:
+        out.withhold("probabilities")  # never assembled, so the writer never sees it
 
     cal = ml.calibration_table(joined, n_bins=10, strategy=binning)
     acc["calibration"].append(_stamp(cal, label))
 
     desc = describe_outcome(spec, jumpoff_days=t2, label_fn=label_fn)
+    # The curve is binned either way; its histogram panel is keyed to the per-person probability
+    # table, so it goes when per-person output does. The bin counts survive in `calibration`.
     out.figure(
         f"reliability_{spec.name}_w{int(round(days_to_years(t2)))}",
-        viz_calibration.plot_reliability(cal, probs=probs, title=desc),
+        viz_calibration.plot_reliability(
+            cal, probs=probs if out.individual_level else None, title=desc
+        ),
     )
-    # Timed outcomes also get a waiting-time calibration scatter (predicted vs observed duration),
-    # drawn on the same population this reliability diagram scores: the condition minus the settled.
+    # Timed outcomes also get a timing-error ridge, drawn on the same population this reliability
+    # diagram scores: the condition minus the settled. The tables it needs also carry the timing
+    # coverage in `scores`, so they are built once here and handed to both.
+    tables = None
     if isinstance(spec, FramedOutcome):
-        scored = set(cond_persons) - settled
-        _emit_timing_calibration(spec, gen_w, observed, t1, t2, out, desc, scored)
+        tables = _timing_tables(spec, gen_w, observed, t1, t2)
+        _emit_timing_ridge(spec, tables, t2, out, desc, set(cond_persons) - settled, acc, label)
 
-    scores = _score_row(spec, joined, summary, gen_w, observed, t1, t2, binning)
+    scores = _score_row(joined, summary, tables, binning)
     cis = _score_cis(gen_eval, obs_eval, replicate_spec, binning)
     acc["scores"].append(_stamp_scores(scores, label, cis))
 
@@ -291,7 +307,7 @@ def _coverage_row(obs_eval, gen_eval, cond_persons, all_persons, settled, label)
     )
 
 
-def _score_row(spec, joined, summary, gen_w, observed, t1, t2, binning) -> dict:
+def _score_row(joined, summary, tables, binning) -> dict:
     brier = ml.brier(joined)
     median_n = float(summary["n"].median())
     scores = {
@@ -303,8 +319,9 @@ def _score_row(spec, joined, summary, gen_w, observed, t1, t2, binning) -> dict:
         "mse": ml.mse(joined),
         "r2": ml.r2(joined),
     }
-    if isinstance(spec, FramedOutcome):
-        scores["timing_coverage"] = _timing_coverage(spec, gen_w, observed, t1, t2)
+    if tables is not None:
+        td, obs_tte, _ = tables
+        scores["timing_coverage"] = ml.timing_coverage(td, obs_tte)
     return scores
 
 
@@ -380,43 +397,30 @@ def _timing_tables(spec, gen_w, observed, t1, t2):
     return td, obs_tte, horizon
 
 
-def _timing_coverage(spec, gen_w, observed, t1, t2) -> float:
-    td, obs_tte, _ = _timing_tables(spec, gen_w, observed, t1, t2)
-    return ml.timing_coverage(td, obs_tte)
+def _emit_timing_ridge(spec, tables, t2, out, desc, scored, acc, label) -> None:
+    """Timing-error ridge + its binned table for a timed outcome (one figure per jump-off).
 
-
-def _emit_timing_calibration(spec, gen_w, observed, t1, t2, out, desc, scored) -> None:
-    """Predicted-vs-observed waiting-time scatter for a timed outcome (one per jump-off).
-
-    The figure spans exactly the region a prediction can land in: from the jump-off (where the
-    forecast starts, and below which every remaining person is settled) to the frame's close. For an
-    origin-less outcome the duration is an age, so both bounds and the axis labels are ages; an
-    origin-based outcome is plotted as elapsed time from its origin and floored at 0, because the
-    jump-off is not a single point on that axis.
+    The error is measured in the outcome's own duration units, so an origin-less outcome compares
+    ages at the event and an origin-based one compares elapsed times from its origin. Both reduce to
+    the same signed difference, which is why one figure serves both and only the label changes.
     """
-    td, obs_tte, horizon = _timing_tables(spec, gen_w, observed, t1, t2)
-    name = f"timing_calibration_{spec.name}_w{int(round(days_to_years(t2)))}"
-    is_age = spec.tte.origin is None
-    floor = t2 if is_age else 0
-    axes = (
-        ("predicted age at event (years, median across seeds)", "observed age at event (years)")
-        if is_age
-        else (
-            "predicted waiting time (years, median across seeds)",
-            "observed waiting time (years)",
-        )
+    td, obs_tte, horizon = tables
+    err = ml.timing_error_distribution(
+        td, obs_tte, horizon_days=horizon, persons=scored, error_bin_years=_ERROR_BIN_YEARS,
+        min_cell=out.min_cell,
     )
+    if err.empty:
+        return
+    err.insert(0, "outcome", spec.name)
+    acc["timing_error"].append(_stamp(err, label))
+    is_age = spec.tte.origin is None
+    unit = "age at event" if is_age else "waiting time"
     out.figure(
-        name,
-        viz_backtest.plot_timing_calibration(
-            td,
-            obs_tte,
-            horizon_days=horizon,
-            floor_days=floor,
-            persons=scored,
-            xlabel=axes[0],
-            ylabel=axes[1],
-            title=f"{'Age at event' if is_age else 'Waiting time'} — {desc}",
+        f"timing_ridge_{spec.name}_w{int(round(days_to_years(t2)))}",
+        viz_backtest.plot_timing_ridge(
+            err,
+            xlabel=f"observed − predicted {unit} (years)",
+            title=f"Timing error — {desc}",
         ),
     )
 
@@ -479,14 +483,24 @@ def _score_aggregate_target(
         )
     elif target == "ccf":
         var_m = fe.ccf_variance(gen_births, gen_spans, persons, cohort_width=cohort_width)
+        # This window's own CCF view is the inference-vs-outcome figure below; the overlay survives
+        # only as the cross-jump-off panel, which compares windows on one axes.
+        _stash_panel(panels, "ccf", obs_m, gen_m, t2, variance=var_m)
+
+        # The same population, so the distribution and the mean drawn over it describe one quantity.
+        par_m = fe.parity_distribution(
+            gen_births, gen_spans, persons, cohort_width=cohort_width, min_cell=out.min_cell
+        )
+        acc["parity_distribution"].append(_stamp(par_m, _cell_label(t1, t2, "ccf", None)))
         out.figure(
-            f"ccf_overlay_w{jumpoff_y}",
-            viz_backtest.plot_ccf_seed_band(
-                obs_m, gen_m, variance=var_m, title=f"CCF by cohort — jump-off {jumpoff_y}y",
+            f"uncertainty_ccf_w{jumpoff_y}",
+            viz_backtest.plot_ccf_inference_vs_outcome(
+                var_m, par_m, observed=obs_m,
+                complete=viz_backtest.majority_complete(gen_m),
                 level=replicate_spec.level,
+                title=f"Inference vs outcome uncertainty — jump-off {jumpoff_y}y",
             ),
         )
-        _stash_panel(panels, "ccf", obs_m, gen_m, t2, variance=var_m)
 
 
 def _emit_km_overlay(name, combined, observed, outcomes, t2, out, level, panels) -> None:

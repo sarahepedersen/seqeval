@@ -19,6 +19,10 @@ _CMAP = plt.get_cmap("viridis")
 #: Above this many strata a per-line legend stops fitting and a colorbar is used instead.
 MAX_LEGEND_ENTRIES = 12
 
+#: Fill for a cell withheld by small-cell suppression, drawn at the upper bound the threshold
+#: allows. One convention across every figure, so a reader learns it once.
+SUPPRESSED_HATCH = "///"
+
 
 def new_fig(figsize: tuple[float, float] = FIGSIZE) -> tuple[Figure, plt.Axes]:
     """A single-axes figure with the house style applied."""

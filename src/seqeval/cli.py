@@ -197,6 +197,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 arm=name,
                 model=cfg.model.name,
                 figure_format=cfg.output.figure_format,
+                individual_level=cfg.output.individual_level,
+                min_cell=cfg.output.min_cell,
             )
             t0 = time.perf_counter()
             try:
@@ -213,6 +215,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     "name": name,
                     "status": status,
                     "outputs": outputs,
+                    "withheld": sorted(writer.skipped),
                     "duration_s": round(time.perf_counter() - t0, 3),
                 }
             )

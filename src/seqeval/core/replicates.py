@@ -259,7 +259,8 @@ def mean_variance_components(mu, s2, k) -> dict:
     (replicate variance, ``ddof=0``) and ``k`` (replicate count) — and returns
     ``{n, mean, within_var, between_var, total_var}``:
 
-    - ``within_var = Σ_i s2_i/k_i / n²`` — inference uncertainty: rerunning inference on the *same* individual.
+    - ``within_var = Σ_i s2_i/k_i / n²`` — inference uncertainty: rerunning inference on the *same*
+      individual.
     - ``total_var = var_i(mu_i)/n`` (``ddof=1``: a sample variance over individuals, used to infer
       the population) — every source at once, because each ``mu_i`` already carries its own seed
       noise.

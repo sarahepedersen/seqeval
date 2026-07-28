@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from seqeval.core import outcomes as O
@@ -154,3 +155,95 @@ def test_ccf_variance_counts_childless_women_in_the_denominator():
     # one seed: nothing varies across replicates, so the whole spread is between women
     assert var["within_var"] == pytest.approx(0.0)
     assert var["between_var"] == pytest.approx(var["total_var"])
+
+
+def test_parity_distribution_shares_sum_to_one_per_cohort():
+    rng = np.random.default_rng(8)
+    obs, pers = S.simulate_cohort(400, (1960, 1969), S.default_hazards(), None, rng,
+                                  no_event_fraction=1.0)
+    births, spans = _tables(obs)
+    par = FE.parity_distribution(births.assign(seed=0), spans.assign(seed=0), pers, cohort_width=5)
+    totals = par.groupby("cohort")["share"].sum()
+    np.testing.assert_allclose(totals, 1.0, atol=1e-12)
+
+
+def test_parity_distribution_mean_reproduces_the_ccf():
+    """The outcome layer and the inference layer describe one quantity, not two.
+
+    Stated on the unsuppressed table: withholding a thin cell removes its contribution, so the
+    identity is a property of the distribution, not of what is publishable from it.
+    """
+    rng = np.random.default_rng(9)
+    h = S.default_hazards()
+    obs, pers = S.simulate_cohort(400, (1960, 1969), h, None, rng, no_event_fraction=1.0)
+    gen = S.simulate_generated(obs, pers, h, [(0.0, 25.0)], 6, rng)
+    births, spans = _tables(gen, GEN_KEYS)
+
+    # max_parity above the largest count present, so nothing is top-coded away
+    par = FE.parity_distribution(births, spans, pers, max_parity=20, cohort_width=5, min_cell=0)
+    var = FE.ccf_variance(births, spans, pers, cohort_width=5).set_index("cohort")["ccf"]
+    mean = par.assign(w=par["parity"] * par["share"]).groupby("cohort")["w"].sum()
+    np.testing.assert_allclose(mean, var.reindex(mean.index), rtol=1e-12)
+
+
+def test_suppression_costs_the_published_table_some_of_its_mass():
+    """A withheld cell is genuinely gone: the published shares no longer sum to one."""
+    rng = np.random.default_rng(10)
+    h = S.default_hazards()
+    obs, pers = S.simulate_cohort(400, (1960, 1969), h, None, rng, no_event_fraction=1.0)
+    gen = S.simulate_generated(obs, pers, h, [(0.0, 25.0)], 6, rng)
+    births, spans = _tables(gen, GEN_KEYS)
+
+    # a long parity tail gives thin cells at the top end
+    par = FE.parity_distribution(births, spans, pers, max_parity=20, cohort_width=5)
+    assert par["suppressed"].any()
+    assert (par.groupby("cohort")["share"].sum() < 1.0).all()
+
+
+def test_parity_distribution_top_codes_the_final_category():
+    obs, pers = tiny.observed_fixture(), tiny.persons_fixture()
+    births, spans = _tables(obs)
+    kw = dict(cohort_width=100, min_cell=0)
+    full = FE.parity_distribution(births.assign(seed=0), spans.assign(seed=0), pers,
+                                  max_parity=20, **kw)
+    capped = FE.parity_distribution(births.assign(seed=0), spans.assign(seed=0), pers,
+                                    max_parity=2, **kw)
+    at_cap = capped[capped["parity"] == 2]["share"].sum()
+    assert at_cap == pytest.approx(full[full["parity"] >= 2]["share"].sum())
+    assert capped["parity"].max() == 2  # nothing above the cap survives as its own category
+
+
+def test_parity_distribution_weights_each_woman_equally_across_seeds():
+    """A woman with more replicates must not count for more of the population."""
+    obs, pers = tiny.observed_fixture(), tiny.persons_fixture()
+    births, spans = _tables(obs)
+    ragged_b = pd.concat([births.assign(seed=s) for s in (0, 1)])
+    ragged_s = pd.concat([spans.assign(seed=s) for s in (0, 1)])
+    # person 1 gets a third replicate; nobody else does
+    extra = spans[spans["person_id"] == 1].assign(seed=2)
+    ragged_s = pd.concat([ragged_s, extra])
+    ragged_b = pd.concat([ragged_b, births[births["person_id"] == 1].assign(seed=2)])
+
+    par = FE.parity_distribution(ragged_b, ragged_s, pers, max_parity=20, cohort_width=100,
+                                 min_cell=0)
+    assert par["n_women_equiv"].sum() == pytest.approx(spans["person_id"].nunique())
+
+
+def test_parity_distribution_counts_childless_women_in_the_denominator():
+    obs, pers = tiny.observed_fixture(), tiny.persons_fixture()
+    births, spans = _tables(obs)
+    par = FE.parity_distribution(births.assign(seed=0), spans.assign(seed=0), pers,
+                                 cohort_width=100, min_cell=0)
+    assert par["n_women_total"].iloc[0] == spans["person_id"].nunique()
+    # the mean over the distribution is the CCF, which only holds if the childless are counted
+    mean = (par["parity"] * par["share"]).sum()
+    assert mean == pytest.approx(tiny.EXPECTED_CCF)
+
+
+def test_parity_distribution_withholds_thin_cells():
+    obs, pers = tiny.observed_fixture(), tiny.persons_fixture()
+    births, spans = _tables(obs)
+    par = FE.parity_distribution(births.assign(seed=0), spans.assign(seed=0), pers,
+                                 cohort_width=100)
+    assert par["suppressed"].any()  # a 5-woman fixture cannot publish a per-parity breakdown
+    assert par.loc[par["suppressed"], "share"].isna().all()

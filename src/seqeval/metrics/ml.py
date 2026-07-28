@@ -11,6 +11,7 @@ generic ``aggregate_error`` comparator for any 03 metric table.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Literal
 
 import numpy as np
@@ -20,6 +21,8 @@ from sklearn.metrics import roc_auc_score
 from seqeval.core import replicates as rep
 from seqeval.core.specs import ReplicateSpec
 from seqeval.io.schema import RUN_KEYS
+from seqeval.metrics._disclosure import MIN_CELL, suppress_small_cells
+from seqeval.units import years_to_days
 
 logger = logging.getLogger("seqeval")
 
@@ -32,6 +35,7 @@ __all__ = [
     "brier",
     "log_loss",
     "timing_coverage",
+    "timing_error_distribution",
     "subgroup_rates",
     "aggregate_error",
 ]
@@ -206,6 +210,119 @@ def timing_coverage(
         return float("nan")
     inside = (m["duration"] >= m[lo]) & (m["duration"] <= m[hi])
     return float(inside.mean())
+
+
+def _timing_scope(
+    td: pd.DataFrame,
+    obs_tte: pd.DataFrame,
+    *,
+    horizon_days: int | None,
+    persons: Iterable | None,
+    drop_projected_beyond: bool,
+) -> pd.DataFrame:
+    """Per-person ``[person_id, pred, obs]`` waiting times (days) on the scored population.
+
+    Three rules decide who is comparable at all:
+
+    - the event must have been **observed**, and observed *inside* the frame horizon — the
+      predictive distribution is defective (capped at ``horizon_days``), so a person whose event
+      landed outside it has no predicted counterpart to compare against;
+    - membership in ``persons``, the arm's scored population (condition minus settled-at-jump-off);
+      a settled person's event sits in the replayed observed prefix and would land exactly on the
+      truth by construction;
+    - ``drop_projected_beyond`` removes persons whose predicted median reached the horizon, where
+      ``q50`` is the cap itself rather than a predicted time.
+    """
+    seen = obs_tte.loc[obs_tte["observed"], ["person_id", "duration"]]
+    m = td.merge(seen, on="person_id", how="inner")
+    if persons is not None:
+        m = m[m["person_id"].isin(set(persons))]
+    if horizon_days is not None:
+        m = m[m["duration"] <= horizon_days]
+        if drop_projected_beyond:
+            m = m[m["q50"] < horizon_days]
+    return pd.DataFrame(
+        {
+            "person_id": m["person_id"].to_numpy(),
+            "pred": m["q50"].to_numpy().astype(np.int64),
+            "obs": m["duration"].to_numpy().astype(np.int64),
+        }
+    )
+
+
+_TIMING_ERROR_COLUMNS = [
+    "pred_bin", "pred_lo", "pred_hi", "pred_median", "n_pred_bin",
+    "error_lo", "error_hi", "n_persons", "suppressed",
+]
+
+
+def timing_error_distribution(
+    td: pd.DataFrame,
+    obs_tte: pd.DataFrame,
+    *,
+    horizon_days: int | None = None,
+    persons: Iterable | None = None,
+    drop_projected_beyond: bool = True,
+    error_bin_years: float = 1.0,
+    n_pred_bins: int = 6,
+    min_cell: int = MIN_CELL,
+) -> pd.DataFrame:
+    """Binned distribution of timing error, by how early or late the model predicted.
+
+    Returns ``[pred_bin, pred_lo, pred_hi, pred_median, n_pred_bin, error_lo, error_hi, n_persons,
+    suppressed]`` — a count per (predicted-value bin × signed-error bin), day-valued, with no person
+    identifier anywhere. The error is ``observed - predicted``: **positive means the event happened
+    later than predicted**, so mass to the right of zero is a model that predicts too early.
+
+    Predicted bins are equal-count quantiles, so every row rests on the same number of people and
+    the bins are comparable to each other. Error bins are shared across all rows and anchored at a
+    multiple of the width, which puts **zero on a bin edge** — no cell can mix early with late.
+    Cells are then suppressed per :func:`~seqeval.metrics._disclosure.suppress_small_cells`.
+
+    The population is :func:`_timing_scope`'s, which is narrower than
+    :func:`timing_coverage`'s — that one scores every person whose event occurred, with no horizon,
+    ``persons``, or projected-beyond restriction. The two therefore describe different people.
+    """
+    pairs = _timing_scope(
+        td, obs_tte,
+        horizon_days=horizon_days, persons=persons, drop_projected_beyond=drop_projected_beyond,
+    )
+    width = years_to_days(error_bin_years)
+    pred, error = pairs["pred"].to_numpy(), (pairs["obs"] - pairs["pred"]).to_numpy()
+
+    pred_edges = (
+        np.unique(np.quantile(pred, np.linspace(0, 1, n_pred_bins + 1))) if len(pred) else []
+    )
+    if len(pred_edges) < 2:  # a single predicted value spans no bin at all
+        return pd.DataFrame({c: pd.Series(dtype="float64") for c in _TIMING_ERROR_COLUMNS})
+    pred_idx = np.clip(np.digitize(pred, pred_edges) - 1, 0, len(pred_edges) - 2)
+
+    lo = np.floor(error.min() / width) * width
+    hi = np.ceil(error.max() / width) * width + width
+    error_edges = np.arange(lo, hi + width / 2, width)
+    error_idx = np.clip(np.digitize(error, error_edges) - 1, 0, len(error_edges) - 2)
+
+    rows = []
+    for b in range(len(pred_edges) - 1):
+        in_bin = pred_idx == b
+        counts = np.bincount(error_idx[in_bin], minlength=len(error_edges) - 1)
+        for e, n in enumerate(counts):
+            rows.append(
+                {
+                    "pred_bin": b,
+                    "pred_lo": float(pred_edges[b]),
+                    "pred_hi": float(pred_edges[b + 1]),
+                    "pred_median": float(np.median(pred[in_bin])) if in_bin.any() else np.nan,
+                    "n_pred_bin": int(in_bin.sum()),
+                    "error_lo": float(error_edges[e]),
+                    "error_hi": float(error_edges[e + 1]),
+                    "n_persons": int(n),
+                }
+            )
+    cells = pd.DataFrame(rows)
+    return suppress_small_cells(cells, count_col="n_persons", by=["pred_bin"], min_cell=min_cell)[
+        _TIMING_ERROR_COLUMNS
+    ]
 
 
 def subgroup_rates(

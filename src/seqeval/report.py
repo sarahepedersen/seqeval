@@ -32,6 +32,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from seqeval import __version__
+from seqeval.metrics._disclosure import MIN_CELL
 from seqeval.units import days_to_years
 
 logger = logging.getLogger("seqeval")
@@ -134,6 +135,9 @@ def build_manifest(*, cfg, coverage: dict, arm_results: list[dict], warnings: li
         arms[res["name"]] = {
             "status": res["status"],
             "outputs": sorted(res["outputs"]),
+            # Named rather than merely absent: a reader can tell a withheld artifact from one the
+            # run never produced.
+            "withheld": sorted(res.get("withheld", [])),
             "duration_s": res["duration_s"],
         }
     return {
@@ -321,6 +325,20 @@ def _coverage_summary(results_dir: Path) -> str:
     )
 
 
+def _publishes_individuals(manifest: dict) -> bool:
+    """Whether the run wrote per-person artifacts (the default; ``output.individual_level``)."""
+    return bool(
+        manifest.get("config_resolved", {}).get("output", {}).get("individual_level", True)
+    )
+
+
+def _min_cell(manifest: dict) -> int:
+    """The run's minimum publishable cell size (``output.min_cell``)."""
+    return int(
+        manifest.get("config_resolved", {}).get("output", {}).get("min_cell", MIN_CELL)
+    )
+
+
 def _run_summary_section(manifest: dict, results_dir: Path) -> str:
     """Run summary: model, version, timestamp, data coverage, and backtest evaluability."""
     cov = manifest.get("coverage", {})
@@ -332,6 +350,8 @@ def _run_summary_section(manifest: dict, results_dir: Path) -> str:
         ("Persons", cov.get("n_persons", "")),
         ("Cohort range", cov.get("cohort_range", "")),
         ("Sex breakdown", cov.get("sex_breakdown", "")),
+        ("Individual-level output", "written" if _publishes_individuals(manifest) else "withheld"),
+        ("Minimum cell size", _min_cell(manifest) or "no suppression"),
     ]
     body = "".join(
         f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(str(v))}</td></tr>" for k, v in rows
@@ -458,7 +478,9 @@ def _calibration_subsections(arm_dir: Path) -> str:
 #: Generated-vs-observed overlay figure families rendered in the backtesting section, in order.
 _OVERLAY_GROUPS = (
     ("Survival (KM)", "km_overlay_*.png"),
-    ("Completed cohort fertility (CCF)", "ccf_overlay_*.png"),
+    # CCF keeps only the cross-jump-off panel; a single window's CCF is the inference-vs-outcome
+    # figure, which carries the same estimate and interval plus the outcome distribution.
+    ("Completed cohort fertility (CCF)", "ccf_overlay_all_jumpoffs.png"),
 )
 
 
@@ -482,18 +504,52 @@ def _gen_vs_obs_section(arm_dir: Path) -> str:
     )
 
 
-def _timing_calibration_section(arm_dir: Path) -> str:
-    """Waiting-time scatters (predicted vs observed duration), if present."""
-    figs = sorted(arm_dir.glob("timing_calibration_*.png"))
+def _uncertainty_section(arm_dir: Path) -> str:
+    """Inference uncertainty beside outcome uncertainty, per jump-off, if present."""
+    figs = sorted(arm_dir.glob("uncertainty_ccf_*.png"))
     if not figs:
         return ""
     cells = "".join(_figure_html(f) for f in figs)
     return (
-        '<h3 id="timing-calibration">Waiting time scatter</h3>'
-        '<p class="muted">Predicted vs observed timing per person, for timed outcomes. Gray '
-        "points are individuals; the red trend is the median observed time within equal-count bins "
-        "of predicted time (IQR ribbon). Above the dashed <code>y = x</code> line the model "
-        "predicts events too early; below it, too late.</p>"
+        '<h3 id="uncertainty">Inference vs outcome uncertainty</h3>'
+        '<p class="muted">The 95% CI is the '
+        "uncertainty in the CCF estimate <em>mean</em> — it is "
+        "<code>±z·&radic;total_var</code>, a total-variance measure of both the within-individual "
+        "inference variation (between replicates of the same individual) and the between-people "
+        "estimation uncertainty in the sample. The outcome uncertainty histograms are "
+        "distributions of estimated completed parity across the cohort. "
+        "Counts are in <code>parity_distribution.parquet</code>; hatched bars rest on fewer women "
+        "than the run's minimum cell size and are withheld.</p>"
+        '<p class="muted">How those counts are built: <strong>every replicate of every woman is '
+        "reflected</strong>, not her average. A woman is placed in each parity in proportion to "
+        "how often her seeds landed there — five seeds giving 2, 2, 3, 2, 3 put her 0.6 at parity "
+        "2 and 0.4 at parity 3 — and each woman carries a total weight of 1 however many "
+        "replicates she has. Nothing is rounded to an integer parity, so a woman the model is "
+        "unsure about enters as the spread she is. The consequence is that this distribution is "
+        "the model's predictive distribution for one woman and its width carries "
+        "<em>both</em> genuine differences between women and disagreement between seeds about the "
+        "same woman: its variance is <code>mean_i(s²_i) + var_i(mu_i)</code>. The seed share is "
+        "large at an early jump-off and small at a late one, so read the width as "
+        "'how predictable is an individual under this model as run', not as heterogeneity "
+        "alone.</p>"
+        f'<div class="figrow">{cells}</div>'
+    )
+
+
+def _timing_error_section(arm_dir: Path) -> str:
+    """Timing-error ridges (how early or late, by predicted value), if present."""
+    figs = sorted(arm_dir.glob("timing_ridge_*.png"))
+    if not figs:
+        return ""
+    cells = "".join(_figure_html(f) for f in figs)
+    return (
+        '<h3 id="timing-error">Timing error</h3>'
+        '<p class="muted">For each timed outcome, the distribution of '
+        "<code>observed − predicted</code> timing. The bins are equal-count of predicted "
+        "value, drawn as proportions within that bin. Mass to the right "
+        "of the dashed zero line is an event that happened later than predicted — the model "
+        "predicting too early. The counts are in "
+        "<code>timing_error.parquet</code>.</p>"
         f'<div class="figrow">{cells}</div>'
     )
 
@@ -505,8 +561,9 @@ def _backtesting_section(arm_dir: Path, *, bootstrap_n: int | None = None) -> st
         _backtest_metrics_table(arm_dir / "scores.parquet", bootstrap_n=bootstrap_n),
         _coverage_summary(arm_dir.parent),
         _gen_vs_obs_section(arm_dir),
+        _uncertainty_section(arm_dir),
         _calibration_subsections(arm_dir),
-        _timing_calibration_section(arm_dir),
+        _timing_error_section(arm_dir),
     ):
         if block:
             parts.append(block)

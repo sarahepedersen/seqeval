@@ -218,15 +218,19 @@ def test_no_scalar_metric_figures_are_emitted(tmp_path):
     assert (out.dir / "scores.parquet").exists()  # the numbers themselves are still written
 
 
-def test_timing_calibration_figures_emitted_per_framed_jumpoff(tmp_path):
-    """One waiting-time scatter per (framed outcome, jump-off); no display-window table written."""
+def test_timing_ridge_figures_emitted_per_framed_jumpoff(tmp_path):
+    """One timing-error ridge per (framed outcome, jump-off), backed by a binned counts table."""
     out = _run_arm(tmp_path)
     figs = {p.name for p in out.written if p.suffix == ".png"}
     assert {
-        "timing_calibration_first_birth_by_age_40y_given_p0_w25.png",
-        "timing_calibration_first_birth_by_age_40y_given_p0_w30.png",
+        "timing_ridge_first_birth_by_age_40y_given_p0_w25.png",
+        "timing_ridge_first_birth_by_age_40y_given_p0_w30.png",
     } <= figs
-    assert not (out.dir / "timing_outliers.parquet").exists()
+    assert not [f for f in figs if f.startswith("timing_calibration")]
+
+    err = pd.read_parquet(out.dir / "timing_error.parquet")
+    assert "person_id" not in err.columns  # the table the figure is drawn from names nobody
+    assert set(err["outcome"]) and (err["n_pred_bin"] > 0).all()
 
 
 def test_coverage_reports_settled_for_framed(tmp_path):
@@ -297,3 +301,17 @@ def test_needs_births_ignores_km_targets():
     assert not BT._needs_births(cfg_for("[]"))
     assert BT._needs_births(cfg_for("[ppr]"))
     assert BT._needs_births(cfg_for("[km:first_birth, ccf]"))  # mixed: births still required
+
+
+def test_ccf_uncertainty_figure_and_parity_table_emitted(tmp_path):
+    """The CCF gets an inference-vs-outcome view, backed by a publishable parity table."""
+    out = _run_arm(tmp_path)
+    figs = {p.name for p in out.written if p.suffix == ".png"}
+    assert any(f.startswith("uncertainty_ccf_w") for f in figs)
+
+    par = pd.read_parquet(out.dir / "parity_distribution.parquet")
+    assert "person_id" not in par.columns
+    # every cohort's published shares are a distribution: bounded, and complete unless withheld
+    shown = par[~par["suppressed"]]
+    assert ((shown["share"] >= 0) & (shown["share"] <= 1)).all()
+    assert (par.groupby(["age_stop", "cohort"], observed=True)["share"].sum() <= 1.0 + 1e-9).all()

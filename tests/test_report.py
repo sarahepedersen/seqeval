@@ -38,12 +38,21 @@ def test_backtesting_section_has_coverage(demo_config, tmp_path):
     assert "Backtest metrics" in backtest  # the brier/auc table replaces the line graphs
 
 
-def test_timing_calibration_section_renders_when_figures_present(demo_config, tmp_path):
-    """The timed-outcome scatters appear in the backtesting section."""
+def test_timing_error_section_renders_when_figures_present(demo_config, tmp_path):
+    """The timed-outcome ridges appear in the backtesting section."""
     results = _run(demo_config, tmp_path / "results")
-    assert list((results / "backtesting").glob("timing_calibration_*.png"))
+    assert list((results / "backtesting").glob("timing_ridge_*.png"))
     html = (results / report.REPORT_NAME).read_text()
-    assert 'id="timing-calibration"' in html
+    assert 'id="timing-error"' in html
+
+
+def test_uncertainty_section_contrasts_the_two_uncertainties(demo_config, tmp_path):
+    """The inference-vs-outcome figure gets its own section, with the distinction stated."""
+    results = _run(demo_config, tmp_path / "results")
+    assert list((results / "backtesting").glob("uncertainty_ccf_*.png"))
+    html = (results / report.REPORT_NAME).read_text()
+    assert 'id="uncertainty"' in html
+    assert "Inference vs outcome uncertainty" in html
 
 
 def test_coverage_summary_absent_without_backtesting(demo_config, tmp_path):

@@ -26,7 +26,7 @@ from typing import Literal
 
 import pandas as pd
 import yaml
-from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from seqeval.core.specs import (
     Condition,
@@ -37,6 +37,7 @@ from seqeval.core.specs import (
     Rule,
     TTESpec,
 )
+from seqeval.metrics._disclosure import MIN_CELL
 from seqeval.units import years_to_days
 
 logger = logging.getLogger("seqeval")
@@ -332,10 +333,18 @@ class ArmsConfig(_Strict):
 
 
 class OutputConfig(_Strict):
-    """``output:`` block."""
+    """``output:`` block.
+
+    ``individual_level: false`` withholds every per-person table and figure from the 
+    output directory (only reports aggregates).
+
+    ``min_cell`` is how many people a published cell must rest on; below it the cell is withheld. 
+    """
 
     dir: str = "results/"
     figure_format: str = "png"
+    individual_level: bool = True
+    min_cell: int = Field(default=MIN_CELL, ge=0)
 
 
 # =================================================================================================
