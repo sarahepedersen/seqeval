@@ -11,11 +11,11 @@ Three ideas recur and are worth reading first:
   and count how often the event happens. That empirical frequency *is* the
   predicted probability. Everything downstream flows from this. (`src/seqeval/core/replicates.py`)
 - **Estimation is strictly per run.** A run's probability is estimated only from its own replicates
-  — never pooled or shrunk toward other people. All cross-run work (calibration binning, bootstraps)
+  — never pooled or shrunk toward other people. All cross-run work (calibration binning, scoring)
   happens afterwards on the per-run table.
 - **The seed count `n` is a resolution limit.** With `n` seeds a probability lives on a grid of
   width `1/n` and cannot be more extreme than about `1/(2n+2)` from 0 or 1. Small `n` therefore
-  makes several metrics coarse; the convergence curve is how you detect it.
+  makes several metrics coarse; a p_hat that shifts as seeds accumulate is how you detect it.
 
 ---
 
@@ -158,7 +158,7 @@ scale with `n`, so **more seeds ⇒ tighter band.**
 
 *Limitation:* at very small `n` (≈5) `p̂` is a coarse, shrunk view of the truth, so even a perfectly
 calibrated model's curve can exit the band. At that point the diagram is unreliable and you should
-use the convergence curve (§3.2) to decide whether to generate more seeds.
+watch whether p_hat still shifts as seeds accumulate to decide whether to generate more.
 
 ### 2.6 Timing coverage — `timing_coverage` (`metrics/ml.py`)
 
@@ -197,27 +197,35 @@ days the event must fall inside, so a row is readable on its own.
 These are plug-in dispersions, **not** resampling procedures. In the report both tables are
 down-sampled to five randomly chosen persons (the full tables are in the parquet).
 
-### 3.2 Aggregate seed stability
+### 3.2 Confidence intervals on the backtest scores
 
-Here we resample the **seed dimension** across runs to put uncertainty on a whole-cohort number.
+Every interval next to a backtest metric is **analytic and computed from per-person quantities** —
+`score_cis` (`metrics/ml.py`). Persons are the sampling unit, and each interval is
+`estimate ± z·se`, so it can never fail to contain its own point estimate:
 
-- **Seed bootstrap — `seed_bootstrap` (`core/replicates.py`).** Resample seed labels *with
-  replacement, within each window* (so window structure is preserved), recompute the aggregate
-  statistic on each draw, and take percentile confidence intervals. Outcome evaluation is done once
-  per replicate and the *rows* are resampled — the model is never re-run inside the loop. This is
-  the source of the `(lo, hi)` interval shown next to each backtest metric. It captures Monte-Carlo
-  (replicate) uncertainty only, **not** population sampling uncertainty.
+| metric | standard error |
+|---|---|
+| `mse`, `brier_raw` | `sd_i(l_i)/√n` on the per-person loss `l_i = (p̂_i − y_i)²` |
+| `brier_corrected` | the same, on `l_i − c_i` where `c_i` is that run's MC-inflation term |
+| `r2` | delta method on the ratio `A/B`: `sd_i((a_i − (A/B)·b_i)/B)/√n` |
+| `roc_auc` | DeLong — `S10/n₊ + S01/n₋` from the per-person placement values, computed by midranks so the coarse `1/n` grid's ties count half. Clipped to `[0, 1]` |
+| `ece` | **none.** Its bins are chosen from the data and the statistic is biased upward; there is no honest closed form |
 
-- **Convergence curve — `convergence_curve` (`core/replicates.py`).** For each seed count `m` from 2
-  up to `n`, subsample `m` seeds *without replacement* `n_rep` times, recompute the metric, and
-  report its mean ± standard deviation across those subsamples. Reading it: where the curve flattens
-  **and** its error bars go tight is the seed count at which the estimate has stabilised. If it is
-  still sloping or the bars are still fat at your largest `m`, the reported metric is coarse and the
-  action is *generate more seeds*. This is effectively a replicate-count power analysis.
+`roc_auc` also loses its interval where DeLong's variance is exactly zero — a fully tied `p̂` grid or
+perfect separation — because a zero-width interval would claim certainty the data has not earned.
 
-> Note on the percentile interval: because the seed bootstrap resamples with replacement, the point
-> estimate (computed on the full seed set) can occasionally sit just outside its own CI at small `n`.
-> That is a known property of the percentile bootstrap, not a bug.
+These are sampling intervals that *already carry* replicate noise: each `l_i` is computed from that
+person's own `p̂_i`, so the spread across persons contains the seed uncertainty, exactly as
+`var_i(mu_i)` does for CCF (§2). They are the `total_var` analogue, not the replicate-only one.
+There is no within/between split to report because `p̂` is defined *across* seeds — no per-seed loss
+exists to average.
+
+> Historical note: these intervals were previously percentile CIs from a seed bootstrap. That
+> procedure resampled seed labels with replacement, which makes `p̂ = k/n` noisier than in the real
+> sample; since every one of these metrics is nonlinear in `p̂`, the bootstrap distribution was
+> centred on a different estimand than the point estimate, and in the demo 46 of 55 intervals
+> excluded their own point. The bootstrap has been removed, along with the `replicates.bootstrap`
+> config block.
 
 ---
 
@@ -230,8 +238,9 @@ is compared to the observed cohort cell by cell:
 bias = metric_generated − metric_observed
 ```
 
-with seed-bootstrap percentile CIs on the bias (resample seeds, recompute the aggregate). The demo
-report does not surface this table by default, but it is written to `aggregate_error.parquet`.
+`gen_sd_over_seeds` reports the seed-to-seed spread of each generated cell alongside it; no interval
+is placed on the bias. The demo report does not surface this table by default, but it is written to
+`aggregate_error.parquet`.
 
 ---
 
@@ -260,6 +269,6 @@ A cell with `n_evaluable = 0` produces no score and is flagged in the report.
 | AUC, Brier, log-loss, ECE, calibration table, timing coverage | `metrics/ml.py` |
 | Brier finite-seed correction | `core/replicates.py` (`brier_noise_correction`) |
 | Calibration null band | `core/replicates.py` (`null_calibration_band`) |
-| Aggregate CIs / convergence | `core/replicates.py` (`seed_bootstrap`, `convergence_curve`) |
+| Backtest score CIs | `metrics/ml.py` (`score_cis`, `_delong_var`) |
 | Individual seed stability | `arms/forecasting.py` (`_seed_stability_individual`) |
 | Coverage accounting | `arms/backtesting.py` (`_coverage_row`) |

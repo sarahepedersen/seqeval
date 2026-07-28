@@ -42,8 +42,6 @@ triangle), and produce:
 def plot_lexis(surface, *, value="rate", mark_forecast=True) -> Figure
     # heatmap, x=year, y=age; forecast region delineated (hatching or contour line at the
     # observed/forecast boundary). Optional cohort diagonals.
-def plot_lexis_uncertainty(surfaces_by_seed) -> Figure
-    # second heatmap of IQR across seeds in forecast cells
 ```
 
 Subgroup Lexis: honor `extra_by` from persons covariates (education, region) when configured.
@@ -110,7 +108,7 @@ def seed_stability(births, spans, tte_tables, *, keys=GEN_KEYS,
     #   (c) count dispersion: predictive variance of completed event count, from
     #       replicates.count_distribution.
     #   Returns per-run table + summary distribution stats.
-    # aggregate: uncertainty bands on CCF / ASFR cells via replicates.seed_bootstrap over 03
+    # aggregate: analytic variance components on CCF cells via replicates.mean_variance_components
     #   metrics with extra_by=["seed"] — connects to spec's cross-model comparison of forecast
     #   variance; the Lexis IQR heatmap (§1) is the same computation surfaced spatially.
 ```

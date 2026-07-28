@@ -24,7 +24,7 @@ model: {name: perfect}
 data: {observed: o.parquet, age_unit: days}
 events: {birth: birth}
 persons: {cohort_width: 5}
-replicates: {min_replicates: 5, bootstrap: {n: 0, seed: 7}}
+replicates: {min_replicates: 5}
 outcomes: {first_birth: {event: birth, n: 1}}
 arms:
   forecasting:
@@ -66,18 +66,18 @@ def test_arm_writes_all_tables_and_figures(tmp_path):
     out = _run(tmp_path)
     names = {p.name for p in out.written}
     assert {
-        "lexis_observed.parquet",
-        "lexis_forecast.parquet",
-        "lexis_combined.parquet",
         "lexis_cohort_observed.parquet",
+        "lexis_cohort_forecast.parquet",
         "lexis_cohort_combined.parquet",
         "violations.parquet",
         "violation_rates.parquet",
         "replicate_variance_individual.parquet",
         "replicate_variance_aggregate.parquet",
     } <= names
-    # both period (year x age) and cohort (birth-cohort x age) Lexis heatmaps render
-    assert {"lexis_combined.png", "lexis_cohort_combined.png"} <= names
+    # cohort (birth-cohort x age) is the only Lexis basis: a period cell is part observed and part
+    # forecast, since the jump-off is an age and lands in a different calendar year for each cohort
+    assert "lexis_cohort_combined.png" in names
+    assert not [n for n in names if n.startswith("lexis_") and "cohort" not in n]
     # within-seed variance histograms: population-wide + faceted by the requested subgroup
     assert {"within_seed_variance.png", "within_seed_variance_by_cohort.png"} <= names
     for p in out.written:

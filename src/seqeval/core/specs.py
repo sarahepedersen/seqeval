@@ -63,6 +63,7 @@ __all__ = [
     "Condition",
     "Rule",
     "ReplicateSpec",
+    "FertilityGrid",
 ]
 
 
@@ -230,14 +231,29 @@ class ReplicateSpec:
         Confidence level for intervals.
     min_replicates : int, default 5
         Warn when a run has fewer replicates than this (probability grid coarser than 1/n).
-    bootstrap_n : int, default 200
-        Number of seed-bootstrap resamples for aggregate-metric CIs; 0 disables.
-    bootstrap_seed : int, default 7
-        Seed for the bootstrap RNG.
     """
 
     interval: Literal["jeffreys", "wilson"] = "jeffreys"
     level: float = 0.95
     min_replicates: int = 5
-    bootstrap_n: int = 200
-    bootstrap_seed: int = 7
+
+
+@dataclass(frozen=True)
+class FertilityGrid:
+    """Shared cell geometry for the fertility aggregates, so every arm bins them alike.
+
+    A backtest PPR or ASFR is meant to be read against the descriptive one it sits near in the
+    report; on a different parity ceiling or a different age-bin width the two are not comparable.
+    Resolved once from the descriptives fertility block (``config.resolve_fertility_grid``) and
+    handed to whichever arm needs it, rather than each arm carrying its own constants.
+
+    Parameters
+    ----------
+    max_parity : int, default 6
+        Highest parity transition a PPR table reports (``max_parity-1 -> max_parity``).
+    age_bin_width : float, default 1.0
+        Width in years of an ASFR/exposure age bin.
+    """
+
+    max_parity: int = 6
+    age_bin_width: float = 1.0

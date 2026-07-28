@@ -40,6 +40,7 @@ from seqeval.config import (
     Config,
     load_config,
     resolve_conditions,
+    resolve_fertility_grid,
     resolve_outcomes,
     resolve_probability_outcomes,
     resolve_replicates,
@@ -140,6 +141,7 @@ def _arm_runners(bundle: Bundle, cfg: Config):
                 prob_outcomes=resolve_probability_outcomes(cfg, outcomes),
                 replicate_spec=resolve_replicates(cfg),
                 cohort_width=cohort_width,
+                fertility_grid=resolve_fertility_grid(cfg),
             ),
         ),
         "forecasting": (

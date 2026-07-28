@@ -9,6 +9,7 @@ was skipped; age-only metrics (KM, PPR) still run.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 import pandas as pd
 
@@ -47,6 +48,7 @@ def run(
     from ``DescriptivesConfig`` so every arm uses one population-wide value. (Both parameters extend
     01's ``run(bundle, cfg, out)`` signature because they live at the top level of the config.)
     """
+    bundle = _restrict_cohorts(bundle, cfg.max_cohort_year)
     observed = bundle.observed
     spans = observation_spans(observed, OBS_KEYS)
     strata = _strata_frame(bundle, cfg.stratify_by, cohort_width)
@@ -56,6 +58,41 @@ def run(
     if cfg.fertility is not None:
         births = births_table(observed, OBS_KEYS, birth_event=bundle.token("birth"))
         _run_fertility(bundle, cfg, out, births, spans, cohort_width)
+
+
+def _restrict_cohorts(bundle: Bundle, max_cohort_year: int | None) -> Bundle:
+    """Drop people born after ``max_cohort_year`` from the arm's whole population.
+
+    The people go, not just their rows in cohort-indexed tables: a period rate computed on everyone
+    and a cohort rate computed on a subset would describe different populations and could not be
+    read against each other. Needs ``persons`` for ``birth_year``; without it the cutoff cannot be
+    applied and says so rather than silently describing everybody.
+    """
+    if max_cohort_year is None:
+        return bundle
+    if bundle.persons is None:
+        logger.warning(
+            "descriptives: max_cohort_year=%d ignored — no persons file, so birth_year is unknown",
+            max_cohort_year,
+        )
+        return bundle
+
+    persons = bundle.persons
+    keep = persons[persons["birth_year"] <= max_cohort_year]
+    dropped = len(persons) - len(keep)
+    if not dropped:
+        return bundle
+    logger.info(
+        "descriptives: max_cohort_year=%d drops %d of %d people (born %d–%d)",
+        max_cohort_year, dropped, len(persons),
+        int(persons["birth_year"].max()), max_cohort_year + 1,
+    )
+    kept_ids = set(keep["person_id"])
+    return replace(
+        bundle,
+        persons=keep.reset_index(drop=True),
+        observed=bundle.observed[bundle.observed["person_id"].isin(kept_ids)],
+    )
 
 
 # =================================================================================================
@@ -129,22 +166,37 @@ def _run_fertility(bundle: Bundle, cfg, out, births, spans, cohort_width: int) -
 
     if fcfg.ccf:
         ccf = fe.ccf(births, spans, persons, by_cohort=True, cohort_width=cohort_width)
-        out.frame("ccf", ccf)
+        variance = fe.ccf_variance(births, spans, persons, cohort_width=cohort_width)
+        out.frame("ccf", ccf.merge(variance.drop(columns=["n_women", "ccf"]), on="cohort"))
         out.figure("ccf", viz_fertility.plot_ccf(ccf))
+
+        # The same two-panel contrast the backtesting arm draws, on the observed history: the
+        # interval is pure sampling error here (nothing is replicated), and the parity distribution
+        # is the realized one rather than a model's predictive mixture.
+        parity = fe.parity_distribution(
+            births, spans, persons, cohort_width=cohort_width, min_cell=out.min_cell
+        )
+        out.frame("parity_distribution", parity)
+        out.figure(
+            "ccf_uncertainty",
+            viz_fertility.plot_ccf_inference_vs_outcome(
+                variance,
+                parity,
+                complete=ccf.set_index("cohort")["complete"],
+                left_title="sampling uncertainty",
+                title="Sampling vs outcome uncertainty — observed",
+            ),
+        )
 
     bins = AgeBins.from_years(_FERTILE_LO_YEARS, _FERTILE_HI_YEARS, fcfg.age_bin_width)
     for mode in fcfg.asfr:
         table = fe.asfr(births, spans, persons, mode=mode, bins=bins, cohort_width=cohort_width)
         out.frame(f"asfr_{mode}", table)
-        if mode == "period":
-            # Period ASFR is a (year x age) surface — a heatmap plus a TFR-over-time summary line
-            # read far better than one age-profile line per calendar year.
-            out.figure("asfr_period", viz_fertility.plot_asfr_surface(table))
-            tfr = fe.tfr(table)
-            out.frame("tfr", tfr)
-            out.figure("tfr", viz_fertility.plot_tfr(tfr))
-        else:
+        if mode != "period":
             # Cohort ASFR has few groups; one age-profile line per cohort stays legible.
             out.figure("asfr_cohort", viz_fertility.plot_asfr(table, dim="cohort"))
+        # Period ASFR is written but not drawn: neither the year x age surface nor its TFR summary
+        # is reported, since the jump-off is an age and a calendar-year cell is part observed and
+        # part forecast, so nothing in the other arms can be read against it.
 
 

@@ -158,17 +158,6 @@ def test_aggregate_error_alignment_raises():
         ml.aggregate_error(_ccf_gen(), obs, value_col="ccf", on=["cohort"])
 
 
-def test_aggregate_error_bootstrap_ci_columns():
-    obs = pd.DataFrame({"cohort": [1960, 1970], "ccf": [2.1, 1.9]})
-    ae = ml.aggregate_error(
-        _ccf_gen(), obs, value_col="ccf", on=["cohort"], spec=ReplicateSpec(bootstrap_n=50)
-    )
-    assert {"bias_ci_lo", "bias_ci_hi"} <= set(ae.columns)
-
-
-# =================================================================================================
-# timing error distribution
-# =================================================================================================
 def _timing_frames(pred_years, obs_years, observed=None):
     """A (timing_distribution, observed tte) pair with one person per predicted/observed value."""
     n = len(pred_years)
@@ -270,3 +259,90 @@ def test_too_few_distinct_predictions_returns_an_empty_frame():
     td, obs_tte = _timing_frames([30] * 5, [31] * 5)
     out = ml.timing_error_distribution(td, obs_tte, n_pred_bins=6)
     assert out.empty
+
+
+# --- analytic score intervals -------------------------------------------------------------------
+def _scored(n=800, seed=0, k_seeds=5):
+    """A joined frame with a real signal, on the coarse ``1/k_seeds`` probability grid."""
+    rng = np.random.default_rng(seed)
+    truth = rng.uniform(0.1, 0.9, n)
+    y = (rng.uniform(size=n) < truth).astype(int)
+    k = rng.binomial(k_seeds, truth)
+    return pd.DataFrame({"p_hat": k / k_seeds, "y_true": y, "k": k, "n": k_seeds})
+
+
+def test_every_interval_contains_its_own_point_estimate():
+    """The defect that retired the seed bootstrap: its CIs sat off to one side of the estimate."""
+    joined = _scored()
+    cis = ml.score_cis(joined).set_index("metric")
+    points = {
+        "mse": ml.mse(joined),
+        "brier_raw": ml.brier(joined)["raw"],
+        "brier_corrected": ml.brier(joined)["corrected"],
+        "r2": ml.r2(joined),
+        "roc_auc": ml.roc_auc(joined),
+    }
+    for metric, value in points.items():
+        lo, hi = cis.loc[metric, "ci_lo"], cis.loc[metric, "ci_hi"]
+        assert lo <= value <= hi, metric
+
+
+def test_squared_error_intervals_are_the_person_level_standard_error():
+    joined = _scored()
+    loss = (joined["p_hat"] - joined["y_true"]) ** 2
+    half = 1.959963985 * loss.std(ddof=1) / np.sqrt(len(joined))
+    row = ml.score_cis(joined).set_index("metric").loc["mse"]
+    assert (row["ci_hi"] - row["ci_lo"]) / 2 == pytest.approx(half)
+
+
+def test_ece_gets_no_interval():
+    """Data-dependent bins and an upward-biased statistic: no honest closed form to report."""
+    assert "ece" not in set(ml.score_cis(_scored())["metric"])
+
+
+def test_auc_interval_stays_a_probability():
+    """A strong classifier on few people pushes the symmetric interval past 1; it is clipped."""
+    joined = pd.DataFrame(
+        {"p_hat": [0.2] * 7 + [0.8] * 6, "y_true": [0] * 6 + [1] * 7, "k": 1, "n": 5}
+    )
+    row = ml.score_cis(joined).set_index("metric").loc["roc_auc"]
+    assert row["ci_hi"] == 1.0 and row["ci_lo"] > 0.0
+
+
+def test_delong_variance_matches_resampling_persons():
+    """DeLong is the analytic form of what a person-level resample would estimate."""
+    from sklearn.metrics import roc_auc_score
+
+    joined = _scored(n=1500, seed=3)
+    y, p = joined["y_true"].to_numpy(), joined["p_hat"].to_numpy()
+    rng = np.random.default_rng(11)
+    draws = [
+        roc_auc_score(y[idx], p[idx])
+        for idx in (rng.integers(0, len(y), len(y)) for _ in range(300))
+        if len(np.unique(y[idx])) == 2
+    ]
+    assert np.sqrt(ml._delong_var(y, p)) == pytest.approx(np.std(draws, ddof=1), rel=0.15)
+
+
+def test_no_auc_interval_where_delong_carries_no_information():
+    """Every prediction tied, or perfectly separated, leaves DeLong with zero variance.
+
+    A zero-width interval would claim certainty, so the metric is reported with no interval at all
+    rather than a false one — the same treatment ECE gets.
+    """
+    tied = pd.DataFrame({"p_hat": [0.5] * 40, "y_true": [0] * 20 + [1] * 20, "k": 2, "n": 5})
+    assert ml.roc_auc(tied) == pytest.approx(0.5)
+    assert "roc_auc" not in set(ml.score_cis(tied)["metric"])
+
+    separated = pd.DataFrame(
+        {"p_hat": [0.0] * 20 + [1.0] * 20, "y_true": [0] * 20 + [1] * 20, "k": 0, "n": 5}
+    )
+    assert ml.roc_auc(separated) == pytest.approx(1.0)
+    assert "roc_auc" not in set(ml.score_cis(separated)["metric"])
+
+
+def test_level_widens_the_interval():
+    joined = _scored()
+    narrow = ml.score_cis(joined, level=0.80).set_index("metric").loc["mse"]
+    wide = ml.score_cis(joined, level=0.99).set_index("metric").loc["mse"]
+    assert (wide["ci_hi"] - wide["ci_lo"]) > (narrow["ci_hi"] - narrow["ci_lo"])

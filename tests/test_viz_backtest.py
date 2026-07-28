@@ -24,35 +24,40 @@ def _ccf(cohorts, values, complete, seeds=None):
     return frame
 
 
-def test_seed_ci_is_the_standard_error_of_the_across_seed_mean():
-    """The band is mean ± z·sd/√K on the population sd — it shrinks as seeds are added."""
-    values = np.array([[1.0, 2.0, 3.0, 4.0], [2.0, 2.0, 2.0, 2.0], [3.0, 2.0, 1.0, 0.0]])
-    mean, lo, hi = B._seed_ci(values, 0.95)
-    np.testing.assert_allclose(mean, [2.0, 2.0, 2.0, 2.0])
-    half = 1.959963985 * values.std(axis=0, ddof=0) / np.sqrt(3)
-    np.testing.assert_allclose(hi - mean, half)
-    np.testing.assert_allclose(mean - lo, half)
+def test_km_band_adds_sampling_to_monte_carlo():
+    """The band is the total uncertainty in the plotted curve, not just the seed-to-seed part."""
+    surv = np.array([[0.9, 0.5], [0.8, 0.4], [0.7, 0.6]])
+    greenwood = np.full((3, 2), 0.0025)
+    mean, lo, hi = B._km_total_ci(surv, greenwood, 0.95)
+    np.testing.assert_allclose(mean, surv.mean(axis=0))
+    expected = 1.959963985 * np.sqrt(0.0025 + surv.var(axis=0, ddof=1) / 3)
+    np.testing.assert_allclose(hi - mean, expected)
+    np.testing.assert_allclose(mean - lo, expected)
 
 
-def test_seed_ci_matches_the_analytic_aggregate_ccf_standard_error():
-    """The plotted band and ``replicate_variance_aggregate.within_var`` are the same quantity.
+def test_km_band_is_wider_than_the_replicate_only_band():
+    surv = np.array([[0.9, 0.5], [0.8, 0.4], [0.7, 0.6]])
+    _, lo_mc, hi_mc = B._km_total_ci(surv, np.zeros((3, 2)), 0.95)
+    _, lo, hi = B._km_total_ci(surv, np.full((3, 2), 0.0025), 0.95)
+    assert ((hi - lo) > (hi_mc - lo_mc)).all()
 
-    The table computes ``sqrt(Σ_i s²_i/K)/n`` from per-person moments; the figure computes
-    ``sd/√K`` from the K per-seed CCFs. They agree because persons are independent within a seed,
-    which is what makes the two panels' uncertainty comparable at all.
-    """
-    rng = np.random.default_rng(11)
-    n_persons, k_seeds = 500, 20
-    counts = rng.poisson(2.1, size=(n_persons, k_seeds)).astype(float)  # person x seed
 
-    ccf_per_seed = counts.mean(axis=0)  # what the figure sees
-    _, lo, hi = B._seed_ci(ccf_per_seed, 0.95)
-    figure_se = (hi - lo) / 2 / 1.959963985
+def test_km_band_keeps_the_sampling_floor_as_seeds_are_added():
+    """More seeds shrink the Monte-Carlo term only; the same women are re-run every time."""
+    greenwood = 0.0025
+    widths = []
+    for k in (3, 30):
+        surv = np.tile(np.array([[0.9, 0.5]]), (k, 1)) + np.linspace(-0.05, 0.05, k)[:, None]
+        _, lo, hi = B._km_total_ci(surv, np.full((k, 2), greenwood), 0.95)
+        widths.append(float((hi - lo).mean()))
+    assert widths[1] < widths[0]
+    assert widths[1] > 2 * 1.959963985 * np.sqrt(greenwood) * 0.99  # floors at the sampling term
 
-    s2 = counts.var(axis=1, ddof=0)  # what the table sees: per-person moments
-    table_se = np.sqrt(np.sum(s2 / k_seeds)) / n_persons
 
-    assert abs(figure_se / table_se - 1) < 0.15
+def test_km_band_stays_inside_the_unit_interval():
+    surv = np.array([[0.99, 0.02], [0.98, 0.01], [0.97, 0.03]])
+    _, lo, hi = B._km_total_ci(surv, np.full((3, 2), 0.01), 0.95)
+    assert (lo >= 0).all() and (hi <= 1).all()
 
 
 def test_ccf_jumpoff_panel_draws_one_labelled_curve_per_window():
@@ -122,17 +127,6 @@ def test_a_frame_without_a_complete_column_is_treated_as_finished():
     gen = pd.DataFrame({"cohort": [1950, 1960], "ccf": [2.0, 1.9], "seed": [0, 0]})
     _, _, _, complete = B._ccf_band(gen, 0.95)
     assert complete.all()
-
-
-def test_uncertainty_figure_hollows_truncated_cohorts():
-    """A cohort whose life course is unfinished must not read as a finished CCF."""
-    var = _variance([1960, 1965])
-    par = _parity([1960, 1965], [0.1, 0.3, 0.35, 0.2, 0.05])
-    complete = pd.Series([True, False], index=[1960, 1965])
-    fig = B.plot_ccf_inference_vs_outcome(var, par, complete=complete)
-    for ax in fig.axes[:2]:  # both panels carry the same marking
-        _, labels = ax.get_legend_handles_labels()
-        assert any("incomplete" in lb for lb in labels)
 
 
 def test_ccf_band_uses_the_total_variance_when_it_is_supplied():
@@ -230,87 +224,115 @@ def test_ridge_heights_are_within_bin_proportions():
     assert spans[0] == pytest.approx(spans[1])  # same shape, 10x the people
 
 
-def _parity(cohorts, shares, n_women_total=500, suppressed=None):
-    """A parity_distribution-shaped frame: one row per (cohort, parity)."""
-    rows = []
-    for c in cohorts:
-        for k, share in enumerate(shares):
-            rows.append(
-                {
-                    "cohort": c,
-                    "parity": k,
-                    "n_replicates": share * n_women_total,
-                    "n_women_equiv": share * n_women_total,
-                    "share": share,
-                    "n_women_total": n_women_total,
-                    "suppressed": bool(suppressed[k]) if suppressed else False,
-                }
-            )
+
+
+# =================================================================================================
+# PPR / ASFR overlays
+# =================================================================================================
+def _seeded(rows: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _variance(cohorts, ccf=2.0, total_var=0.0004):
-    return pd.DataFrame(
-        {"cohort": cohorts, "n_women": 500, "ccf": ccf, "within_var": total_var / 2,
-         "between_var": total_var / 2, "total_var": total_var}
+def test_total_band_adds_sampling_to_monte_carlo():
+    """The keyed-frame band is the same two terms `_km_total_ci` adds on a sampled curve."""
+    gen = _seeded([
+        {"seed": s, "parity_from": 0, "ppr": p, "ppr_var": 0.0009}
+        for s, p in zip((0, 1, 2), (0.60, 0.66, 0.72), strict=True)
+    ])
+    cells, mean, half = B._total_band(
+        gen, value="ppr", var="ppr_var", by=["parity_from"], level=0.95
     )
+    assert list(cells) == [0]
+    np.testing.assert_allclose(mean, [0.66])
+    mc = np.var([0.60, 0.66, 0.72], ddof=1) / 3
+    np.testing.assert_allclose(half, [1.959963985 * np.sqrt(0.0009 + mc)])
 
 
-def test_inference_panel_is_a_magnification_of_the_outcome_panel():
-    """The left panel zooms the band the right panel shades — same units, different range."""
-    fig = B.plot_ccf_inference_vs_outcome(
-        _variance([1960, 1965]), _parity([1960, 1965], [0.1, 0.3, 0.35, 0.2, 0.05])
+def test_total_band_is_wider_than_the_replicate_only_band():
+    rows = [{"seed": s, "parity_from": 0, "ppr": p} for s, p in enumerate((0.6, 0.66, 0.72))]
+    _, _, mc_only = B._total_band(
+        pd.DataFrame(rows), value="ppr", var="ppr_var", by=["parity_from"], level=0.95
     )
-    inf_lo, inf_hi = fig.axes[0].get_ylim()
-    out_lo, out_hi = fig.axes[1].get_ylim()
-    assert out_lo < inf_lo and inf_hi < out_hi
-    assert (inf_hi - inf_lo) < (out_hi - out_lo) / 5  # the point is that it is far narrower
-
-
-def test_the_interval_is_never_rescaled_to_be_visible():
-    """Both panels draw the true ±z·sqrt(total_var); its invisibility on the right is the point."""
-    total_var = 0.0004
-    fig = B.plot_ccf_inference_vs_outcome(
-        _variance([1960], total_var=total_var), _parity([1960], [0.1, 0.3, 0.35, 0.2, 0.05])
+    _, _, total = B._total_band(
+        pd.DataFrame(rows).assign(ppr_var=0.0009),
+        value="ppr", var="ppr_var", by=["parity_from"], level=0.95,
     )
-    expected = 1.959963985 * np.sqrt(total_var)
-    for ax in fig.axes[:2]:
-        bars = [c for c in ax.containers if hasattr(c, "errorbar") or hasattr(c, "lines")]
-        segs = [s for c in bars for s in (c.lines[2] if getattr(c, "lines", None) else [])]
-        spans = [seg.get_segments()[0] for seg in segs if seg.get_segments()]
-        assert spans, "no error bar drawn"
-        lo, hi = spans[0][0][1], spans[0][1][1]
-        assert (hi - lo) / 2 == pytest.approx(expected, rel=1e-9)
+    assert (total > mc_only).all()
 
 
-def test_parity_bars_sit_at_integer_parities_with_a_top_coded_last_tick():
-    fig = B.plot_ccf_inference_vs_outcome(
-        _variance([1960]), _parity([1960], [0.1, 0.3, 0.35, 0.2, 0.05])
-    )
-    ax = fig.axes[1]
-    assert list(ax.get_yticks()) == [0, 1, 2, 3, 4]
-    assert [t.get_text() for t in ax.get_yticklabels()][-1] == "4+"
+def test_total_band_keeps_the_sampling_term_with_a_single_seed():
+    """One seed leaves no across-seed variance to estimate, but the cell is still uncertain."""
+    gen = pd.DataFrame([{"seed": 0, "parity_from": 0, "ppr": 0.5, "ppr_var": 0.0025}])
+    _, _, half = B._total_band(gen, value="ppr", var="ppr_var", by=["parity_from"], level=0.95)
+    np.testing.assert_allclose(half, [1.959963985 * np.sqrt(0.0025)])
 
 
-def test_bar_width_tracks_the_share():
-    fig = B.plot_ccf_inference_vs_outcome(
-        _variance([1960]), _parity([1960], [0.1, 0.2, 0.4, 0.2, 0.1])
-    )
-    widths = [p.get_width() for p in fig.axes[1].patches]
-    assert widths[2] == pytest.approx(2 * widths[1])  # twice the share, twice the bar
+def _ppr_frames():
+    obs = pd.DataFrame({
+        "parity_from": [0, 1, 2], "parity_to": [1, 2, 3],
+        "ppr": [0.9, 0.6, 0.3], "n_at_risk": [100, 90, 54],
+        "ppr_var": [0.0009, 0.0027, 0.0039],
+    })
+    gen = pd.concat([
+        obs.assign(seed=s, ppr=obs["ppr"] + shift)
+        for s, shift in enumerate((-0.02, 0.0, 0.02))
+    ], ignore_index=True)
+    return obs, gen
 
 
-def test_withheld_parities_are_hatched_rather_than_absent():
-    fig = B.plot_ccf_inference_vs_outcome(
-        _variance([1960]),
-        _parity([1960], [0.1, 0.3, 0.35, 0.2, np.nan], suppressed=[0, 0, 0, 0, 1]),
-    )
-    hatched = [p for p in fig.axes[1].patches if p.get_hatch()]
-    assert len(hatched) == 1 and hatched[0].get_width() > 0
+def test_ppr_overlay_draws_the_band_mean_it_computed():
+    obs, gen = _ppr_frames()
+    fig = B.plot_ppr_overlay(obs, gen, level=0.95)
+    ax = fig.axes[0]
+    _, mean, half = B._total_band(gen, value="ppr", var="ppr_var", by=["parity_from"], level=0.95)
+    # the errorbar container's centre line carries the across-seed mean; observed is a plain line
+    lines = {tuple(np.round(ln.get_ydata(), 6)) for ln in ax.get_lines()}
+    assert tuple(np.round(mean, 6)) in lines
+    assert tuple(np.round(obs["ppr"].to_numpy(), 6)) in lines
+    assert half[2] > half[0]  # thinner denominator at the later transition -> wider interval
 
 
-def test_uncertainty_figure_needs_only_aggregate_frames():
-    """Neither layer touches a per-person row, which is what makes the figure publishable."""
-    var, par = _variance([1960, 1965]), _parity([1960, 1965], [0.2, 0.3, 0.3, 0.15, 0.05])
-    assert "person_id" not in var.columns and "person_id" not in par.columns
-    assert len(B.plot_ccf_inference_vs_outcome(var, par).axes) >= 2
+def test_ppr_overlay_labels_transitions_not_bare_parities():
+    obs, gen = _ppr_frames()
+    fig = B.plot_ppr_overlay(obs, gen)
+    labels = [t.get_text() for t in fig.axes[0].get_xticklabels()]
+    assert labels == ["0→1", "1→2", "2→3"]
+
+
+def _asfr_frames(cohorts=(1960, 1965)):
+    ages = [20.0, 25.0, 30.0]
+    obs = pd.DataFrame([
+        {"cohort": c, "age_bin": a, "asfr": 0.1, "person_years": 500.0,
+         "births": 50, "asfr_var": 0.0002}
+        for c in cohorts for a in ages
+    ])
+    gen = pd.concat([obs.assign(seed=s) for s in range(3)], ignore_index=True)
+    return obs, gen
+
+
+def test_asfr_overlay_draws_one_visible_panel_per_cohort():
+    obs, gen = _asfr_frames(cohorts=(1960, 1965, 1970, 1975))
+    fig = B.plot_asfr_overlay(obs, gen, jumpoff_days=yd(25))
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    assert len(visible) == 4
+    assert [ax.get_title(loc="left") for ax in visible] == [
+        "cohort 1960", "cohort 1965", "cohort 1970", "cohort 1975"
+    ]
+
+
+def test_asfr_overlay_marks_the_jumpoff_age_in_every_panel():
+    """The jump-off is an age, so the same rule applies to every cohort's panel."""
+    obs, gen = _asfr_frames()
+    fig = B.plot_asfr_overlay(obs, gen, jumpoff_days=yd(30))
+    for ax in [a for a in fig.axes if a.get_visible()]:
+        rules = [ln for ln in ax.get_lines() if ln.get_linestyle() == ":"]
+        assert [round(float(ln.get_xdata()[0])) for ln in rules] == [30]
+
+
+def test_asfr_jumpoff_panel_marks_each_jumpoff_in_its_own_colour():
+    obs, gen = _asfr_frames()
+    fig = B.plot_asfr_jumpoff_panel(obs, {yd(25): gen, yd(30): gen})
+    ax = [a for a in fig.axes if a.get_visible()][0]
+    rules = [ln for ln in ax.get_lines() if ln.get_linestyle() == ":"]
+    assert sorted(round(float(ln.get_xdata()[0])) for ln in rules) == [25, 30]
+    assert len({tuple(ln.get_color()) for ln in rules}) == 2

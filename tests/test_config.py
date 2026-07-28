@@ -246,8 +246,6 @@ def test_resolve_replicates_passthrough():
     cfg = C.load_config(_REF)
     spec = C.resolve_replicates(cfg)
     assert spec.interval == "jeffreys"
-    assert spec.bootstrap_n == 200
-    assert spec.bootstrap_seed == 7
 
 
 def test_resolve_rules_smoke():
@@ -297,3 +295,40 @@ def test_publication_policy_changes_the_config_hash():
     d = _ref_dict()
     d["output"] = {"individual_level": False}
     assert C.Config.model_validate(d).hash() != base
+
+
+def test_period_asfr_is_not_a_backtest_target():
+    """A (year, age) cell is part observed and part forecast, so it has no honest comparison.
+
+    The jump-off is an age: cohort-indexed cells fall wholly on one side of it, calendar-year cells
+    do not. Rejected at parse time rather than raising deep in the arm.
+    """
+    d = _ref_dict()
+    d["arms"]["backtesting"]["aggregate_targets"] = ["asfr_period"]
+    with pytest.raises(ValidationError, match="unknown aggregate target"):
+        C.Config.model_validate(d)
+
+    d["arms"]["backtesting"]["aggregate_targets"] = ["asfr_cohort"]
+    assert C.Config.model_validate(d).arms.backtesting.aggregate_targets == ["asfr_cohort"]
+
+
+def test_fertility_grid_follows_the_descriptives_settings():
+    """Backtesting bins fertility the way descriptives does, so the two figures are comparable."""
+    d = _ref_dict()
+    d["arms"]["descriptives"]["fertility"] = {
+        "ccf": True, "asfr": ["cohort"], "ppr": {"max_parity": 3}, "age_bin_width": 5.0,
+    }
+    grid = C.resolve_fertility_grid(C.Config.model_validate(d))
+    assert (grid.max_parity, grid.age_bin_width) == (3, 5.0)
+
+
+def test_fertility_grid_falls_back_when_descriptives_says_nothing():
+    """No descriptives block (or no ppr block) is not an error; the defaults still bin."""
+    d = _ref_dict()
+    d["arms"].pop("descriptives", None)
+    assert C.resolve_fertility_grid(C.Config.model_validate(d)) == C.FertilityGrid()
+
+    d = _ref_dict()
+    d["arms"]["descriptives"]["fertility"] = {"ccf": True, "asfr": ["cohort"]}
+    grid = C.resolve_fertility_grid(C.Config.model_validate(d))
+    assert grid.max_parity == C.FertilityGrid().max_parity

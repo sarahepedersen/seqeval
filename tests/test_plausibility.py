@@ -85,16 +85,25 @@ def test_max_count_flags_excess():
     assert list(v["age"]) == [yd(30), yd(35)]  # 3rd and 4th births
 
 
-def test_violation_rates_denominators():
+def test_violation_rates_denominator_is_the_governed_event():
+    """The rate is a share of the events the rule applies to, so it stays inside [0, 1]."""
     df = _frame([(1, "birth", 11), (1, "birth", 25), (2, "birth", 52), (2, "birth", 30)])
     rules = [Rule("young", "birth", min_age=yd(12)), Rule("old", "birth", max_age=yd(50))]
     v = P.check_rules(df, KEYS, rules)
     rates = P.violation_rates(v, df, KEYS, by=()).set_index("rule")
-    # 2 groups, 4 birth events; each rule fires once
-    assert rates.loc["young", "n_groups"] == 2
+    # 4 birth events; each rule fires once
     assert rates.loc["young", "n_events"] == 4
-    assert rates.loc["young", "rate_per_group"] == pytest.approx(0.5)
     assert rates.loc["young", "rate_per_event"] == pytest.approx(0.25)
+    assert "n_groups" not in rates.columns and "rate_per_group" not in rates.columns
+
+
+def test_violation_rates_stay_bounded_when_one_sequence_offends_repeatedly():
+    """Counting per event row means a rate per *sequence* could exceed 1; per event cannot."""
+    df = _frame([(1, "birth", 11), (1, "birth", 11), (1, "birth", 11), (2, "birth", 30)])
+    v = P.check_rules(df, KEYS, [Rule("young", "birth", min_age=yd(12))])
+    rates = P.violation_rates(v, df, KEYS, by=()).set_index("rule")
+    assert rates.loc["young", "n_violations"] == 3  # one sequence, three offending births
+    assert rates.loc["young", "rate_per_event"] == pytest.approx(0.75)  # 3 of 4 births
 
 
 def test_violation_rates_by_seed():

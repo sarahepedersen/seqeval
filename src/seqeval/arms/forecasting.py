@@ -50,8 +50,8 @@ def run(
     """Run the forecasting arm; write Lexis surfaces, violations, and replicate-variance tables.
 
     ``outcomes``/``rules``/``replicate_spec`` are the resolved objects from ``config.resolve_*``
-    (passed in, like the other arms). Writes both period and cohort Lexis surfaces
-    (``lexis_{observed,forecast,combined}`` and ``lexis_cohort_{...}``), ``violations``,
+    (passed in, like the other arms). Writes the cohort Lexis surface
+    (``lexis_cohort_{observed,forecast,combined}``), ``violations``,
     ``violation_rates`` and ``replicate_variance_{individual,aggregate}`` tables plus figures.
     """
     if bundle.generated is None:
@@ -109,45 +109,41 @@ def _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width) -> 
     gen_b = births(combined_seq, GEN_KEYS, birth_event=target)
     gen_spans = observation_spans(combined_seq, GEN_KEYS)
 
-    # Both bases: period (year x age) and cohort (birth-cohort x age).
-    for basis, dim in (("period", "year"), ("cohort", "cohort")):
-        prefix = "lexis" if basis == "period" else "lexis_cohort"
-        obs_surface = fe.lexis_surface(
-            obs_b,
-            obs_spans,
-            persons,
-            occurrence=occurrence,
-            bins=bins,
-            year_range=year_range,
-            extra_by=tuple(subgroup),
-            basis=basis,
-            cohort_width=cohort_width,
-        )
-        fc_by_seed = fe.lexis_surface(
-            gen_b,
-            gen_spans,
-            persons,
-            occurrence=occurrence,
-            bins=bins,
-            year_range=year_range,
-            extra_by=("seed", *subgroup),
-            basis=basis,
-            cohort_width=cohort_width,
-        )
-        combined = _combine_surfaces(obs_surface, fc_by_seed, dim, subgroup)
+    # Cohort basis only (birth-cohort x age). The jump-off is an age, so a cohort-indexed cell is
+    # wholly observed or wholly forecast; a calendar-year cell is neither, and the forecast region
+    # in period space starts at a different year for every cohort.
+    prefix, basis, dim = "lexis_cohort", "cohort", "cohort"
+    obs_surface = fe.lexis_surface(
+        obs_b,
+        obs_spans,
+        persons,
+        occurrence=occurrence,
+        bins=bins,
+        year_range=year_range,
+        extra_by=tuple(subgroup),
+        basis=basis,
+        cohort_width=cohort_width,
+    )
+    fc_by_seed = fe.lexis_surface(
+        gen_b,
+        gen_spans,
+        persons,
+        occurrence=occurrence,
+        bins=bins,
+        year_range=year_range,
+        extra_by=("seed", *subgroup),
+        basis=basis,
+        cohort_width=cohort_width,
+    )
+    combined = _combine_surfaces(obs_surface, fc_by_seed, dim, subgroup)
 
-        out.frame(f"{prefix}_observed", obs_surface)
-        out.frame(f"{prefix}_forecast", fc_by_seed)
-        out.frame(f"{prefix}_combined", combined)
-        out.figure(
-            f"{prefix}_combined",
-            viz_lexis.plot_lexis(combined, dim=dim, mark_forecast=True, outcome=lex.outcome),
-        )
-        if fc_by_seed["seed"].nunique() > 1:
-            out.figure(
-                f"{prefix}_uncertainty",
-                viz_lexis.plot_lexis_uncertainty(fc_by_seed, dim=dim, outcome=lex.outcome),
-            )
+    out.frame(f"{prefix}_observed", obs_surface)
+    out.frame(f"{prefix}_forecast", fc_by_seed)
+    out.frame(f"{prefix}_combined", combined)
+    out.figure(
+        f"{prefix}_combined",
+        viz_lexis.plot_lexis(combined, dim=dim, mark_forecast=True, outcome=lex.outcome),
+    )
 
 
 def _combine_surfaces(observed_surface, forecast_by_seed, dim, subgroup) -> pd.DataFrame:

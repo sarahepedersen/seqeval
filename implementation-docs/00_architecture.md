@@ -46,7 +46,7 @@ fertility-eval/
 │   │   ├── outcomes.py       # sequences → analysis tables (births, spans, exposure, TTE,
 │   │   │                     #   framed/count outcome evaluation)
 │   │   └── replicates.py     # empirical probabilities from seeds, MC-error correction,
-│   │                         #   predictive distributions, seed bootstrap (plan 02b)
+│   │                         #   predictive distributions, variance components (plan 02b)
 │   ├── metrics/
 │   │   ├── survival.py       # life tables, Kaplan-Meier
 │   │   ├── fertility.py      # CCF, ASFR (period & cohort), PPR
@@ -114,7 +114,7 @@ system as actually used. Conventions that follow from this:
 - **Estimation is strictly per run — never pooled.** A run's probability estimate uses only
   that run's replicates; no shrinkage or borrowing strength across runs or persons. The
   purpose of empirical probabilities is to measure across-replicate variance for an individual
-  sequence. Cross-run computation (calibration binning, bootstraps) happens downstream on the per-run 
+  sequence. Cross-run computation (calibration binning, scoring) happens downstream on the per-run 
   table, never inside estimation.
 - **Monte-Carlo error is quantified and corrected, never ignored**: few seeds inflate Brier by
   a computable amount (corrected score reported alongside raw), and reliability diagrams carry
@@ -263,8 +263,6 @@ replicates:                              # how seed-stochasticity becomes probab
   interval: jeffreys                     #   plan 02b). jeffreys | wilson
   level: 0.95
   min_replicates: 5                      # warn below this (probability grid coarser than 0.2)
-  bootstrap: {n: 200, seed: 7}           # seed-bootstrap CIs on aggregate metrics; n: 0 = off
-  convergence_curve: true                # metric-vs-n-seeds diagnostics
 
 outcomes:                                # TIMING registry: sequence-intrinsic, context-free
   first_birth:  {event: birth, n: 1}     # time of 1st occurrence, from birth of person

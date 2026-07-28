@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from seqeval.core.specs import (
     Condition,
     CountQuery,
+    FertilityGrid,
     Frame,
     FramedOutcome,
     ReplicateSpec,
@@ -43,7 +44,7 @@ from seqeval.units import years_to_days
 logger = logging.getLogger("seqeval")
 
 # fertiity-specific --> require 'birth' token in sequence
-FERTILITY_TARGETS = {"ccf", "asfr_period", "asfr_cohort", "ppr"}
+FERTILITY_TARGETS = {"ccf", "asfr_cohort", "ppr"}
 
 # require `persons` table (exposure denominators)
 FERTILITY_TARGETS_NEEDING_PERSONS = FERTILITY_TARGETS - {"ppr"}
@@ -122,20 +123,12 @@ class PersonsConfig(_Strict):
     cohort_width: int = DEFAULT_COHORT_WIDTH
 
 
-class BootstrapConfig(_Strict):
-    """``replicates.bootstrap`` — seed-bootstrap settings; ``n: 0`` disables."""
-
-    n: int = 200
-    seed: int = 7
-
-
 class ReplicatesConfig(_Strict):
     """``replicates:`` block — how seed-stochasticity becomes probability (00 section 3b)."""
 
     interval: Literal["jeffreys", "wilson"] = "jeffreys"
     level: float = 0.95
     min_replicates: int = 5
-    bootstrap: BootstrapConfig = BootstrapConfig()
 
 
 class TimingOutcomeConfig(_Strict):
@@ -263,11 +256,18 @@ class FertilityConfig(_Strict):
 
 
 class DescriptivesConfig(_Strict):
-    """``arms.descriptives`` block (past/observed)."""
+    """``arms.descriptives`` block (past/observed).
+
+    ``max_cohort_year`` drops people born after that year from *every* descriptive metric, not just
+    from the cohort-indexed ones. The youngest cohorts are observed for only a few years, so their
+    rates rest on a handful of person-years and read as jagged noise; excluding the people rather
+    than trimming the plots keeps period and cohort metrics describing one population.
+    """
 
     kaplan_meier: list[str] = []
     fertility: FertilityConfig | None = None
     stratify_by: list[str] = []
+    max_cohort_year: int | None = None
 
 
 class BacktestingConfig(_Strict):
@@ -656,8 +656,25 @@ def resolve_replicates(cfg: Config) -> ReplicateSpec:
         interval=rc.interval,
         level=rc.level,
         min_replicates=rc.min_replicates,
-        bootstrap_n=rc.bootstrap.n,
-        bootstrap_seed=rc.bootstrap.seed,
+    )
+
+
+def resolve_fertility_grid(cfg: Config) -> FertilityGrid:
+    """Cell geometry for the fertility aggregates, read off the descriptives fertility block.
+
+    Backtesting bins the same quantities descriptives does, and the two end up beside each other in
+    the report, so they share one grid rather than each carrying its own constants. Anything the
+    descriptives block does not set (or the whole block being absent) falls back to
+    :class:`~seqeval.core.specs.FertilityGrid`'s defaults — there is no separate backtesting key to
+    set, by design.
+    """
+    fert = cfg.arms.descriptives.fertility if cfg.arms.descriptives else None
+    if fert is None:
+        return FertilityGrid()
+    defaults = FertilityGrid()
+    return FertilityGrid(
+        max_parity=fert.ppr.max_parity if fert.ppr else defaults.max_parity,
+        age_bin_width=fert.age_bin_width,
     )
 
 

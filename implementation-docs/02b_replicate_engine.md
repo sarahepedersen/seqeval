@@ -61,8 +61,7 @@ def estimate_probability(summary, *, spec: ReplicateSpec) -> pd.DataFrame
 ```
 
 `ReplicateSpec` (frozen dataclass in `core/specs.py`, resolved from the top-level `replicates:`
-config block; add to 00a): `interval`, `level`, `min_replicates`, `bootstrap_n`,
-`bootstrap_seed`, `convergence_curve: bool`.
+config block; add to 00a): `interval`, `level`, `min_replicates`.
 
 `RUN_KEYS = ["person_id", "age_start", "age_stop"]` — GEN_KEYS minus seed; define next to the
 other key constants.
@@ -116,27 +115,24 @@ def auc_tie_note()
     # use rank-based AUC with tie correction (scipy) and record grid resolution alongside.
 ```
 
-## 4. Resampling over the replicate dimension
+## 4. Variance components over the replicate dimension
 
-Generic machinery that turns *any* aggregate metric into one with uncertainty:
+Generic machinery that turns per-individual moments into an aggregate's uncertainty:
 
 ```python
-def seed_bootstrap(df, *, seed_col, stat_fn: Callable[[pd.DataFrame], pd.DataFrame],
-                   n_boot, rng) -> pd.DataFrame
-    # resample seed labels with replacement (within each window), apply stat_fn (e.g. 03's ccf
-    # with extra_by, or 04's aggregate_error), return percentile CIs per output cell.
-    # Captures MC (replicate) uncertainty ONLY — document that population sampling uncertainty
-    # would need a person-level cluster bootstrap (out of scope v1, note the extension point).
+def count_moments(count_table, *, run_keys, seed_col) -> pd.DataFrame
+    # per individual: predictive mean, replicate variance (ddof=0), replicate count k.
 
-def convergence_curve(df, *, seed_col, stat_fn, sizes: list[int] | None, n_rep, rng)
-    # subsample m seeds without replacement for m in sizes (default: 2..n), recompute stat_fn,
-    # return dispersion vs m. THE actionable diagnostic: since inference is upstream, "your
-    # AUC estimate has not stabilized at 10 seeds" tells the researcher to go generate more
-    # replicates — the framework's version of a power analysis.
+def mean_variance_components(mu, s2, k) -> dict
+    # variance of mean_i(mu_i), split by source and stated in variance units of that mean:
+    #   within_var = sum_i s2_i/k_i / n**2      seeds
+    #   total_var  = var_i(mu_i, ddof=1) / n    every source at once (each mu_i carries seed noise)
+    #   between_var = total_var - within_var    population heterogeneity, floored at 0
 ```
 
-Both must be implemented as groupby-over-precomputed-replicate-tables, never re-running outcome
-evaluation per bootstrap draw (evaluate once per replicate; resample the rows).
+Analytic throughout — no resampling anywhere in the engine. An aggregate's band is
+`z*sqrt(total_var)`; the replicate-only component stays available as `within_var` for callers that
+want to say how much of the uncertainty the seeds account for.
 
 ## 5. Relationship to consumers
 
@@ -145,11 +141,11 @@ evaluation per bootstrap draw (evaluate once per replicate; resample the rows).
   `[model, window..., outcome, condition, person_id, k, n, p_hat, logit_emp, ci_lo, ci_hi]` as
   a first-class artifact (researchers will regress on these), then calibration (with null
   band), AUC (tie-corrected), Brier raw + corrected, log-loss on smoothed p̂, timing interval
-  coverage; bootstrap CIs on all `aggregate_error` cells; convergence curves when configured.
+  coverage; analytic per-person CIs on the scores via `ml.score_cis`.
 - **05 (seed stability)** is reframed as views over this engine: individual-level occurrence
   disagreement IS `p_hat(1−p_hat)` (report as such); timing dispersion comes from
   `timing_distribution` quantile spreads; aggregate forecast uncertainty (CCF bands, Lexis
-  IQR maps) comes from `seed_bootstrap`. No duplicate statistics code in 05.
+  IQR maps) comes from `mean_variance_components`. No duplicate statistics code in 05.
 - **06 (validate/report)**: validate prints replicates-per-window and flags windows below
   `min_replicates` with a plain-language note of what that implies (probability grid width,
   finest meaningful calibration bin). `null_calibration_band` remains available as a statistic
@@ -167,9 +163,9 @@ evaluation per bootstrap draw (evaluate once per replicate; resample the rows).
 - Miscalibrated model (`perturb(hazards, 1.5)`): calibration curve exits the null band in the
   expected direction — the band flags real miscalibration, not noise.
 - Timing coverage: perfect model → (q10, q90) coverage ≈ 0.8 (loose tolerance, documented).
-- `seed_bootstrap` CI on synthetic CCF covers the converged `expected_ccf` at nominal rate
-  across repeated simulations (small repetition count, sanity not certification).
-- Convergence curve monotone-in-expectation dispersion decrease; ragged-n and n==0 handling.
+- `mean_variance_components` on synthetic CCF: `within_var + between_var == total_var`, and the
+  `z*sqrt(within_var)` band covers the converged `expected_ccf`.
+- Ragged-n and n==0 handling.
 
 ## 7. Appendix: probability specification (reproduce as module docstring material)
 
@@ -191,7 +187,8 @@ binning, bootstraps), never inside estimation.
 replicate data cannot express probabilities more extreme than ≈ 1/(2n+2) from the boundary —
 n=5 → |logit| ≤ 2.40 (p ∈ ~[0.08, 0.92]); n=50 → 4.62 (~[0.01, 0.99]); n=200 → 6.00. Rare
 outcomes at small n saturate `logit_emp` (heavy shrinkage toward zero log-odds); the
-convergence curve (§4) is how a researcher discovers they need more replicates.
+a p_hat that has not stabilized as replicates accumulate is how a researcher discovers they
+need more.
 
 **Informative censoring guard:** spans always derive from the last age in the data (00 §4.2)
 — one path, no overrides. On models with stochastic sequence length, event-sparse replicates

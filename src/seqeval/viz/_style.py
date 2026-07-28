@@ -13,6 +13,9 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.figure import Figure
 
+#: Nominal coverage for every interval a figure draws, unless the caller says otherwise.
+DEFAULT_LEVEL = 0.95
+
 FIGSIZE = (7.0, 4.5)
 _CMAP = plt.get_cmap("viridis")
 

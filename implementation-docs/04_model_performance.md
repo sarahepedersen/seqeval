@@ -5,7 +5,8 @@
 > built on the empirical probabilities/logits from `core/replicates.py`, and the backtesting
 > harness that sweeps jump-off points, prediction horizons, and count conditioning, reusing the
 > metric functions from 03 unchanged. This module contains NO probability-estimation statistics
-> of its own — point estimates, intervals, MC-error corrections, and bootstraps all come from 02b.
+> of its own — point estimates, intervals, and MC-error corrections all come from 02b; the
+> analytic score intervals live in `score_cis`.
 
 ## Deliverables
 
@@ -63,7 +64,7 @@ def aggregate_error(gen_metric: pd.DataFrame, obs_metric: pd.DataFrame, *,
     # generic comparator for any 03 metric table (CCF by cohort, ASFR by cell, PPR by parity,
     # KM at fixed times): aligns on `on`, computes per-seed error, then per-window summary:
     # [window keys, *on, obs, gen_mean, gen_sd_over_seeds, bias, mae, rmse]
-    # CIs on every cell via replicates.seed_bootstrap when spec.bootstrap_n > 0.
+    # Analytic per-person CIs on every scored cell via ml.score_cis.
 ```
 
 This single function is how "MSE of downstream fertility and time-to-event metrics" (spec §3.2)
@@ -136,14 +137,12 @@ For each configured window:
    (for framed outcomes) timing interval coverage via `timing_distribution`, per
    (window, outcome, condition).
 5. Compute configured aggregate metrics on generated (with `extra_by=GEN_KEYS` window/seed keys)
-   and observed (03 functions unchanged); run `aggregate_error` with seed-bootstrap CIs.
+   and observed (03 functions unchanged); run `aggregate_error`.
    Aggregate targets may also be crossed with conditions (e.g. `km:second_birth` under `p1`
    answers "given parity 1 at t2, is the time to the next birth easier to predict than the
    time to a first?").
-6. When `spec.convergence_curve`: run `replicates.convergence_curve` for ECE, AUC, and Brier
-   per (window, outcome) → `convergence.parquet` (consumed by the report, 06).
-7. Write per-window and pooled tables: `results/backtesting/{probabilities,calibration,scores,
-   aggregate_error,convergence,coverage}.parquet` — every table carries the `model` column
+6. Write per-window and pooled tables: `results/backtesting/{probabilities,calibration,scores,
+   aggregate_error,coverage}.parquet` — every table carries the `model` column
    (OutputWriter stamps it). `coverage` records, per (window, outcome, condition) cell:
    n_persons evaluable, n excluded by condition, n excluded as settled-at-jump-off, and the
    replicate-count distribution (min/median/max n). Shrinking evaluable sets and thin replicate
@@ -161,9 +160,8 @@ Axes in years (`days_to_years` at plot time, per 00 §3).
 
 - `viz/calibration.py`: reliability diagrams with the **null calibration band** (02b) shaded,
   diagonal reference, histogram of p_hat underneath (one panel per window/outcome); a
-  convergence-curve panel (metric vs n_seeds) when computed.
 - `viz/backtest.py`: (a) metric-vs-jump-off-age lines (x = age_stop in years, y =
-  AUC/corrected-Brier/RMSE with bootstrap CI bands, one line per outcome); (b) observed vs
+  AUC/corrected-Brier/RMSE with analytic CI bands, one line per outcome); (b) observed vs
   generated overlay plots reusing 03 viz (KM curves with generated seed-band: median + IQR
   across seeds).
 
@@ -182,7 +180,7 @@ arm.)
   exits the band with systematic over-prediction (p_mean > y_rate in top bins) — assert the
   sign, not exact values.
 - `aggregate_error` on tiny fixtures: exact bias/rmse; alignment failure (mismatched `on`
-  values) raises; bootstrap CI columns present when enabled.
+  values) raises; every score CI brackets its own point estimate.
 - Conditioning: constructed case where a condition evaluated on observed data at t2 changes the
   evaluable set identically on generated and truth sides; a run whose framed outcome is settled
   at t2 appears in `coverage` as excluded and in no metric.

@@ -89,7 +89,9 @@ class OutputWriter:
         return path
 
     def withhold(self, name: str) -> None:
-        """Record an output the caller suppressed itself, so the manifest still names it. (used for suppressing individual-level output)
+        """Record an output the caller suppressed itself, so the manifest still names it.
+
+        Used for suppressing individual-level output that is skipped before it is built.
         """
         if name not in self.skipped:
             # Debug, not a warning: withholding is what the run was asked to do. The manifest's

@@ -28,7 +28,6 @@ replicates:
   interval: jeffreys
   level: 0.95
   min_replicates: 3              # >= your export n_seeds is ideal; lower for a smoke test
-  bootstrap: {n: 200, seed: 7}
 
 outcomes:
   first_birth:  {event: birth, n: 1}

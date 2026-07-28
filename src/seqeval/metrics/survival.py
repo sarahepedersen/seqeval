@@ -42,6 +42,10 @@ def _km_one(dur: np.ndarray, obs: np.ndarray, z: float) -> pd.DataFrame:
             "n_at_risk": n_at_risk.astype(np.int64),
             "n_events": d.astype(np.int64),
             "survival": surv,
+            # Greenwood variance of S(t) itself, on the survival scale rather than the log-log one
+            # the CIs use — what a caller needs to combine this curve's sampling error with any
+            # other variance component.
+            "greenwood_var": np.where(np.isfinite(cum_v), surv**2 * cum_v, np.nan),
             "ci_lo": ci_lo,
             "ci_hi": ci_hi,
         }
@@ -51,10 +55,12 @@ def _km_one(dur: np.ndarray, obs: np.ndarray, z: float) -> pd.DataFrame:
 def kaplan_meier(tte: pd.DataFrame, *, by: list[str] = ()) -> pd.DataFrame:
     """Product-limit survival curve from a :func:`time_to_event` table (durations in days).
 
-    Returns ``[*by, time, n_at_risk, n_events, survival, ci_lo, ci_hi]`` with ``time`` in days.
-    ``by`` stratifies (cohort bins, ``sex``, or ``seed``/window for generated data); with no ``by``
-    the whole table is one curve. Confidence intervals use the Greenwood variance on the
-    complementary log-log scale (valid for ``0 < S < 1``; ``NaN`` at the boundaries).
+    Returns ``[*by, time, n_at_risk, n_events, survival, greenwood_var, ci_lo, ci_hi]`` with
+    ``time`` in days. ``by`` stratifies (cohort bins, ``sex``, or ``seed``/window for generated
+    data); with no ``by`` the whole table is one curve. Confidence intervals use the Greenwood
+    variance on the complementary log-log scale (valid for ``0 < S < 1``; ``NaN`` at the
+    boundaries); ``greenwood_var`` is that variance on the survival scale, for callers combining it
+    with other variance components.
     """
     by = list(by)
     z = norm.ppf(0.975)

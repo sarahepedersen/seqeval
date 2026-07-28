@@ -130,3 +130,35 @@ def test_sha256_file_stable(tmp_path):
     p.write_bytes(b"seqeval")
     assert report.sha256_file(p) == report.sha256_file(p)
     assert len(report.sha256_file(p)) == 64
+
+
+def test_metrics_table_carries_ece_without_an_interval(demo_config, tmp_path):
+    """ECE is the number the reliability diagrams draw, so it belongs in the headline table.
+
+    It is the one metric with no defensible closed-form interval, so it renders bare while the
+    others carry parentheses — and the note says why.
+    """
+    results = _run(demo_config, tmp_path / "results")
+    html = (results / report.REPORT_NAME).read_text()
+    section = html.split('<h2 id="backtesting"')[1].split('<h2 id="forecasting"')[0]
+    assert "<th>ECE</th>" in section
+    assert "ECE has no CI" in section
+
+    scores = pd.read_parquet(results / "backtesting" / "scores.parquet")
+    ece = scores[scores["metric"] == "ece"]
+    assert len(ece) and ece["ci_lo"].isna().all()
+    # the value itself is rendered somewhere in the table
+    assert f"{ece['value'].iloc[0]:.3f}" in section
+
+
+def test_aggregate_error_table_summarizes_every_target(demo_config, tmp_path):
+    """The aggregate targets are scored, so the report says how far off they were."""
+    results = _run(demo_config, tmp_path / "results")
+    html_out = (results / report.REPORT_NAME).read_text()
+    section = html_out.split('<h2 id="backtesting"')[1].split('<h2 id="forecasting"')[0]
+    assert 'id="aggregate-error"' in section
+    err = pd.read_parquet(results / "backtesting" / "aggregate_error.parquet")
+    for target in sorted(err["target"].unique()):
+        assert f"<td>{target}</td>" in section
+    # one row per (target, jump-off), not one per cell
+    assert section.count("<td>ccf</td>") == err.loc[err["target"] == "ccf", "age_stop"].nunique()

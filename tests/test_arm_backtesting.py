@@ -21,7 +21,15 @@ from seqeval.config import (
 from seqeval.core import outcomes as O
 from seqeval.core import replicates as rep
 from seqeval.core.slicing import condition_on_count
-from seqeval.core.specs import Condition, CountQuery, Frame, FramedOutcome, ReplicateSpec, TTESpec
+from seqeval.core.specs import (
+    Condition,
+    CountQuery,
+    FertilityGrid,
+    Frame,
+    FramedOutcome,
+    ReplicateSpec,
+    TTESpec,
+)
 from seqeval.io.loaders import Bundle
 from seqeval.metrics import ml
 from seqeval.units import years_to_days as yd
@@ -111,7 +119,7 @@ model: {name: perfect}
 data: {observed: o.parquet, age_unit: days}
 events: {birth: birth}
 persons: {cohort_width: 5}
-replicates: {min_replicates: 5, bootstrap: {n: 0, seed: 7}}
+replicates: {min_replicates: 5}
 outcomes:
   first_birth: {event: birth, n: 1}
 arms:
@@ -122,12 +130,17 @@ arms:
       - {event: birth, min_events: 1, within: 10}
     conditions:
       - {name: p0, event: birth, max_count: 0}
-    aggregate_targets: [ccf]
+    aggregate_targets: [ccf, ppr, asfr_cohort]
     min_seeds: 5
 """
 
 
-def _run_arm(tmp_path, windows=((0.0, 25.0), (0.0, 30.0)), n_seeds=10):
+_GRID = FertilityGrid()
+
+
+def _run_arm(
+    tmp_path, windows=((0.0, 25.0), (0.0, 30.0)), n_seeds=10, fertility_grid=_GRID
+):
     cfg = Config.model_validate(yaml.safe_load(_CFG_YAML))
     rng = np.random.default_rng(0)
     h = S.default_hazards()
@@ -150,6 +163,7 @@ def _run_arm(tmp_path, windows=((0.0, 25.0), (0.0, 30.0)), n_seeds=10):
         prob_outcomes=resolve_probability_outcomes(cfg, resolve_outcomes(cfg)),
         replicate_spec=resolve_replicates(cfg),
         cohort_width=5,
+        fertility_grid=fertility_grid,
     )
     return out
 
@@ -173,10 +187,9 @@ def test_arm_writes_scores_and_tables(tmp_path):
     assert "log_loss" not in set(scores["metric"])  # removed from the backtest score set
 
 
-def test_scores_carry_seed_bootstrap_cis_when_enabled(tmp_path):
-    """With bootstrap on, scores gain finite ``ci_lo``/``ci_hi`` for the ML metrics (all seeds)."""
-    cfg_yaml = _CFG_YAML.replace("bootstrap: {n: 0, seed: 7}", "bootstrap: {n: 50, seed: 7}")
-    cfg = Config.model_validate(yaml.safe_load(cfg_yaml))
+def test_scores_carry_analytic_cis(tmp_path):
+    """CIs are analytic, so there is nothing to switch on — and every one brackets its estimate."""
+    cfg = Config.model_validate(yaml.safe_load(_CFG_YAML))
     rng = np.random.default_rng(0)
     h = S.default_hazards()
     obs, pers = S.simulate_cohort(1200, (1960, 1985), h, None, rng, no_event_fraction=1.0)
@@ -198,10 +211,12 @@ def test_scores_carry_seed_bootstrap_cis_when_enabled(tmp_path):
     )
     scores = pd.read_parquet(out.dir / "scores.parquet")
     assert {"ci_lo", "ci_hi"} <= set(scores.columns)
-    ml_rows = scores[scores["metric"].isin(["roc_auc", "brier_corrected", "ece", "log_loss"])]
-    finite = ml_rows.dropna(subset=["ci_lo", "ci_hi"])
-    assert len(finite) > 0  # at least some cells produced a bootstrap CI
-    assert (finite["ci_lo"] <= finite["ci_hi"]).all()
+    finite = scores.dropna(subset=["ci_lo", "ci_hi"])
+    assert {"roc_auc", "brier_corrected", "mse", "r2"} <= set(finite["metric"])
+    assert (finite["ci_lo"] <= finite["value"]).all()
+    assert (finite["value"] <= finite["ci_hi"]).all()
+    # ECE is reported without one: its bins are data-chosen and the statistic is biased upward
+    assert scores[scores["metric"] == "ece"]["ci_lo"].isna().all()
 
     # reliability is emitted as one figure per (outcome, window) — names carry a `_w<age>` suffix.
     figs = {p.name for p in out.written if p.suffix == ".png"}
@@ -246,7 +261,7 @@ _KM_ONLY_YAML = """
 model: {name: perfect}
 data: {observed: o.parquet, age_unit: days}
 events: {union: birth}
-replicates: {min_replicates: 5, bootstrap: {n: 0, seed: 7}}
+replicates: {min_replicates: 5}
 outcomes:
   first_union: {event: union, n: 1}
 arms:
@@ -294,7 +309,9 @@ def test_km_only_targets_need_neither_births_nor_persons(tmp_path, caplog):
 
 def test_needs_births_ignores_km_targets():
     def cfg_for(targets):
-        y = _CFG_YAML.replace("aggregate_targets: [ccf]", f"aggregate_targets: {targets}")
+        y = _CFG_YAML.replace(
+            "aggregate_targets: [ccf, ppr, asfr_cohort]", f"aggregate_targets: {targets}"
+        )
         return Config.model_validate(yaml.safe_load(y)).arms.backtesting
 
     assert not BT._needs_births(cfg_for("[km:first_birth]"))
@@ -315,3 +332,28 @@ def test_ccf_uncertainty_figure_and_parity_table_emitted(tmp_path):
     shown = par[~par["suppressed"]]
     assert ((shown["share"] >= 0) & (shown["share"] <= 1)).all()
     assert (par.groupby(["age_stop", "cohort"], observed=True)["share"].sum() <= 1.0 + 1e-9).all()
+
+
+def test_ppr_and_asfr_overlays_emitted_per_jumpoff_and_jointly(tmp_path):
+    """Every scored aggregate fertility target is also drawn, per window and across windows."""
+    out = _run_arm(tmp_path)
+    figs = {p.name for p in out.written if p.suffix == ".png"}
+    assert {"ppr_overlay_w25.png", "ppr_overlay_w30.png"} <= figs
+    assert {"asfr_overlay_w25.png", "asfr_overlay_w30.png"} <= figs
+    # two windows, so each family also gets the panel comparing them on one axes
+    assert {"ppr_overlay_all_jumpoffs.png", "asfr_overlay_all_jumpoffs.png"} <= figs
+
+
+def test_aggregate_error_covers_every_configured_target(tmp_path):
+    out = _run_arm(tmp_path)
+    err = pd.read_parquet(out.dir / "aggregate_error.parquet")
+    assert set(err["target"]) == {"ccf", "ppr", "asfr_cohort"}
+    assert "person_id" not in err.columns
+
+
+def test_fertility_grid_sets_the_backtest_parity_ceiling(tmp_path):
+    """The PPR grid is the resolved one, not a constant private to this arm."""
+    out = _run_arm(tmp_path, fertility_grid=FertilityGrid(max_parity=3))
+    err = pd.read_parquet(out.dir / "aggregate_error.parquet")
+    ppr = err[err["target"] == "ppr"]
+    assert sorted(ppr["parity_from"].unique()) == [0, 1, 2]

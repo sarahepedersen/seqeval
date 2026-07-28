@@ -13,7 +13,7 @@ matplotlib.use("Agg")
 
 from tests import synthetic as S
 
-# A compact config exercising all three arms; bootstrap off for speed.
+# A compact config exercising all three arms.
 _CONFIG = """\
 model:
   name: demo_perfect_model
@@ -30,7 +30,6 @@ persons:
   cohort_width: 5
 replicates:
   min_replicates: 5
-  bootstrap: {n: 0, seed: 7}
 outcomes:
   first_birth: {event: birth, n: 1}
   second_birth: {event: birth, n: 2, origin: first_birth}

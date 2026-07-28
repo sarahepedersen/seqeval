@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from seqeval.core import outcomes as O
@@ -69,3 +70,23 @@ def test_km_plateau_matches_never_birth_fraction():
     km = SV.kaplan_meier(tte)
     never = 1 - obs[obs["event"] == "birth"]["person_id"].nunique() / pers["person_id"].nunique()
     assert km["survival"].iloc[-1] == pytest.approx(never, abs=0.03)
+
+
+def test_greenwood_variance_is_exposed_and_consistent_with_the_log_log_ci():
+    """The band builders need the variance on the survival scale, not just the interval."""
+    rng = np.random.default_rng(4)
+    dur = rng.integers(1, 100, 400)
+    obs = rng.uniform(size=400) < 0.7
+    km = SV.kaplan_meier(pd.DataFrame({"duration": dur, "observed": obs}))
+
+    assert "greenwood_var" in km.columns
+    assert (km["greenwood_var"].dropna() >= 0).all()
+    # Greenwood's variance is S(t)^2 times the accumulated hazard term, so it grows as the curve
+    # descends and information thins
+    finite = km.dropna(subset=["greenwood_var"])
+    assert finite["greenwood_var"].iloc[-1] > finite["greenwood_var"].iloc[0]
+    # and it agrees with the log-log interval already reported: both come from the same cum_v
+    row = km[km["ci_lo"].notna()].iloc[len(km[km["ci_lo"].notna()]) // 2]
+    se_loglog = np.sqrt(row["greenwood_var"]) / (row["survival"] * abs(np.log(row["survival"])))
+    expected = row["survival"] ** np.exp(1.959963985 * se_loglog)
+    assert row["ci_lo"] == pytest.approx(expected, rel=1e-9)

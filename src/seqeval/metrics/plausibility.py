@@ -86,50 +86,37 @@ def _check_one(df: pd.DataFrame, keys: list[str], rule: Rule) -> pd.DataFrame:
 def violation_rates(
     violations: pd.DataFrame, df: pd.DataFrame, keys: list[str], *, by: tuple[str, ...] = ("seed",)
 ) -> pd.DataFrame:
-    """Per-rule violation rates, both per sequence-group and per event, by seed (and window).
+    """Per-rule violation rates, per event of the kind the rule governs, by seed (and window).
 
-    Returns ``[*by, rule, severity, n_violations, n_groups, n_events, rate_per_group,
-    rate_per_event]`` — the "rate of illegal moves" headline. Every rule that fired at least once is
-    reported for *every* ``by`` cell (rate 0 where it did not fire), so a clean seed is visible.
+    Returns ``[*by, rule, severity, n_violations, n_events, rate_per_event]``
     """
     _check_keys(df, keys)
     by = [c for c in by if c in df.columns]
     window = [c for c in ("age_start", "age_stop") if c in df.columns and c not in by]
     by = by + window
 
-    n_groups = _group_size(df[keys].drop_duplicates(), by)  # cells -> n distinct sequence groups
+    cells = _group_size(df[keys].drop_duplicates(), by)  # one row per `by` cell
 
     rows = []
     for rule in violations["rule"].unique():
         rv = violations[violations["rule"] == rule]
         severity, event = rv["severity"].iloc[0], rv["event"].iloc[0]
-        n_viol = _group_size(rv, by).reindex(n_groups.index, fill_value=0)
-        n_events = _group_size(df[df["event"] == event], by).reindex(n_groups.index, fill_value=0)
+        n_viol = _group_size(rv, by).reindex(cells.index, fill_value=0)
+        n_events = _group_size(df[df["event"] == event], by).reindex(cells.index, fill_value=0)
         cell = pd.DataFrame(
             {
                 "rule": rule,
                 "severity": severity,
                 "n_violations": n_viol.to_numpy(),
-                "n_groups": n_groups.to_numpy(),
                 "n_events": n_events.to_numpy(),
             }
         )
         for i, col in enumerate(by):
-            cell.insert(i, col, [k[i] if isinstance(k, tuple) else k for k in n_groups.index])
-        cell["rate_per_group"] = cell["n_violations"] / cell["n_groups"].replace(0, np.nan)
+            cell.insert(i, col, [k[i] if isinstance(k, tuple) else k for k in cells.index])
         cell["rate_per_event"] = cell["n_violations"] / cell["n_events"].replace(0, np.nan)
         rows.append(cell)
 
-    cols = [
-        *by,
-        "rule",
-        "severity",
-        "n_violations",
-        "n_groups",
-        "n_events",
-        "rate_per_group",
-        "rate_per_event",
-    ]
+    cols = [*by, "rule", "severity", "n_violations", "n_events", "rate_per_event"]
     if not rows:
         return pd.DataFrame(columns=cols)
     out = pd.concat(rows, ignore_index=True)[cols]

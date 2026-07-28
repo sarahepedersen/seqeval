@@ -56,37 +56,3 @@ def plot_lexis(
     ax.set_xlabel(_AXIS_LABEL.get(dim, dim))
     ax.set_ylabel("age (years)")
     return fig
-
-
-def plot_lexis_uncertainty(
-    surfaces_by_seed: pd.DataFrame,
-    *,
-    dim: str = "year",
-    value: str = "rate",
-    outcome: str | None = None,
-) -> Figure:
-    """Heatmap of the across-seed IQR (q75 - q25) of a forecast Lexis surface per cell.
-
-    ``surfaces_by_seed`` is the per-seed forecast surface (carries a ``seed`` column); the spread
-    across seeds in each cell is the forecast's seed uncertainty, surfaced spatially.
-    """
-    iqr = (
-        surfaces_by_seed.groupby([dim, "age_bin"], observed=True)[value]
-        .agg(lambda s: s.quantile(0.75) - s.quantile(0.25))
-        .reset_index(name="iqr")
-    )
-    grid = iqr.pivot_table(index="age_bin", columns=dim, values="iqr").sort_index()
-    fig, ax = new_fig()
-    ax.grid(False)
-    mesh = ax.pcolormesh(
-        grid.columns.to_numpy(),
-        grid.index.to_numpy(),
-        grid.to_numpy(),
-        shading="auto",
-        cmap="viridis",
-    )
-    fig.colorbar(mesh, ax=ax, label=f"{value} IQR across seeds")
-    ax.set_xlabel(_AXIS_LABEL.get(dim, dim))
-    ax.set_ylabel("age (years)")
-    ax.set_title(f"Forecast seed uncertainty (IQR){f' — {outcome}' if outcome else ''}")
-    return fig

@@ -34,7 +34,7 @@ Estimation is strictly per run
 ------------------------------
 Never pool, shrink, or borrow strength across runs or persons when estimating a run's probability —
 the estimand is across-replicate variance for an *individual* sequence. All cross-run computation
-(calibration binning, bootstraps) happens downstream on the per-run table, never inside estimation.
+(calibration binning, scoring) happens downstream on the per-run table, never inside estimation.
 
 Dynamic range
 -------------
@@ -52,13 +52,14 @@ n     ``|logit| ≤``    approx p range
 Rare outcomes at small n saturate ``logit_emp`` (heavy shrinkage toward zero log-odds); a p_hat
 that has not stabilized as replicates accumulate is how a researcher discovers they need more.
 
-Informative-censoring guard
----------------------------
+Informative censoring
+---------------------
 Spans always derive from the last age in the data (00 section 4.2). On models with stochastic
 sequence length, event-sparse replicates can end early, get dropped as non-evaluable for late
-frames, and bias ``k/n`` upward. The remedy is upstream (emit a trailing "no event" row at the
-generation horizon t4, which carries the horizon into the span for free); detection is this
-engine's job — :func:`replicate_summary` warns loudly when within-window ``n`` varies.
+frames, and bias ``k/n`` upward. The remedy is upstream: emit a trailing "no event" row at the
+generation horizon t4, which carries the horizon into the span for free. Ragged ``n`` within a
+window is the signature, and 04's coverage table is where it shows up — ``n_evaluable`` falling
+short of the conditioned population for some runs and not others.
 
 AUC on a coarse grid
 --------------------
@@ -70,7 +71,6 @@ from __future__ import annotations
 
 import logging
 import warnings
-from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -89,7 +89,6 @@ __all__ = [
     "count_moments",
     "brier_noise_correction",
     "null_calibration_band",
-    "seed_bootstrap",
     "AUC_TIE_NOTE",
 ]
 
@@ -111,8 +110,7 @@ def replicate_summary(
     ``outcome_table`` is evaluator output (02 section 2.4). If it carries an ``evaluable`` column it
     is filtered to evaluable rows first. Ragged ``n`` across runs is legal (some replicates
     non-evaluable); runs that end up with ``n == 0`` simply vanish (counted for 04's coverage
-    table). When ``n`` varies across runs *within a window* (``age_start``, ``age_stop``), a loud
-    warning fires — the informative-censoring signature (see module docstring).
+    table).
     """
     tbl = outcome_table
     if "evaluable" in tbl.columns:
@@ -122,26 +120,7 @@ def replicate_summary(
     summary["k"] = summary["k"].astype(np.int64)
     summary["n"] = summary["n"].astype(np.int64)
 
-    _warn_ragged_n(summary)
     return summary.sort_values(run_keys).reset_index(drop=True)
-
-
-def _warn_ragged_n(summary: pd.DataFrame) -> None:
-    """Warn when replicate count ``n`` varies across runs in a window (informative censoring)."""
-    win = [c for c in ("age_start", "age_stop") if c in summary.columns]
-    if not win:
-        return
-    varies = summary.groupby(win, observed=True)["n"].nunique()
-    bad = varies[varies > 1]
-    if len(bad):
-        cells = [tuple(idx) if isinstance(idx, tuple) else (idx,) for idx in bad.index]
-        logger.warning(
-            "replicate_summary: within-window replicate count n varies for %d window cell(s) %s — "
-            "possible informative censoring (event-sparse replicates ending early). Emit a "
-            "trailing no-event row at the generation horizon so every replicate's span reaches it.",
-            len(bad),
-            cells,
-        )
 
 
 def estimate_probability(summary: pd.DataFrame, *, spec: ReplicateSpec) -> pd.DataFrame:
@@ -372,87 +351,3 @@ def null_calibration_band(
 # =================================================================================================
 # 4. resampling over the replicate dimension
 # =================================================================================================
-def _numeric_and_key_cols(df: pd.DataFrame) -> tuple[list[str], list[str]]:
-    numeric = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    keys = [c for c in df.columns if c not in numeric]
-    return keys, numeric
-
-
-def _melt_stat(result: pd.DataFrame, value_cols: list[str] | None = None) -> pd.DataFrame:
-    """Melt a stat_fn output to ``[*key_cols, metric, __value__]`` (value columns become rows).
-
-    ``value_cols`` names the numeric statistic columns explicitly — required when grouping keys are
-    themselves numeric (cohort year, parity, window ages), which the dtype heuristic would otherwise
-    mistake for values. When omitted, numeric columns are treated as values. A sentinel value column
-    name is used so it never collides with a key column a ``stat_fn`` happens to call ``value``.
-    """
-    if value_cols is not None:
-        numeric = list(value_cols)
-        keys = [c for c in result.columns if c not in numeric]
-    else:
-        keys, numeric = _numeric_and_key_cols(result)
-    return result.melt(id_vars=keys, value_vars=numeric, var_name="metric", value_name="__value__")
-
-
-def _window_seed_groups(df: pd.DataFrame, seed_col: str) -> tuple[list[str], dict]:
-    win = [c for c in ("age_start", "age_stop") if c in df.columns]
-    if win:
-        groups = {key: sub for key, sub in df.groupby(win, observed=True)}
-    else:
-        groups = {(): df}
-    return win, groups
-
-
-def seed_bootstrap(
-    df: pd.DataFrame,
-    *,
-    seed_col: str,
-    stat_fn: Callable[[pd.DataFrame], pd.DataFrame],
-    n_boot: int,
-    rng: np.random.Generator,
-    level: float = 0.95,
-    value_cols: list[str] | None = None,
-) -> pd.DataFrame:
-    """Percentile CIs for any aggregate ``stat_fn`` by resampling seed labels with replacement.
-
-    Seeds are resampled *within each window* (``age_start``, ``age_stop``) so window structure is
-    preserved. ``stat_fn`` maps a replicate-level frame to a tidy frame (key columns + numeric
-    value columns); it is applied once per bootstrap draw — outcome evaluation is **never** re-run
-    inside the loop (evaluate once per replicate, resample the rows). ``value_cols`` names the
-    statistic columns explicitly (needed when grouping keys are numeric). Captures Monte-Carlo
-    (replicate) uncertainty only; population sampling uncertainty would need a person-level cluster
-    bootstrap (out of scope v1). Returns ``[*keys, metric, estimate, ci_lo, ci_hi]``.
-    """
-    _, groups = _window_seed_groups(df, seed_col)
-    seed_index = {
-        key: {s: sub for s, sub in g.groupby(seed_col, observed=True)} for key, g in groups.items()
-    }
-
-    draws = []
-    for _ in range(n_boot):
-        parts = []
-        new_id = 0
-        for per_seed in seed_index.values():
-            seeds = np.array(list(per_seed.keys()))
-            chosen = rng.choice(seeds, size=len(seeds), replace=True)
-            # Relabel each resampled copy as a fresh replicate so duplicated seed labels are not
-            # collapsed by a stat_fn that groups on seed (e.g. dividing by the number of seeds).
-            for s in chosen:
-                sub = per_seed[s].copy()
-                sub[seed_col] = new_id
-                new_id += 1
-                parts.append(sub)
-        resampled = pd.concat(parts, ignore_index=True)
-        draws.append(_melt_stat(stat_fn(resampled), value_cols))
-
-    stacked = pd.concat(draws, ignore_index=True)
-    keys = [c for c in stacked.columns if c != "__value__"]
-    alpha = 1 - level
-    ci = (
-        stacked.groupby(keys, observed=True)["__value__"]
-        .agg(ci_lo=lambda s: s.quantile(alpha / 2), ci_hi=lambda s: s.quantile(1 - alpha / 2))
-        .reset_index()
-    )
-    point = _melt_stat(stat_fn(df), value_cols).rename(columns={"__value__": "estimate"})
-    merge_keys = [c for c in point.columns if c != "estimate"]
-    return ci.merge(point, on=merge_keys, how="left")

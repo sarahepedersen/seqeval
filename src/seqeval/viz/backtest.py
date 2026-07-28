@@ -9,6 +9,7 @@ counts. None of them takes a per-person frame, which is what lets the whole set 
 
 from __future__ import annotations
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
@@ -17,25 +18,80 @@ from scipy.stats import norm
 from seqeval.metrics._disclosure import MIN_CELL
 from seqeval.units import days_to_years
 from seqeval.viz._ridge import draw_ridges
-from seqeval.viz._style import SUPPRESSED_HATCH, new_fig, stratum_colors
-
-DEFAULT_LEVEL = 0.95
+from seqeval.viz._style import DEFAULT_LEVEL, new_fig, stratum_colors
 
 
-def _seed_ci(values: np.ndarray, level: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Across-seed mean and its Monte-Carlo CI, from a ``(n_seeds, ...)`` stack.
+def _km_total_ci(
+    surv: np.ndarray, greenwood: np.ndarray, level: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Across-seed mean KM curve and its total CI, from ``(n_seeds, n_times)`` stacks.
 
-    ``mean ± z·sd/√K`` with the population sd (``ddof=0``). This is the *same quantity* as
-    ``replicate_variance_aggregate.within_var``: that table's analytic decomposition
-    ``sqrt(Σ_i s²_i/K)/n`` equals the standard error of the across-seed mean whenever persons are
-    independent within a seed, and ``ddof=0`` makes the two agree exactly rather than up to a
-    ``(K-1)/K`` factor.
+    Two sources, added as variances at each time point, exactly as ``total_var`` is built for CCF:
+
+    - **Sampling** — ``greenwood.mean(axis=0)``, the Greenwood variance of one seed's curve averaged
+      over seeds. Every seed re-runs the *same* women, so this does not shrink as seeds are added.
+    - **Monte-Carlo** — ``var(surv, ddof=1)/K``, the standard error of the plotted across-seed mean,
+      which does shrink as ``1/K``. ``ddof=1`` because it is a sample variance over seeds used to
+      infer the mean curve.
+
+    A band drawn from the Monte-Carlo term alone answers only "would other seeds move this curve",
+    which at a handful of seeds is the smaller question by far.
     """
-    k = values.shape[0]
-    mean = values.mean(axis=0)
-    sem = values.std(axis=0, ddof=0) / np.sqrt(k)
-    z = norm.ppf(1 - (1 - level) / 2)
-    return mean, mean - z * sem, mean + z * sem
+    k = surv.shape[0]
+    mean = surv.mean(axis=0)
+    sampling = np.nanmean(greenwood, axis=0)
+    monte_carlo = surv.var(axis=0, ddof=1) / k if k > 1 else np.zeros_like(mean)
+    half = norm.ppf(1 - (1 - level) / 2) * np.sqrt(np.nan_to_num(sampling) + monte_carlo)
+    return mean, np.clip(mean - half, 0.0, 1.0), np.clip(mean + half, 0.0, 1.0)
+
+
+def _total_band(
+    gen: pd.DataFrame, *, value: str, var: str, by: list[str], level: float
+) -> tuple[pd.Index, np.ndarray, np.ndarray]:
+    """``(cells, mean, half_width)`` for a seed-replicated aggregate table, keyed by ``by``.
+
+    The same two variances :func:`_km_total_ci` adds at each time point, here added in each cell of
+    a tidy metric frame rather than on a sampled curve:
+
+    - **Sampling** — ``gen[var]`` averaged over seeds: the variance of one seed's cell estimate
+      under its own sampling model (binomial for a PPR, Poisson for an ASFR). Every seed re-runs the
+      *same* women, so this does not shrink as seeds are added.
+    - **Monte-Carlo** — ``var(ddof=1)/K`` over the seeds' cell values, the standard error of the
+      plotted across-seed mean. This is the term that shrinks as ``1/K``.
+
+    A cell with one seed keeps the sampling term alone rather than losing its band. Cells whose
+    variance column is missing or NaN contribute nothing there instead of poisoning the sum.
+    """
+    g = gen.groupby(by, observed=True)[value]
+    mean = g.mean()
+    k = g.size()
+    sampling = (
+        gen.groupby(by, observed=True)[var].mean().reindex(mean.index)
+        if var in gen.columns
+        else pd.Series(np.nan, index=mean.index)
+    )
+    monte_carlo = (g.var(ddof=1) / k).where(k > 1)
+    total = np.nan_to_num(sampling.to_numpy()) + np.nan_to_num(monte_carlo.to_numpy())
+    half = norm.ppf(1 - (1 - level) / 2) * np.sqrt(total)
+    return mean.index, mean.to_numpy(), half
+
+
+def _km_stacks(gen_km: pd.DataFrame, grid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(survival, greenwood_var)`` stacks, one row per seed, sampled onto ``grid``."""
+    surv, gw = [], []
+    has_greenwood = "greenwood_var" in gen_km.columns
+    for _, g in gen_km.groupby("seed", observed=True):
+        surv.append(_step_sample(g, grid))
+        # A curve without Greenwood carries no sampling information, so it contributes none rather
+        # than poisoning the mean.
+        gw.append(
+            _step_sample(g, grid, value="greenwood_var", before=0.0)
+            if has_greenwood
+            else np.zeros(len(grid))
+        )
+    if not surv:
+        return np.empty((0, len(grid))), np.empty((0, len(grid)))
+    return np.vstack(surv), np.nan_to_num(np.vstack(gw))
 
 
 def plot_km_seed_band(
@@ -47,21 +103,19 @@ def plot_km_seed_band(
 ) -> Figure:
     """Observed KM curve overlaid with the generated across-seed mean and its Monte-Carlo CI.
 
-    ``gen_km`` carries a ``seed`` column (one KM curve per seed); its survival is sampled on a
-    common day grid, then :func:`_seed_ci` gives the pointwise mean and ``±z·sd/√K`` band (years
-    axes). The band is replicate uncertainty in the plotted curve, on the same footing as
-    ``replicate_variance_aggregate.within_var`` — not the spread of an individual seed's curve.
+    ``gen_km`` carries a ``seed`` column (one KM curve per seed); survival and Greenwood variance
+    are sampled on a common day grid, then :func:`_km_total_ci` gives the pointwise mean and its
+    band (years axes). The band is the total uncertainty in the plotted curve — the finite sample of
+    women plus the finite number of seeds — on the same footing as the CCF overlay's
+    ``total_var``.
     """
     grid = np.union1d(obs_km["time"].to_numpy(), gen_km["time"].to_numpy())
-    per_seed = []
-    for _, g in gen_km.groupby("seed", observed=True):
-        per_seed.append(_step_sample(g, grid))
-    stacked = np.vstack(per_seed) if per_seed else np.empty((0, len(grid)))
+    stacked, greenwood = _km_stacks(gen_km, grid)
 
     fig, ax = new_fig()
     years = days_to_years(grid)
     if len(stacked):
-        mean, lo, hi = _seed_ci(stacked, level)
+        mean, lo, hi = _km_total_ci(stacked, greenwood, level)
         ax.fill_between(
             years, lo, hi, step="post", alpha=0.3, color="tab:orange",
             label=f"generated {level:.0%} CI",
@@ -142,172 +196,6 @@ def _draw_observed_ccf(ax, obs_ccf: pd.DataFrame, *, incomplete_label: bool = Tr
     )
 
 
-def plot_ccf_inference_vs_outcome(
-    variance: pd.DataFrame,
-    parity: pd.DataFrame,
-    *,
-    observed: pd.DataFrame | None = None,
-    complete: pd.Series | None = None,
-    level: float = DEFAULT_LEVEL,
-    title: str | None = None,
-) -> Figure:
-    """The uncertainty in the cohort mean beside the uncertainty a woman actually faces.
-
-    ``variance`` is :func:`~seqeval.metrics.fertility.ccf_variance` and ``parity`` is
-    :func:`~seqeval.metrics.fertility.parity_distribution`. Both panels carry the same estimate,
-    the same interval, and the same y unit — births per woman — so the only difference between them
-    is what is being counted: the *left* is the CCF and its ``±z·sqrt(total_var)`` interval, the
-    *right* adds the distribution of individual completed parity that the CCF averages over.
-
-    The interval is not rescaled to make it visible against the distribution. It is roughly thirty
-    times narrower, and that is the point of putting them side by side: a confident estimate of a
-    mean says almost nothing about how confidently one woman's outcome can be predicted. The left
-    panel is a magnification of the shaded band drawn on the right, and the annotation names the
-    ratio so the comparison does not rest on the reader eyeballing two axis scales.
-
-    ``complete`` (cohort -> bool, from :func:`majority_complete`) hollows the marker of any cohort
-    not observed to the end of the fertile window, on both panels: a truncated cohort's "CCF" is a
-    mean over an unfinished life course and must not read as a finished one. ``observed`` carries
-    its own ``complete`` column and is marked the same way.
-    """
-    import matplotlib.pyplot as plt
-
-    z = norm.ppf(1 - (1 - level) / 2)
-    var = variance.sort_values("cohort")
-    cohorts = var["cohort"].to_numpy()
-    ccf = var["ccf"].to_numpy()
-    half = z * np.sqrt(var["total_var"].to_numpy())
-    done = (
-        np.ones(len(cohorts), dtype=bool)
-        if complete is None
-        else complete.reindex(cohorts).fillna(True).to_numpy().astype(bool)
-    )
-
-    fig, (ax_inf, ax_out) = plt.subplots(1, 2, figsize=(9.5, 4.5), width_ratios=[1, 1.4])
-    for ax in (ax_inf, ax_out):
-        ax.grid(True, alpha=0.3, linewidth=0.5)
-        _errorbar_split(
-            ax, cohorts, ccf, half, done, color="tab:orange", label=f"CCF ± {level:.0%} CI"
-        )
-        if observed is not None:
-            _observed_split(ax, observed)
-        ax.set_xlabel("birth cohort")
-        ax.set_xticks(cohorts)  # cohorts are labels, not a continuous scale to interpolate
-
-    lo, hi = _padded_range(ccf - half, ccf + half)
-    ax_inf.set_ylim(lo, hi)
-    ax_inf.set_ylabel("CCF (mean births/woman) — magnified")
-    ax_inf.set_title("inference uncertainty", fontsize=9)
-    ax_inf.legend(fontsize=7, loc="best")
-
-    _draw_parity_columns(ax_out, parity, cohorts)
-    ax_out.axhspan(lo, hi, color="tab:orange", alpha=0.12, zorder=0)
-    ax_out.annotate(
-        "← left panel",
-        xy=(0.995, hi), xycoords=("axes fraction", "data"),
-        fontsize=6.5, color="0.45", ha="right", va="bottom",
-    )
-    ax_out.set_ylabel("births per woman (individual)")
-    ax_out.set_title("outcome uncertainty", fontsize=9)
-    ax_out.annotate(
-        _uncertainty_ratio(half, parity),
-        xy=(0.5, -0.19), xycoords="axes fraction", ha="center", fontsize=7, color="0.35",
-    )
-    if title:
-        fig.suptitle(title, fontsize=10)
-    fig.tight_layout()
-    return fig
-
-
-def _errorbar_split(ax, x, y, half, complete, *, color: str, label: str) -> None:
-    """Estimate + interval per cohort, hollow where the cohort's life course is unfinished."""
-    for sel, filled, suffix in ((complete, color, ""), (~complete, "white", " (incomplete)")):
-        if not sel.any():
-            continue
-        ax.errorbar(
-            x[sel], y[sel], yerr=half[sel], fmt="o", color=color, mfc=filled, ms=4, lw=1.4,
-            capsize=3, label=f"{label}{suffix}", zorder=6,
-        )
-
-
-def _observed_split(ax, observed: pd.DataFrame) -> None:
-    """The observed CCF per cohort, marked truncated on the same convention as the estimate."""
-    o = observed.sort_values("cohort")
-    done = (
-        o["complete"].astype(bool).to_numpy()
-        if "complete" in o.columns
-        else np.ones(len(o), dtype=bool)
-    )
-    x, y = o["cohort"].to_numpy(), o["ccf"].to_numpy()
-    for sel, marker, suffix in ((done, "o", ""), (~done, "s", " (incomplete)")):
-        if not sel.any():
-            continue
-        ax.plot(
-            x[sel], y[sel], marker, mfc="white", mec="black", ms=5,
-            label=f"observed{suffix}", zorder=7,
-        )
-
-
-def _padded_range(lo: np.ndarray, hi: np.ndarray) -> tuple[float, float]:
-    """A y range around the intervals with a little air, never a zero-height one."""
-    bottom, top = float(np.min(lo)), float(np.max(hi))
-    pad = max((top - bottom) * 0.25, 0.01)
-    return bottom - pad, top + pad
-
-
-def _draw_parity_columns(ax, parity: pd.DataFrame, cohorts: np.ndarray) -> None:
-    """Per cohort, the share of women at each completed parity, as bars centred on the cohort."""
-    if parity.empty:
-        return
-    spacing = float(np.min(np.diff(np.sort(cohorts)))) if len(cohorts) > 1 else 1.0
-    widest = float(parity["share"].max() or 1.0)
-    unit = 0.42 * spacing / widest
-    for cohort, sub in parity.groupby("cohort", observed=True):
-        shown = sub[~sub["suppressed"]]
-        width = shown["share"] * unit
-        ax.barh(
-            shown["parity"], width, height=0.72, left=cohort - width / 2,
-            color="tab:blue", alpha=0.35, zorder=2,
-        )
-        _draw_suppressed_parity(ax, sub, cohort, unit)
-    ax.set_yticks(sorted(parity["parity"].unique()))
-    labels = [str(p) for p in sorted(parity["parity"].unique())]
-    labels[-1] = f"{labels[-1]}+"  # the top category is inclusive-and-above
-    ax.set_yticklabels(labels)
-    ax.set_ylim(parity["parity"].min() - 0.7, parity["parity"].max() + 0.7)
-
-
-def _draw_suppressed_parity(ax, sub: pd.DataFrame, cohort, unit: float) -> None:
-    """Withheld parities hatched at the widest bar their threshold allows."""
-    hidden = sub[sub["suppressed"]]
-    if hidden.empty:
-        return
-    total = float(sub["n_women_total"].iloc[0]) or 1.0
-    cap = (MIN_CELL - 1) / total * unit
-    ax.barh(
-        hidden["parity"], cap, height=0.72, left=cohort - cap / 2,
-        facecolor="none", edgecolor="0.6", hatch=SUPPRESSED_HATCH, lw=0.4, zorder=2,
-    )
-
-
-def _uncertainty_ratio(half: np.ndarray, parity: pd.DataFrame) -> str:
-    """One line naming how much wider the outcome spread is than the interval on the mean."""
-    ci = float(np.median(half))
-    sds = []
-    for _, sub in parity.groupby("cohort", observed=True):
-        share = sub["share"].fillna(0).to_numpy()
-        k = sub["parity"].to_numpy().astype(float)
-        mass = share.sum()
-        if mass <= 0:
-            continue
-        mean = float(np.sum(k * share) / mass)
-        sds.append(float(np.sqrt(np.sum(share * (k - mean) ** 2) / mass)))
-    if not sds or ci <= 0:
-        return ""
-    sd = float(np.median(sds))
-    return f"CI half-width {ci:.3f} births · individual sd {sd:.2f} births ({sd / ci:.0f}×)"
-
-
 def plot_km_jumpoff_panel(
     obs_km: pd.DataFrame,
     gen_by_jumpoff: dict[int, pd.DataFrame],
@@ -329,10 +217,10 @@ def plot_km_jumpoff_panel(
     fig, ax = new_fig()
     for t2, color in zip(jumpoffs, stratum_colors(len(jumpoffs), lo=0.1, hi=0.85), strict=True):
         gen_km = gen_by_jumpoff[t2]
-        per_seed = [_step_sample(g, grid) for _, g in gen_km.groupby("seed", observed=True)]
-        if not per_seed:
+        stacked, greenwood = _km_stacks(gen_km, grid)
+        if not len(stacked):
             continue
-        mean, lo, hi = _seed_ci(np.vstack(per_seed), level)
+        mean, lo, hi = _km_total_ci(stacked, greenwood, level)
         jump_y = days_to_years(t2)
         ax.fill_between(years, lo, hi, step="post", alpha=0.2, color=color, label="_nolegend_")
         ax.step(years, mean, where="post", color=color, lw=2, label=f"jump-off {jump_y:.0f}y")
@@ -380,6 +268,218 @@ def plot_ccf_jumpoff_panel(
     kind = "CI" if variances else "replicate CI"
     ax.legend(fontsize=8, title=f"bands: {level:.0%} {kind}", title_fontsize=7)
     return fig
+
+
+# =================================================================================================
+# parity progression ratios
+# =================================================================================================
+def _ppr_labels(ppr: pd.DataFrame) -> dict[int, str]:
+    """``parity_from`` -> ``"k→k+1"`` display label, read off the frame's own transitions."""
+    pairs = ppr[["parity_from", "parity_to"]].drop_duplicates()
+    return {
+        int(r.parity_from): f"{int(r.parity_from)}→{int(r.parity_to)}" for r in pairs.itertuples()
+    }
+
+
+def _draw_ppr_series(ax, gen_ppr, level, *, color, label, dodge: float = 0.0) -> None:
+    """One generated PPR series: across-seed means with total-CI bars, one x per transition."""
+    cells, mean, half = _total_band(
+        gen_ppr, value="ppr", var="ppr_var", by=["parity_from"], level=level
+    )
+    if not len(cells):
+        return
+    x = cells.to_numpy().astype(float) + dodge
+    ax.errorbar(x, mean, yerr=half, fmt="o-", color=color, capsize=3, lw=1.6, label=label)
+
+
+def _draw_observed_ppr(ax, obs_ppr: pd.DataFrame) -> None:
+    """The observed progression ratios in black — a point estimate, drawn without a band."""
+    o = obs_ppr.sort_values("parity_from")
+    ax.plot(
+        o["parity_from"].to_numpy().astype(float), o["ppr"].to_numpy(),
+        "s-", color="black", lw=1.2, label="observed",
+    )
+
+
+def _finish_ppr_axes(ax, obs_ppr, gen_ppr, *, title, legend_title) -> None:
+    labels = {**_ppr_labels(gen_ppr), **_ppr_labels(obs_ppr)}
+    ticks = sorted(labels)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([labels[t] for t in ticks])
+    ax.set_xlabel("parity transition")
+    ax.set_ylabel("progression ratio")
+    ax.set_ylim(0, 1.02)
+    ax.grid(True, axis="y", alpha=0.3, linewidth=0.5)
+    if title:
+        ax.set_title(title)
+    ax.legend(fontsize=8, title=legend_title, title_fontsize=7)
+
+
+def plot_ppr_overlay(
+    obs_ppr: pd.DataFrame,
+    gen_ppr: pd.DataFrame,
+    *,
+    title: str | None = None,
+    level: float = DEFAULT_LEVEL,
+) -> Figure:
+    """Observed parity progression ratios under the generated across-seed mean and its CI.
+
+    ``gen_ppr`` carries a ``seed`` column (one set of transitions per seed); the interval is
+    :func:`_total_band` — the binomial sampling variance of each transition averaged over seeds plus
+    the across-seed variance over K, the same two terms as the survival and CCF bands.
+
+    Later transitions rest on the women who reached that parity, so the bands widen to the right on
+    their own; a wide interval at parity 4 is a thin denominator, not a worse model.
+    """
+    fig, ax = new_fig()
+    _draw_ppr_series(ax, gen_ppr, level, color="tab:orange", label="generated mean")
+    _draw_observed_ppr(ax, obs_ppr)
+    _finish_ppr_axes(
+        ax, obs_ppr, gen_ppr, title=title, legend_title=f"bars: {level:.0%} CI"
+    )
+    return fig
+
+
+def plot_ppr_jumpoff_panel(
+    obs_ppr: pd.DataFrame,
+    gen_by_jumpoff: dict[int, pd.DataFrame],
+    *,
+    title: str | None = None,
+    level: float = DEFAULT_LEVEL,
+) -> Figure:
+    """Every jump-off's generated PPR series on one axes, against one observed series.
+
+    Series are nudged apart along x by a fraction of a transition so their caps stay legible; the
+    integer tick under each cluster is the transition they all describe.
+    """
+    jumpoffs = sorted(gen_by_jumpoff)
+    offsets = np.linspace(-0.12, 0.12, len(jumpoffs)) if len(jumpoffs) > 1 else np.zeros(1)
+    fig, ax = new_fig()
+    colors = stratum_colors(len(jumpoffs), lo=0.1, hi=0.85)
+    for t2, color, dodge in zip(jumpoffs, colors, offsets, strict=True):
+        _draw_ppr_series(
+            ax, gen_by_jumpoff[t2], level, color=color,
+            label=f"jump-off {days_to_years(t2):.0f}y", dodge=float(dodge),
+        )
+    _draw_observed_ppr(ax, obs_ppr)
+    any_gen = next(iter(gen_by_jumpoff.values()), obs_ppr)
+    _finish_ppr_axes(ax, obs_ppr, any_gen, title=title, legend_title=f"bars: {level:.0%} CI")
+    return fig
+
+
+# =================================================================================================
+# cohort ASFR
+# =================================================================================================
+def _asfr_grid(cohorts: list) -> tuple[Figure, np.ndarray]:
+    """A shared-axes small-multiple grid, one panel per cohort, with the spares hidden."""
+    ncols = min(3, max(len(cohorts), 1))
+    nrows = int(np.ceil(max(len(cohorts), 1) / ncols))
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(3.4 * ncols, 2.9 * nrows), sharex=True, sharey=True, squeeze=False,
+    )
+    flat = axes.ravel()
+    for ax in flat[len(cohorts) :]:
+        ax.set_visible(False)
+    return fig, flat
+
+
+def _draw_asfr_panel(ax, gen_cohort, level, *, color, label, alpha=0.3) -> None:
+    """One cohort's generated age profile: across-seed mean inside its total-CI band."""
+    cells, mean, half = _total_band(
+        gen_cohort, value="asfr", var="asfr_var", by=["age_bin"], level=level
+    )
+    if not len(cells):
+        return
+    ages = cells.to_numpy().astype(float)
+    ax.fill_between(ages, mean - half, mean + half, alpha=alpha, color=color, label="_nolegend_")
+    ax.plot(ages, mean, color=color, lw=1.6, label=label)
+
+
+def _finish_asfr_grid(fig, axes, cohorts, *, title, legend_title) -> Figure:
+    for ax in axes[: len(cohorts)]:
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+        ax.set_ylim(bottom=0)
+    for ax in axes[: len(cohorts)]:
+        ax.set_xlabel("age (years)", fontsize=8)
+    axes[0].set_ylabel("ASFR (births/woman-year)", fontsize=8)
+    axes[0].legend(fontsize=7, title=legend_title, title_fontsize=6)
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+    return fig
+
+
+def plot_asfr_overlay(
+    obs_asfr: pd.DataFrame,
+    gen_asfr: pd.DataFrame,
+    *,
+    jumpoff_days: int | None = None,
+    title: str | None = None,
+    level: float = DEFAULT_LEVEL,
+) -> Figure:
+    """Observed cohort age-fertility profiles under the generated mean and its CI, one panel each.
+
+    A cohort ASFR is a ``(cohort, age)`` surface, so it is drawn as small multiples: one panel per
+    birth cohort, age along x, the observed profile in black beneath the generated across-seed mean
+    and its :func:`_total_band` interval (Poisson sampling variance of each cell averaged over seeds
+    plus the across-seed variance over K). Panels share both axes so the cohorts can be compared by
+    eye.
+
+    ``jumpoff_days`` marks the jump-off **age** in every panel. The jump-off is an age, not a date,
+    so the rule falls in the same place for every cohort: everything to its left is replayed
+    history, everything to its right is model output, and only the right-hand side is a forecast
+    being scored.
+    """
+    cohorts = sorted(gen_asfr["cohort"].dropna().unique())
+    fig, axes = _asfr_grid(cohorts)
+    obs_by = dict(list(obs_asfr.groupby("cohort", observed=True)))
+    for ax, cohort in zip(axes, cohorts, strict=False):
+        sub = gen_asfr[gen_asfr["cohort"] == cohort]
+        _draw_asfr_panel(ax, sub, level, color="tab:orange", label="generated mean")
+        o = obs_by.get(cohort)
+        if o is not None:
+            o = o.sort_values("age_bin")
+            ax.plot(o["age_bin"], o["asfr"], color="black", lw=1.4, label="observed")
+        if jumpoff_days is not None:
+            ax.axvline(days_to_years(jumpoff_days), color="0.4", lw=0.9, ls=":")
+        ax.set_title(f"cohort {cohort}", fontsize=9, loc="left")
+    return _finish_asfr_grid(fig, axes, cohorts, title=title, legend_title=f"band: {level:.0%} CI")
+
+
+def plot_asfr_jumpoff_panel(
+    obs_asfr: pd.DataFrame,
+    gen_by_jumpoff: dict[int, pd.DataFrame],
+    *,
+    title: str | None = None,
+    level: float = DEFAULT_LEVEL,
+) -> Figure:
+    """The same cohort grid with every jump-off's generated profile drawn in each panel.
+
+    Each jump-off gets a color, and a dotted rule of its own color marks the age it starts
+    forecasting from — so a panel shows directly how much of a cohort's profile the model is being
+    asked to produce, and whether the fit degrades as that share grows.
+    """
+    jumpoffs = sorted(gen_by_jumpoff)
+    cohorts = sorted(
+        {c for g in gen_by_jumpoff.values() for c in g["cohort"].dropna().unique()}
+    )
+    fig, axes = _asfr_grid(cohorts)
+    obs_by = dict(list(obs_asfr.groupby("cohort", observed=True)))
+    colors = stratum_colors(len(jumpoffs), lo=0.1, hi=0.85)
+    for ax, cohort in zip(axes, cohorts, strict=False):
+        for t2, color in zip(jumpoffs, colors, strict=True):
+            gen = gen_by_jumpoff[t2]
+            _draw_asfr_panel(
+                ax, gen[gen["cohort"] == cohort], level, color=color,
+                label=f"jump-off {days_to_years(t2):.0f}y", alpha=0.2,
+            )
+            ax.axvline(days_to_years(t2), color=color, lw=0.9, ls=":", alpha=0.7)
+        o = obs_by.get(cohort)
+        if o is not None:
+            o = o.sort_values("age_bin")
+            ax.plot(o["age_bin"], o["asfr"], color="black", lw=1.4, label="observed")
+        ax.set_title(f"cohort {cohort}", fontsize=9, loc="left")
+    return _finish_asfr_grid(fig, axes, cohorts, title=title, legend_title=f"bands: {level:.0%} CI")
 
 
 def majority_complete(gen_ccf: pd.DataFrame) -> pd.Series:
@@ -479,10 +579,12 @@ def _draw_bin_median(ax, sub: pd.DataFrame, base: float, color) -> None:
     ax.plot([mid, mid], [base, base + 0.12], color=color, lw=1.6, solid_capstyle="butt", zorder=4)
 
 
-def _step_sample(km_one: pd.DataFrame, grid: np.ndarray) -> np.ndarray:
-    """Survival of one KM curve sampled at ``grid`` times (step function; 1.0 before the first)."""
+def _step_sample(
+    km_one: pd.DataFrame, grid: np.ndarray, *, value: str = "survival", before: float = 1.0
+) -> np.ndarray:
+    """One KM column at ``grid`` times (step function; ``before`` ahead of the first event)."""
     g = km_one.sort_values("time")
     times = g["time"].to_numpy()
-    surv = g["survival"].to_numpy()
+    col = g[value].to_numpy() if value in g.columns else np.full(len(g), np.nan)
     idx = np.searchsorted(times, grid, side="right") - 1
-    return np.where(idx >= 0, surv[np.clip(idx, 0, len(surv) - 1)], 1.0)
+    return np.where(idx >= 0, col[np.clip(idx, 0, len(col) - 1)], before)

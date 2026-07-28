@@ -88,6 +88,16 @@ def ccf(
     return out[cols].sort_values(group).reset_index(drop=True) if group else out[cols]
 
 
+def _with_replicates(frame: pd.DataFrame, seed_col: str) -> pd.DataFrame:
+    """A frame guaranteed to carry ``seed_col``; observed data has one replicate per person.
+
+    Real data is not replicated, so every person contributes a single realization. Treating that as
+    one seed makes the replicate machinery give the right answer without a special case: the
+    within-person variance is 0 and the whole spread is between people.
+    """
+    return frame if seed_col in frame.columns else frame.assign(**{seed_col: 0})
+
+
 def ccf_variance(
     births: pd.DataFrame,
     spans: pd.DataFrame,
@@ -100,10 +110,14 @@ def ccf_variance(
 
     Returns ``[cohort, n_women, ccf, within_var, between_var, total_var]``, the decomposition of
     :func:`~seqeval.core.replicates.mean_variance_components` applied per cohort. ``births`` and
-    ``spans`` are seed-replicated (``spans`` is the population, so women with no births are counted
-    in the denominator exactly as :func:`ccf` counts them); ``ccf`` here is the across-seed mean and
-    agrees with :func:`ccf` averaged over seeds.
+    ``spans`` may be seed-replicated (``spans`` is the population, so women with no births are
+    counted in the denominator exactly as :func:`ccf` counts them); ``ccf`` here is the across-seed
+    mean and agrees with :func:`ccf` averaged over seeds.
+
+    On unreplicated data — the observed history — there is nothing for seeds to disagree about:
+    ``within_var`` is 0 and ``total_var`` is the plain sampling variance of the cohort mean.
     """
+    births, spans = _with_replicates(births, seed_col), _with_replicates(spans, seed_col)
     cohorts = cohort_bins(persons, width=cohort_width).reset_index()
     pop = spans[["person_id", seed_col]].drop_duplicates()
     got = births.groupby(["person_id", seed_col], observed=True).size().rename("count")
@@ -160,6 +174,7 @@ def parity_distribution(
     :func:`~seqeval.metrics._disclosure.suppress_small_cells`, judged on how many distinct women
     land in them.
     """
+    births, spans = _with_replicates(births, seed_col), _with_replicates(spans, seed_col)
     cohorts = cohort_bins(persons, width=cohort_width).reset_index()
     pop = spans[["person_id", seed_col]].drop_duplicates()
     got = births.groupby(["person_id", seed_col], observed=True).size().rename("count")
@@ -216,7 +231,13 @@ def asfr(
 
     ``period`` cells are ``(year, age_bin)`` (calendar time from :func:`exposure` with
     ``by_year=True``); ``cohort`` cells are ``(cohort, age_bin)`` with ``cohort_width``-year bands.
-    Returns ``[*extra_by, year|cohort, age_bin, births, person_years, asfr]``.
+    Returns ``[*extra_by, year|cohort, age_bin, births, person_years, asfr, asfr_var]``.
+
+    ``asfr_var`` is the sampling variance of that one cell's rate under a Poisson count of births on
+    fixed exposure — ``births / person_years²``, ``NaN`` where the cell has no exposure. It is the
+    uncertainty *within* a cell, not the spread across replicates: with ``extra_by=("seed", ...)``
+    each seed's cell carries its own, and a band over seeds adds the two (see
+    :func:`~seqeval.viz.backtest._total_band`).
     """
     extra_by = list(extra_by)
     dim = "year" if mode == "period" else "cohort"
@@ -251,7 +272,10 @@ def asfr(
     out["births"] = out["births"].fillna(0).astype(np.int64)
     out["person_years"] = out["person_days"] / DAYS_PER_YEAR
     out["asfr"] = np.where(out["person_years"] > 0, out["births"] / out["person_years"], np.nan)
-    cols = [*extra_by, dim, "age_bin", "births", "person_years", "asfr"]
+    out["asfr_var"] = np.where(
+        out["person_years"] > 0, out["births"] / out["person_years"] ** 2, np.nan
+    )
+    cols = [*extra_by, dim, "age_bin", "births", "person_years", "asfr", "asfr_var"]
     return out[cols].sort_values([*extra_by, dim, "age_bin"]).reset_index(drop=True)
 
 
@@ -265,7 +289,14 @@ def ppr(
 ) -> pd.DataFrame:
     """Parity progression ratios: of groups reaching parity ``k``, the fraction reaching ``k+1``.
 
-    Returns ``[*extra_by, parity_from, parity_to, n_at_risk, n_progressed, ppr]``.
+    Returns ``[*extra_by, parity_from, parity_to, n_at_risk, n_progressed, ppr, ppr_var]``.
+
+    ``ppr_var`` is the sampling variance of that one transition's ratio under a binomial count of
+    progressions among those at risk — ``p(1−p)/n_at_risk``, ``NaN`` where nobody is at risk. It is
+    the uncertainty *within* a cell, not the spread across replicates: with
+    ``extra_by=("seed", ...)`` each seed's transition carries its own, and a band over seeds adds
+    the two (see :func:`~seqeval.viz.backtest._total_band`).
+
     ``min_exposure_after_k`` (days) drops from the denominator any group whose span ends within that
     much of reaching parity ``k`` — it was censored before a fair chance to progress. Default
     ``None`` applies no such exclusion (censoring already removes groups that never reach ``k``);
@@ -316,6 +347,7 @@ def ppr(
 
     out = pd.DataFrame(rows)
     out["ppr"] = np.where(out["n_at_risk"] > 0, out["n_progressed"] / out["n_at_risk"], np.nan)
+    out["ppr_var"] = out["ppr"] * (1.0 - out["ppr"]) / out["n_at_risk"].where(out["n_at_risk"] > 0)
     return out.sort_values([*extra_by, "parity_from"]).reset_index(drop=True)
 
 

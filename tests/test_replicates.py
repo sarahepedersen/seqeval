@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -91,23 +89,6 @@ def test_replicate_summary_filters_evaluable():
     )
     summ = R.replicate_summary(tbl, run_keys=RK)
     assert summ.iloc[0]["k"] == 1 and summ.iloc[0]["n"] == 2
-
-
-def test_ragged_n_warns(caplog):
-    # two runs in the same window with different n -> informative-censoring warning
-    tbl = pd.DataFrame(
-        {
-            "person_id": [1, 1, 2],
-            "age_start": 0,
-            "age_stop": 100,
-            "seed": [0, 1, 0],
-            "occurred": [True, False, True],
-            "evaluable": True,
-        }
-    )
-    with caplog.at_level(logging.WARNING, logger="seqeval"):
-        R.replicate_summary(tbl, run_keys=RK)
-    assert any("informative censoring" in r.message for r in caplog.records)
 
 
 # --- MC error: Brier correction (the load-bearing test) -----------------------------------------
@@ -270,21 +251,3 @@ def test_count_distribution_and_moments():
     mom = R.count_moments(ct, run_keys=RK, seed_col="seed").iloc[0]
     assert mom["mean"] == pytest.approx(1.0)
     assert mom["var"] == pytest.approx(0.5)  # population variance of [0,1,1,2]
-
-
-# --- resampling ---------------------------------------------------------------------------------
-def _ccf_stat(df):
-    b = df[df["event"] == "birth"]
-    return pd.DataFrame({"ccf": [len(b) / df["seed"].nunique() / df["person_id"].nunique()]})
-
-
-def test_seed_bootstrap_ci_covers_truth():
-    rng = np.random.default_rng(5)
-    h = S.default_hazards()
-    obs, pers = S.simulate_cohort(1500, (1960, 1990), h, None, rng)
-    gen = S.simulate_generated(obs, pers, h, [(0.0, 0.0)], 20, rng)
-    bs = R.seed_bootstrap(
-        gen, seed_col="seed", stat_fn=_ccf_stat, n_boot=300, rng=np.random.default_rng(1)
-    ).iloc[0]
-    assert bs["ci_lo"] <= bs["estimate"] <= bs["ci_hi"]
-    assert bs["ci_lo"] <= S.expected_ccf(h) <= bs["ci_hi"]

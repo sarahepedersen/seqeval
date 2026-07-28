@@ -18,7 +18,6 @@ replicates:
   interval: jeffreys
   level: 0.95
   min_replicates: 5
-  bootstrap: {n: 200, seed: 7}
 
 outcomes:
   first_birth: {event: birth, n: 1}

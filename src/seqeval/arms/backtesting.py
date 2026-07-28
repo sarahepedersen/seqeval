@@ -37,7 +37,14 @@ from seqeval.core.outcomes import (
     time_to_event,
 )
 from seqeval.core.slicing import AgeBins, align_jumpoff_to_event, condition_on_count
-from seqeval.core.specs import Condition, CountQuery, FramedOutcome, ReplicateSpec, TTESpec
+from seqeval.core.specs import (
+    Condition,
+    CountQuery,
+    FertilityGrid,
+    FramedOutcome,
+    ReplicateSpec,
+    TTESpec,
+)
 from seqeval.io.loaders import Bundle
 from seqeval.io.schema import GEN_KEYS, OBS_KEYS
 from seqeval.metrics import fertility as fe
@@ -46,6 +53,7 @@ from seqeval.metrics import survival as sv
 from seqeval.units import days_to_years
 from seqeval.viz import backtest as viz_backtest
 from seqeval.viz import calibration as viz_calibration
+from seqeval.viz import fertility as viz_fertility
 from seqeval.viz._labels import describe_outcome
 
 logger = logging.getLogger("seqeval")
@@ -60,6 +68,9 @@ _ERROR_BIN_YEARS = 1.0
 _PER_PERSON = {"probabilities"}
 # Age grid (years) at which generated vs observed KM survival is compared for `km:*` targets.
 _KM_GRID_YEARS = list(range(16, 46, 2))
+# Fertility cell geometry when the caller supplies none; the CLI always resolves one from the
+# descriptives block (`config.resolve_fertility_grid`) so the two arms bin alike.
+_DEFAULT_FERTILITY_GRID = FertilityGrid()
 
 
 def run(
@@ -72,13 +83,14 @@ def run(
     prob_outcomes: list[FramedOutcome | CountQuery],
     replicate_spec: ReplicateSpec,
     cohort_width: int = DEFAULT_COHORT_WIDTH,
+    fertility_grid: FertilityGrid = _DEFAULT_FERTILITY_GRID,
 ) -> None:
     """Run backtesting over every configured window; write the six result tables (04 section 2.2).
 
-    ``outcomes``/``conditions``/``prob_outcomes``/``replicate_spec`` are the resolved objects from
-    ``config.resolve_*`` (passed in, like the descriptives registry, because they live at the top
-    level of the config). Writes ``probabilities``, ``calibration``, ``scores``,
-    ``aggregate_error`` and ``coverage`` parquet tables.
+    ``outcomes``/``conditions``/``prob_outcomes``/``replicate_spec``/``fertility_grid`` are the
+    resolved objects from ``config.resolve_*`` (passed in, like the descriptives registry, because
+    they live at the top level of the config). Writes ``probabilities``, ``calibration``,
+    ``scores``, ``aggregate_error`` and ``coverage`` parquet tables.
     """
     if bundle.generated is None:
         logger.warning("backtesting: no generated file; arm skipped")
@@ -152,6 +164,7 @@ def run(
                 acc,
                 out,
                 panels,
+                fertility_grid,
             )
 
     _emit_jumpoff_panels(panels, out, replicate_spec.level)
@@ -229,7 +242,7 @@ def _score_probability_outcome(
         _emit_timing_ridge(spec, tables, t2, out, desc, set(cond_persons) - settled, acc, label)
 
     scores = _score_row(joined, summary, tables, binning)
-    cis = _score_cis(gen_eval, obs_eval, replicate_spec, binning)
+    cis = ml.score_cis(joined, level=replicate_spec.level)
     acc["scores"].append(_stamp_scores(scores, label, cis))
 
 
@@ -325,53 +338,6 @@ def _score_row(joined, summary, tables, binning) -> dict:
     return scores
 
 
-def _score_cis(gen_eval, obs_eval, spec, binning) -> pd.DataFrame | None:
-    """95% seed-bootstrap CIs for the ML metrics using **all** seeds, as ``[metric, ci_lo, ci_hi]``.
-
-    Resamples seed labels with replacement (``spec.bootstrap_n`` draws) and recomputes each metric,
-    giving the Monte-Carlo (replicate) uncertainty on the headline scores. Returns ``None`` when
-    bootstrapping is disabled or the truth column is single-valued (no metric is defined).
-    """
-    if spec.bootstrap_n <= 0:
-        return None
-    truth = obs_eval.loc[obs_eval["evaluable"], ["person_id", "occurred"]].rename(
-        columns={"occurred": "y_true"}
-    )
-    truth["y_true"] = truth["y_true"].astype(int)
-    if truth["y_true"].nunique() < 2:
-        return None
-
-    metrics = ["roc_auc", "brier_corrected", "mse", "r2", "ece"]
-
-    def stat_fn(df: pd.DataFrame) -> pd.DataFrame:
-        summ = rep.replicate_summary(df, run_keys=_RUN_KEYS)
-        est = rep.estimate_probability(summ, spec=spec)
-        j = est.merge(truth, on="person_id", how="inner")
-        if j.empty or j["y_true"].nunique() < 2:
-            return pd.DataFrame({m: [np.nan] for m in metrics})
-        return pd.DataFrame(
-            {
-                "roc_auc": [ml.roc_auc(j)],
-                "brier_corrected": [ml.brier(j)["corrected"]],
-                "mse": [ml.mse(j)],
-                "r2": [ml.r2(j)],
-                # match _score_row's binning exactly so the point sits on the same statistic as
-                # its CI.
-                "ece": [ml.ece(ml.calibration_table(j, strategy=binning))],
-            }
-        )
-
-    boot = rep.seed_bootstrap(
-        gen_eval,
-        seed_col="seed",
-        stat_fn=stat_fn,
-        n_boot=spec.bootstrap_n,
-        rng=np.random.default_rng(spec.bootstrap_seed),
-        value_cols=metrics,
-    )
-    return boot[["metric", "ci_lo", "ci_hi"]]
-
-
 def _timing_horizon(spec, t2) -> int:
     """Where the frame closes, expressed in the outcome's duration units (days from its origin).
 
@@ -443,6 +409,7 @@ def _score_aggregate_target(
     acc,
     out,
     panels,
+    fertility_grid,
 ) -> None:
     if persons is None and target in FERTILITY_TARGETS_NEEDING_PERSONS:
         logger.warning("backtesting: skipping aggregate target %r — needs persons", target)
@@ -465,12 +432,13 @@ def _score_aggregate_target(
             cohort_width,
             combined,
             observed,
+            fertility_grid,
         )
     except _UnsupportedTarget:
         logger.warning("backtesting: aggregate target %r not supported; skipped", target)
         return
 
-    err = ml.aggregate_error(gen_m, obs_m, value_col=value_col, on=on, spec=replicate_spec)
+    err = ml.aggregate_error(gen_m, obs_m, value_col=value_col, on=on)
     err.insert(0, "target", target)
     acc["aggregate_error"].append(_stamp(err, _cell_label(t1, t2, target, None)))
 
@@ -494,11 +462,29 @@ def _score_aggregate_target(
         acc["parity_distribution"].append(_stamp(par_m, _cell_label(t1, t2, "ccf", None)))
         out.figure(
             f"uncertainty_ccf_w{jumpoff_y}",
-            viz_backtest.plot_ccf_inference_vs_outcome(
+            viz_fertility.plot_ccf_inference_vs_outcome(
                 var_m, par_m, observed=obs_m,
                 complete=viz_backtest.majority_complete(gen_m),
                 level=replicate_spec.level,
                 title=f"Inference vs outcome uncertainty — jump-off {jumpoff_y}y",
+            ),
+        )
+    elif target == "ppr":
+        _stash_panel(panels, "ppr", obs_m, gen_m, t2)
+        out.figure(
+            f"ppr_overlay_w{jumpoff_y}",
+            viz_backtest.plot_ppr_overlay(
+                obs_m, gen_m, level=replicate_spec.level,
+                title=f"Parity progression — jump-off {jumpoff_y}y",
+            ),
+        )
+    elif target == "asfr_cohort":
+        _stash_panel(panels, "asfr_cohort", obs_m, gen_m, t2)
+        out.figure(
+            f"asfr_overlay_w{jumpoff_y}",
+            viz_backtest.plot_asfr_overlay(
+                obs_m, gen_m, jumpoff_days=t2, level=replicate_spec.level,
+                title=f"Cohort ASFR — jump-off {jumpoff_y}y",
             ),
         )
 
@@ -529,6 +515,28 @@ def _stash_panel(
         entry["variance"][int(t2)] = variance
 
 
+#: Cross-jump-off panel per stashed overlay family: key -> (figure name, plot fn, title). ``km:*``
+#: is the one dynamic family (the outcome name rides in both the figure name and the title), so it
+#: is handled separately below rather than bent into this table.
+_JUMPOFF_PANELS = {
+    "ccf": (
+        "ccf_overlay_all_jumpoffs",
+        viz_backtest.plot_ccf_jumpoff_panel,
+        "CCF by cohort — all jump-offs",
+    ),
+    "ppr": (
+        "ppr_overlay_all_jumpoffs",
+        viz_backtest.plot_ppr_jumpoff_panel,
+        "Parity progression — all jump-offs",
+    ),
+    "asfr_cohort": (
+        "asfr_overlay_all_jumpoffs",
+        viz_backtest.plot_asfr_jumpoff_panel,
+        "Cohort ASFR — all jump-offs",
+    ),
+}
+
+
 def _emit_jumpoff_panels(panels: dict, out, level: float) -> None:
     """One all-jump-offs comparison figure per overlay family, when there are ≥2 windows to compare.
 
@@ -537,15 +545,7 @@ def _emit_jumpoff_panels(panels: dict, out, level: float) -> None:
     for key, entry in sorted(panels.items()):
         if len(entry["gen"]) < 2:
             continue
-        if key == "ccf":
-            out.figure(
-                "ccf_overlay_all_jumpoffs",
-                viz_backtest.plot_ccf_jumpoff_panel(
-                    entry["obs"], entry["gen"], variance_by_jumpoff=entry["variance"],
-                    title="CCF by cohort — all jump-offs", level=level,
-                ),
-            )
-        else:
+        if key.startswith("km:"):
             name = key[len("km:") :]
             out.figure(
                 f"km_overlay_{name}_all_jumpoffs",
@@ -554,6 +554,14 @@ def _emit_jumpoff_panels(panels: dict, out, level: float) -> None:
                     title=f"{name} survival — all jump-offs", level=level,
                 ),
             )
+            continue
+        figure_name, plot_fn, title = _JUMPOFF_PANELS[key]
+        # Only CCF carries a variance frame; the others compute their band from the metric table.
+        extra = {"variance_by_jumpoff": entry["variance"]} if key == "ccf" else {}
+        out.figure(
+            figure_name,
+            plot_fn(entry["obs"], entry["gen"], title=title, level=level, **extra),
+        )
 
 
 class _UnsupportedTarget(Exception):
@@ -571,8 +579,9 @@ def _aggregate_tables(
     cohort_width,
     combined,
     observed,
+    fertility_grid,
 ):
-    bins = AgeBins.from_years(*_FERTILE, 1.0)
+    bins = AgeBins.from_years(*_FERTILE, fertility_grid.age_bin_width)
     if target == "ccf":
         gen = fe.ccf(
             gen_births,
@@ -584,25 +593,28 @@ def _aggregate_tables(
         )
         obs = fe.ccf(obs_births, spans_obs, persons, by_cohort=True, cohort_width=cohort_width)
         return gen, obs, "ccf", ["cohort"]
-    if target in ("asfr_cohort", "asfr_period"):
-        mode = "cohort" if target == "asfr_cohort" else "period"
+    if target == "asfr_cohort":
+        # Cohort only: the jump-off is an age, so a (cohort, age) cell is wholly forecast or wholly
+        # replayed. A (year, age) cell is neither — the generated side has no calendar years before
+        # the earliest cohort reaches the jump-off, so the two sides cannot be aligned.
         gen = fe.asfr(
             gen_births,
             gen_spans,
             persons,
-            mode=mode,
+            mode="cohort",
             bins=bins,
             extra_by=_EXTRA_BY,
             cohort_width=cohort_width,
         )
         obs = fe.asfr(
-            obs_births, spans_obs, persons, mode=mode, bins=bins, cohort_width=cohort_width
+            obs_births, spans_obs, persons, mode="cohort", bins=bins, cohort_width=cohort_width
         )
-        dim = "cohort" if mode == "cohort" else "year"
-        return gen, obs, "asfr", [dim, "age_bin"]
+        return gen, obs, "asfr", ["cohort", "age_bin"]
     if target == "ppr":
-        gen = fe.ppr(gen_births, gen_spans, max_parity=6, extra_by=_EXTRA_BY)
-        obs = fe.ppr(obs_births, spans_obs, max_parity=6)
+        gen = fe.ppr(
+            gen_births, gen_spans, max_parity=fertility_grid.max_parity, extra_by=_EXTRA_BY
+        )
+        obs = fe.ppr(obs_births, spans_obs, max_parity=fertility_grid.max_parity)
         return gen, obs, "ppr", ["parity_from"]
     if target.startswith("km:"):
         name = target[len("km:") :]

@@ -28,6 +28,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
@@ -305,9 +306,9 @@ def _coverage_summary(results_dir: Path) -> str:
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
 
     note = (
-        '<p class="muted"><code>n_evaluable</code> persons actually contribute a score; '
-        "<code>n_settled</code> were already determined in the observed prefix and "
-        "<code>n_uncovered</code> ran out of observation before the frame closed. "
+        '<p class="muted"><code>- n_evaluable</code> persons actually contribute a score; '
+        "- <code>n_settled</code> were already determined in the observed prefix and "
+        "- <code>n_uncovered</code> ran out of observation before the frame closed. "
     )
     if n_empty:
         note += (
@@ -381,17 +382,24 @@ def _descriptives_section(arm_dir: Path) -> str:
     return "\n".join(parts)
 
 
-def _backtest_metrics_table(path: Path, *, bootstrap_n: int | None = None) -> str:
-    """Brier + AUC per outcome × jump-off age — replaces the metric-vs-jump-off line graphs.
+def _backtest_metrics_table(path: Path) -> str:
+    """The headline scores per outcome × jump-off age, with their intervals.
 
     The outcome (its condition encoded in the name) spans its jump-off rows; each row carries the
-    finite-seed-corrected Brier score, the raw-rate MSE and R², and the rank-based AUC — each with
-    its 95% seed-bootstrap CI in parentheses where available.
+    finite-seed-corrected Brier score, the raw-rate MSE and R², the rank-based AUC, and the
+    calibration error the reliability diagrams below display — each with its interval in parentheses
+    where one exists. ECE has none, so it shows as a bare number.
     """
     if not path.exists():
         return ""
     df = pd.read_parquet(path, engine="pyarrow")
-    metric_cols = [("brier_corrected", "Brier"), ("mse", "MSE"), ("r2", "R²"), ("roc_auc", "AUC")]
+    metric_cols = [
+        ("brier_corrected", "Brier"),
+        ("mse", "MSE"),
+        ("r2", "R²"),
+        ("roc_auc", "AUC"),
+        ("ece", "ECE"),
+    ]
     keys = [m for m, _ in metric_cols]
     keep = df[df["metric"].isin(keys)].copy()
     if keep.empty:
@@ -430,17 +438,29 @@ def _backtest_metrics_table(path: Path, *, bootstrap_n: int | None = None) -> st
     header = "<tr><th>outcome (condition)</th><th>jump-off (y)</th>" + "".join(
         f"<th>{label}</th>" for _, label in metric_cols
     ) + "</tr>"
-    ci_note = ""
-    if has_ci:
-        reps = (
-            f" from {bootstrap_n} seed-bootstrap resamples" if bootstrap_n else " (seed-bootstrap)"
-        )
-        ci_note = f" Parentheses are 95% CIs{reps}."
+    ci_note = (
+        " CIs are analytically computed from individual-level values to account for replication "
+        "variance: the sd of the per-person "
+        "loss for Brier and MSE, the delta method for R², and DeLong's for AUC. Each already "
+        "carries replicate noise, since every person's loss is computed from "
+        "their own <code>p̂</code> (see `within_person_variation` below). ECE has no CI, since we "
+        "use quantile binning."
+        if has_ci
+        else ""
+    )
     note = (
-        '<p class="muted">Brier is the finite-seed-corrected Brier score; MSE is the same '
-        "squared error of <code>p̂ = k/n</code> against the observed outcome without that "
-        "correction; R² rescales MSE by the outcome variance (1 = perfect, 0 = base "
-        f"rate); AUC is rank-based (tie-corrected).{ci_note} One row per outcome × jump-off.</p>"
+        " - MSE is the squared-error using <code>p̂</code> (from the replicate mean) versus the "
+        "observed outcome."
+        "- R² is the MSE rescaled by the outcome variance (1 = perfect, 0 = base rate)."
+        " - Brier is a corrected MSE that accounts for seed variation by calculating the expected "
+        "inflation `mean_over_runs[ p̂·(1 − p̂) / n ]` and subtracting from the MSE (raw Brier)."
+        "- AUC is rank-based using `sklearn.metrics.roc_auc_score` from the p̂ calculated from the "
+        "MLE estimator across replicates. It checks whether the P(p̂ | event  >  p̂ | no event) "
+        "for a given outcome."
+        "- ECE is the expected calibration error, measuring the average deviation between "
+        "predicted probabilities and actual outcomes among binned p̂ values. We use quantile "
+        "binning for ECE and the reliability diagrams (see below)."
+        f"{ci_note}.</p>"
     )
     return f"<h3>Backtest metrics</h3><table>{header}{''.join(rows)}</table>{note}"
 
@@ -477,11 +497,62 @@ def _calibration_subsections(arm_dir: Path) -> str:
 
 #: Generated-vs-observed overlay figure families rendered in the backtesting section, in order.
 _OVERLAY_GROUPS = (
-    ("Survival (KM)", "km_overlay_*.png"),
+    ("Kaplan-Meier Curves", "km_overlay_*.png"),
     # CCF keeps only the cross-jump-off panel; a single window's CCF is the inference-vs-outcome
     # figure, which carries the same estimate and interval plus the outcome distribution.
     ("Completed cohort fertility (CCF)", "ccf_overlay_all_jumpoffs.png"),
+    ("Parity progression ratios (PPR)", "ppr_overlay_*.png"),
+    ("Cohort ASFR", "asfr_overlay_*.png"),
 )
+
+
+def _aggregate_error_table(arm_dir: Path) -> str:
+    """Per target × jump-off: how far the generated aggregate sits from the observed one.
+
+    One row per (target, jump-off), summarizing the per-cell errors the overlay figures show
+    graphically. ``bias`` and ``MAE`` are means over cells and ``RMSE`` is the root mean square of
+    the per-cell values, so every cell counts once regardless of how many people it holds. Cells
+    with no generated value (a cohort ASFR before the jump-off, where the model produces no
+    exposure) are not counted at all.
+    """
+    path = arm_dir / "aggregate_error.parquet"
+    if not path.exists():
+        return ""
+    df = pd.read_parquet(path, engine="pyarrow")
+    scored = df.dropna(subset=["gen_mean", "obs"])
+    if scored.empty:
+        return ""
+    summary = (
+        scored.groupby(["target", "age_stop_years"], observed=True)
+        .agg(
+            cells=("bias", "size"),
+            bias=("bias", "mean"),
+            mae=("mae", "mean"),
+            rmse=("rmse", lambda s: float(np.sqrt(np.mean(np.square(s))))),
+        )
+        .reset_index()
+        .rename(columns={"age_stop_years": "jump-off (y)", "mae": "MAE", "rmse": "RMSE"})
+    )
+    rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(r.target))}</td><td>{r._2:g}</td><td>{r.cells:d}</td>"
+        f"<td>{r.bias:+.4f}</td><td>{r.MAE:.4f}</td><td>{r.RMSE:.4f}</td>"
+        "</tr>"
+        for r in summary.itertuples()
+    )
+    return (
+        '<h3 id="aggregate-error">Aggregate target error</h3>'
+        '<p class="muted">- Each row pools the per-cell errors behind one overlay figure: cohorts '
+        "for CCF, (cohort, age) cells for ASFR, transitions for PPR, grid ages for survival. "
+        "- Every cell counts once, so a cohort of three women weighs as much as one of three "
+        "hundred; read this beside the figures, where the intervals show which cells are thin. "
+        "- Cells the model produces nothing for (a cohort ASFR before its jump-off) are excluded "
+        "rather than scored as zero. "
+        f'- Full per-cell table: <a href="{html.escape(path.name)}">{html.escape(path.name)}</a>.'
+        "</p>"
+        "<table><tr><th>target</th><th>jump-off (y)</th><th>cells</th><th>bias</th>"
+        f"<th>MAE</th><th>RMSE</th></tr>{rows}</table>"
+    )
 
 
 def _gen_vs_obs_section(arm_dir: Path) -> str:
@@ -495,12 +566,22 @@ def _gen_vs_obs_section(arm_dir: Path) -> str:
     if not blocks:
         return ""
     return (
-        '<h3 id="gen-vs-obs">Generated vs observed</h3>'
-        '<p class="muted">Observed "truth" (black) under the generated across-seed mean and its '
-        "uncertainty band (orange), per jump-off. The survival bands are Monte-Carlo error in the "
-        "plotted mean (<code>±z·sd/&radic;K</code> across seeds). The CCF bands are "
-        "<code>±z·&radic;total_var</code>, which is a sum of both the within-individual "
-        "inference variation and the between-people outcome uncertainty.</p>" + "".join(blocks)
+        '<h3 id="gen-vs-obs">Generated vs observed sequences</h3>'
+        '<p class="muted">- The Kaplan-Meier CIs are the total uncertainty in '
+        "the plotted mean: Greenwood's sampling variance averaged over seeds, plus the "
+        "within-individual replicate variance (see `within_person_variance` below). "
+        "- The CCF bands are "
+        "<code>±z·&radic;total_var</code>, a sum of the within-individual inference variation and "
+        "the between-people variation divided by the number of women. (see inference vs outcome "
+        "uncertainty below)"
+        "- The PPR bars are the binomial variance of each transition averaged over seeds, plus "
+        "the across-seed variance over K. Later transitions rest on the women who reached that "
+        "parity, so they widen on their own — a wide bar at parity 4 is a thin denominator, not a "
+        "worse model. "
+        "- The cohort ASFR bands are the same two terms with the Poisson variance of each cell "
+        "rate. Each panel's dotted rule is the jump-off age: everything to its left is replayed "
+        "history, and the generated profile only begins where the model starts producing.</p>"
+        + "".join(blocks)
     )
 
 
@@ -512,26 +593,22 @@ def _uncertainty_section(arm_dir: Path) -> str:
     cells = "".join(_figure_html(f) for f in figs)
     return (
         '<h3 id="uncertainty">Inference vs outcome uncertainty</h3>'
-        '<p class="muted">The 95% CI is the '
-        "uncertainty in the CCF estimate <em>mean</em> — it is "
+        '<p class="muted">- INFERENCE: The 95% CI is the '
+        "uncertainty in the CCF estimate mean — it is "
         "<code>±z·&radic;total_var</code>, a total-variance measure of both the within-individual "
         "inference variation (between replicates of the same individual) and the between-people "
-        "estimation uncertainty in the sample. The outcome uncertainty histograms are "
+        "estimation uncertainty in the sample. "
+        "- OUTCOME: The histograms are "
         "distributions of estimated completed parity across the cohort. "
-        "Counts are in <code>parity_distribution.parquet</code>; hatched bars rest on fewer women "
-        "than the run's minimum cell size and are withheld.</p>"
-        '<p class="muted">How those counts are built: <strong>every replicate of every woman is '
-        "reflected</strong>, not her average. A woman is placed in each parity in proportion to "
-        "how often her seeds landed there — five seeds giving 2, 2, 3, 2, 3 put her 0.6 at parity "
-        "2 and 0.4 at parity 3 — and each woman carries a total weight of 1 however many "
-        "replicates she has. Nothing is rounded to an integer parity, so a woman the model is "
-        "unsure about enters as the spread she is. The consequence is that this distribution is "
-        "the model's predictive distribution for one woman and its width carries "
-        "<em>both</em> genuine differences between women and disagreement between seeds about the "
-        "same woman: its variance is <code>mean_i(s²_i) + var_i(mu_i)</code>. The seed share is "
-        "large at an early jump-off and small at a late one, so read the width as "
-        "'how predictable is an individual under this model as run', not as heterogeneity "
-        "alone.</p>"
+        "Counts are in <code>parity_distribution.parquet</code> "
+        "</p>"
+        '<p class="muted">- Every individual replicate '
+        "reflected, not the average across replicates. An individual is placed in each parity "
+        "in proportion to "
+        "how often their replicate trajectories landed there (e.g. five seeds giving 2, 2, 3, "
+        "2, 3 contribute "
+        "0.6 to parity "
+        "2 and 0.4 to parity 3</p>"
         f'<div class="figrow">{cells}</div>'
     )
 
@@ -544,22 +621,26 @@ def _timing_error_section(arm_dir: Path) -> str:
     cells = "".join(_figure_html(f) for f in figs)
     return (
         '<h3 id="timing-error">Timing error</h3>'
-        '<p class="muted">For each timed outcome, the distribution of '
-        "<code>observed − predicted</code> timing. The bins are equal-count of predicted "
-        "value, drawn as proportions within that bin. Mass to the right "
-        "of the dashed zero line is an event that happened later than predicted — the model "
-        "predicting too early. The counts are in "
+        '<p class="muted">- For each outcome, the distribution of '
+        "<code>observed − predicted</code> timing (in years). The bins are equal-count of "
+        "predicted "
+        "value. "
+        "- Mass to the right "
+        "of the dashed zero line is an event that happened later than predicted. Mass to the "
+        "left is an event that happened earlier than predicted."
+        "- The counts are in "
         "<code>timing_error.parquet</code>.</p>"
         f'<div class="figrow">{cells}</div>'
     )
 
 
-def _backtesting_section(arm_dir: Path, *, bootstrap_n: int | None = None) -> str:
+def _backtesting_section(arm_dir: Path) -> str:
     """Backtesting: metrics table, coverage, gen-vs-obs overlays, and calibration subsections."""
     parts = ['<h2 id="backtesting">Backtesting</h2>']
     for block in (
-        _backtest_metrics_table(arm_dir / "scores.parquet", bootstrap_n=bootstrap_n),
+        _backtest_metrics_table(arm_dir / "scores.parquet"),
         _coverage_summary(arm_dir.parent),
+        _aggregate_error_table(arm_dir),
         _gen_vs_obs_section(arm_dir),
         _uncertainty_section(arm_dir),
         _calibration_subsections(arm_dir),
@@ -620,13 +701,31 @@ def _forecasting_section(arm_dir: Path) -> str:
             parts.append(_table_html(p, to_years=True))
             if name == "replicate_variance_aggregate":
                 parts.append(
-                    '<p class="muted">The variance of each CCF, split by source and stated in '
-                    "variance units of the CCF itself. <code>within_var</code> is replicate-only — "
-                    "rerunning inference on these same women with other seeds; "
-                    "<code>between_var</code> is outcome uncertainty (quantum: number of "
-                    "children). They add to <code>total_var</code>, which is what "
-                    "<code>se_total</code>, <code>ci_total</code> and the CCF figure band all "
-                    "report.</p>"
+                    '<p class="muted">- The variance of each CCF, split by within-individual '
+                    "and between-person."
+                    "- <code>within_var</code> is within-individual replicate variance — "
+                    "rerunning inference on the same person to get a different trajectory; "
+                    "- <code>between_var</code> is how much individuals differ, divided by "
+                    "<code>n</code>."
+                    "- Both terms are error in the <em>mean</em> rather than the "
+                    "spread of individual outcomes (see the backtesting"
+                    "outcome-uncertainty figure). " \
+                    "- The terms sum to  "
+                    "<code>total_var</code>, which is what <code>se_total</code>, "
+                    "<code>ci_total</code> and the CCF figure band all report. "
+                    "- <code>forecast_share</code> is the fraction of each estimate contributed by "
+                    "post-jump-off generated events: 0 rests entirely on observed history, 1 "
+                    "entirely on model output.</p>"
+                )
+            if name == "violation_rates":
+                parts.append(
+                    '<p class="muted">- <code>rate_per_event</code> is the share of the events that'
+                    "break a given rule — <code>n_events</code> counts only that event "
+                    "kind." \
+                    "- e.g.: the rate reads directly as \"x% of generated births came too soon "
+                    "after the last one\". " \
+                    "- Violations are counted per event, so one sequence "
+                    "offending three times contributes three.</p>"
                 )
     return "\n".join(parts) if len(parts) > 1 else ""
 
@@ -651,17 +750,10 @@ def build_report(results_dir: str | Path) -> Path:
     results_dir = Path(results_dir)
     manifest = read_manifest(results_dir) or {}
 
-    # Bootstrap-resample count backs the backtest-metric CIs.
-    boot_n = (
-        manifest.get("config_resolved", {})
-        .get("replicates", {})
-        .get("bootstrap", {})
-        .get("n")
-    )
     arm_renderers = {
         "descriptives": _descriptives_section,
-        "backtesting": lambda d: _backtesting_section(d, bootstrap_n=boot_n),
-        "forecasting": lambda d: _forecasting_section(d),
+        "backtesting": _backtesting_section,
+        "forecasting": _forecasting_section,
     }
     sections = [_run_summary_section(manifest, results_dir)]
     present_arms = []

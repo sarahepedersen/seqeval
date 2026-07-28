@@ -206,7 +206,7 @@ diagonal.
 
 ```python
 ReplicateSpec(interval="jeffreys", level=0.95,
-              min_replicates=5, bootstrap_n=200, bootstrap_seed=7, convergence_curve=True)
+              min_replicates=5)
 ```
 
 Resolved from the top-level `replicates:` config block; consumed by every function in

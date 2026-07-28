@@ -247,3 +247,32 @@ def test_parity_distribution_withholds_thin_cells():
                                  cohort_width=100)
     assert par["suppressed"].any()  # a 5-woman fixture cannot publish a per-parity breakdown
     assert par.loc[par["suppressed"], "share"].isna().all()
+
+
+def test_ppr_var_is_the_binomial_variance_of_its_own_transition():
+    """Each transition's sampling variance, from its own numerator and denominator."""
+    obs = tiny.observed_fixture()
+    births, spans = _tables(obs)
+    ppr = FE.ppr(births, spans, max_parity=4)
+    finite = ppr[ppr["n_at_risk"] > 0]
+    expected = finite["ppr"] * (1 - finite["ppr"]) / finite["n_at_risk"]
+    np.testing.assert_allclose(finite["ppr_var"], expected)
+    # a transition nobody is at risk for has no ratio and so no variance for one
+    assert ppr.loc[ppr["n_at_risk"] == 0, "ppr_var"].isna().all()
+    assert (ppr["ppr_var"].dropna() >= 0).all()
+
+
+def test_asfr_var_is_the_poisson_variance_of_its_own_cell():
+    """Births are a Poisson count on fixed exposure, so the rate's variance is births/PY²."""
+    rng = np.random.default_rng(3)
+    h = S.default_hazards()
+    obs, pers = S.simulate_cohort(300, (1965, 1970), h, None, rng, no_event_fraction=1.0)
+    births, spans = _tables(obs)
+    af = FE.asfr(births, spans, pers, mode="cohort", bins=AgeBins.from_years(15, 50, 1))
+    exposed = af[af["person_years"] > 0]
+    np.testing.assert_allclose(
+        exposed["asfr_var"], exposed["births"] / exposed["person_years"] ** 2
+    )
+    # an unexposed cell has no rate, so it carries no variance rather than a zero one
+    assert af.loc[af["person_years"] <= 0, "asfr_var"].isna().all()
+    assert (af["asfr_var"].dropna() >= 0).all()

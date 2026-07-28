@@ -81,7 +81,7 @@ Sections (only those with results present):
 2. **Descriptives** — KM curves, ASFR/CCF/PPR figures + headline numbers; note comparing CCF to
    user-supplied external reference values if provided (`report.reference_ccf` config key,
    optional).
-3. **Backtesting** — the `scores` table pivoted (windows × outcomes × conditions) with bootstrap
+3. **Backtesting** — the `scores` table pivoted (windows × outcomes × conditions) with analytic
    CIs, reliability diagrams (predicted probability grouped into decile / equal-count bins by
    default, `arms.backtesting.calibration_binning`), generated-vs-observed overlays, and the
    waiting-time scatter. 

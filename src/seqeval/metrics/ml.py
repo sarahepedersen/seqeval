@@ -16,6 +16,7 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm, rankdata
 from sklearn.metrics import roc_auc_score
 
 from seqeval.core import replicates as rep
@@ -34,6 +35,7 @@ __all__ = [
     "roc_auc",
     "brier",
     "log_loss",
+    "score_cis",
     "timing_coverage",
     "timing_error_distribution",
     "subgroup_rates",
@@ -181,6 +183,104 @@ def r2(joined: pd.DataFrame) -> float:
         return float("nan")
     ss_res = float(np.sum((y - rate) ** 2))
     return 1.0 - ss_res / ss_tot
+
+
+def score_cis(joined: pd.DataFrame, *, level: float = 0.95) -> pd.DataFrame:
+    """Analytic ``[metric, ci_lo, ci_hi]`` for the backtest scores, from per-person quantities.
+
+    Every interval is ``estimate ± z·se``. Persons are the sampling unit:
+
+    - ``mse``/``brier_raw`` are means over persons of the loss ``l_i = (p̂_i − y_i)²``, so the
+      standard error is ``sd_i(l_i)/√n``.
+    - ``brier_corrected`` subtracts a mean of per-run terms (:func:`~seqeval.core.replicates.
+      brier_noise_correction`), so it is the mean of ``l_i − c_i`` and takes that quantity's sd.
+    - ``r2`` is a ratio of two means; :func:`_ratio_se` gives its delta-method standard error.
+    - ``roc_auc`` is a rank statistic, so its variance comes from DeLong's placement values
+      (:func:`_delong_var`), and the interval is clipped to ``[0, 1]``.
+    - ``ece`` gets **no** interval. Its bins are chosen from the data under quantile binning and the
+      statistic is biased upward, so there is no honest closed form to report; it merges to NaN.
+
+    These are sampling intervals over persons that *already carry* replicate noise: each ``l_i``
+    is computed from that person's own ``p̂_i``, so the spread across persons contains the seed
+    uncertainty the same way ``var_i(mu_i)`` does for CCF. They are the ``total_var`` analogue, not
+    the replicate-only one. No decomposition is reported because ``p̂`` is defined *across* seeds —
+    there is no per-seed loss to average.
+    """
+    p = joined["p_hat"].to_numpy().astype(float)
+    y = joined["y_true"].to_numpy().astype(float)
+    n = len(y)
+    z = norm.ppf(1 - (1 - level) / 2)
+    rows: list[dict] = []
+    if n < 2:
+        return pd.DataFrame(columns=["metric", "ci_lo", "ci_hi"])
+
+    loss = (p - y) ** 2
+    raw, se_raw = float(loss.mean()), float(loss.std(ddof=1) / np.sqrt(n))
+    rows.append({"metric": "mse", "value": raw, "se": se_raw})
+    rows.append({"metric": "brier_raw", "value": raw, "se": se_raw})
+
+    k, n_rep = joined["k"].to_numpy().astype(float), joined["n"].to_numpy().astype(float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inflation = np.where(n_rep >= 2, p * (1 - p) / (n_rep - 1), 0.0)
+    corrected = loss - inflation
+    rows.append(
+        {
+            "metric": "brier_corrected",
+            "value": float(corrected.mean()),
+            "se": float(corrected.std(ddof=1) / np.sqrt(n)),
+        }
+    )
+
+    resid = (y - k / n_rep) ** 2
+    spread = (y - y.mean()) ** 2
+    if spread.sum() > 0:
+        ratio, se_ratio = _ratio_se(resid, spread)
+        rows.append({"metric": "r2", "value": 1.0 - ratio, "se": se_ratio})
+
+    if len(np.unique(y)) == 2:
+        auc = float(roc_auc_score(y, p))
+        var = _delong_var(y, p)
+        if np.isfinite(var) and var > 0:
+            rows.append({"metric": "roc_auc", "value": auc, "se": float(np.sqrt(var))})
+
+    out = pd.DataFrame(rows)
+    out["ci_lo"] = out["value"] - z * out["se"]
+    out["ci_hi"] = out["value"] + z * out["se"]
+    auc_rows = out["metric"] == "roc_auc"
+    out.loc[auc_rows, ["ci_lo", "ci_hi"]] = out.loc[auc_rows, ["ci_lo", "ci_hi"]].clip(0.0, 1.0)
+    return out[["metric", "ci_lo", "ci_hi"]]
+
+
+def _ratio_se(num: np.ndarray, den: np.ndarray) -> tuple[float, float]:
+    """``(A/B, se)`` for a ratio of two per-person means, by the delta method.
+
+    The influence function of ``A/B`` at person ``i`` is ``(a_i − (A/B)·b_i)/B``, so the standard
+    error is that quantity's sd over ``√n``. The plug-in mean inside ``b_i`` contributes at
+    ``O(1/n)`` and is not corrected for.
+    """
+    n = len(num)
+    a, b = float(num.mean()), float(den.mean())
+    ratio = a / b
+    infl = (num - ratio * den) / b
+    return ratio, float(infl.std(ddof=1) / np.sqrt(n))
+
+
+def _delong_var(y: np.ndarray, p: np.ndarray) -> float:
+    """DeLong variance of the ROC-AUC, computed from midranks so ties count half.
+
+    ``var = S10/n₊ + S01/n₋`` where ``S10``/``S01`` are the variances of the per-person placement
+    values — the share of the opposite class each person is ranked above. Midranks
+    (:func:`scipy.stats.rankdata`) are what make this exact on the coarse ``1/n`` grid ``p_hat``
+    lives on, where ties are the rule rather than the exception (see :data:`AUC_TIE_NOTE`).
+    """
+    pos, neg = p[y == 1], p[y == 0]
+    n_pos, n_neg = len(pos), len(neg)
+    if n_pos < 2 or n_neg < 2:
+        return float("nan")
+    r_all = rankdata(np.concatenate([pos, neg]))
+    v10 = (r_all[:n_pos] - rankdata(pos)) / n_neg  # placement of each positive among negatives
+    v01 = 1.0 - (r_all[n_pos:] - rankdata(neg)) / n_pos
+    return float(v10.var(ddof=1) / n_pos + v01.var(ddof=1) / n_neg)
 
 
 def log_loss(joined: pd.DataFrame, *, eps: float = 1e-12) -> float:
@@ -352,17 +452,15 @@ def aggregate_error(
     *,
     value_col: str,
     on: list[str],
-    over_seeds: str = "seed",
     window_keys: tuple[str, ...] = ("age_start", "age_stop"),
-    spec: ReplicateSpec | None = None,
 ) -> pd.DataFrame:
     """Generic comparator for any 03 metric table (CCF/ASFR/PPR/KM-at-times), gen vs observed.
 
     Aligns on ``on``, computes per-seed error, then per-window summary
     ``[*window_keys, *on, obs, gen_mean, gen_sd_over_seeds, bias, mae, rmse]``. Mismatched ``on``
-    cells between the two sides raise (silent misalignment would corrupt every error). When
-    ``spec.bootstrap_n > 0`` percentile CIs on ``bias`` are added via
-    :func:`replicates.seed_bootstrap`.
+    cells between the two sides raise (silent misalignment would corrupt every error).
+    ``gen_sd_over_seeds`` is the seed-to-seed spread of the generated cell, which is the dispersion
+    a reader needs here; no interval is placed on ``bias``.
     """
     on = list(on)
     wkeys = [c for c in window_keys if c in gen_metric.columns]
@@ -391,34 +489,4 @@ def aggregate_error(
         rmse=("error", lambda e: float(np.sqrt(np.mean(e**2)))),
     ).reset_index()
 
-    if spec is not None and spec.bootstrap_n > 0 and over_seeds in gen_metric.columns:
-        out = out.merge(
-            _bootstrap_bias(gen_metric, obs_metric, value_col, on, over_seeds, wkeys, spec),
-            on=[*wkeys, *on],
-            how="left",
-        )
     return out.sort_values([*wkeys, *on]).reset_index(drop=True)
-
-
-def _bootstrap_bias(gen_metric, obs_metric, value_col, on, over_seeds, wkeys, spec) -> pd.DataFrame:
-    """Seed-bootstrap percentile CIs on the per-cell bias (resample seeds, recompute bias)."""
-    obs_lookup = obs_metric.set_index(on)[value_col]
-
-    def stat_fn(df: pd.DataFrame) -> pd.DataFrame:
-        agg = df.groupby([*wkeys, *on], observed=True)[value_col].mean().reset_index()
-        agg["bias"] = agg[value_col] - agg.set_index(on).index.map(obs_lookup).to_numpy()
-        return agg[[*wkeys, *on, "bias"]]
-
-    rng = np.random.default_rng(spec.bootstrap_seed)
-    boot = rep.seed_bootstrap(
-        gen_metric,
-        seed_col=over_seeds,
-        stat_fn=stat_fn,
-        n_boot=spec.bootstrap_n,
-        rng=rng,
-        value_cols=["bias"],
-    )
-    boot = boot[boot["metric"] == "bias"]
-    return boot[[*wkeys, *on, "ci_lo", "ci_hi"]].rename(
-        columns={"ci_lo": "bias_ci_lo", "ci_hi": "bias_ci_hi"}
-    )
