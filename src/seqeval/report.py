@@ -249,17 +249,11 @@ _BASIS_TEXT = {
 }
 
 
-def _basis_html(key: str) -> str:
-    """The replicate-basis line for a group.
+def _basis_item(key: str) -> str:
+    """The replicate-basis bullet, or ``""`` for a group where the distinction does not apply.
 
     Raises ``KeyError`` on an unknown key, so renaming a group cannot quietly drop its marker.
     """
-    item = _basis_item(key)
-    return f'<ul class="basis muted">{item}</ul>' if item else ""
-
-
-def _basis_item(key: str) -> str:
-    """The replicate-basis bullet itself, or ``""`` for a group where it does not apply."""
     value = REPLICATE_BASIS[key]
     if value is None:
         return ""

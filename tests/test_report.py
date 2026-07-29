@@ -194,7 +194,7 @@ def test_an_unknown_basis_key_raises(demo_config, tmp_path, monkeypatch):
     """A renamed group must fail loudly rather than lose its marker."""
     monkeypatch.delitem(report.REPLICATE_BASIS, "comparison.km")
     with pytest.raises(KeyError):
-        report._basis_html("comparison.km")
+        report._basis_item("comparison.km")
 
 
 def test_manifest_roundtrip(demo_config, tmp_path):
