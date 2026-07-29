@@ -74,20 +74,34 @@ identical manifests except timestamp/duration.
 Single self-contained HTML report (`results/report.html`) — no server, no JS build; embed figures
 as base64 PNGs and tables as styled `DataFrame.to_html` (cap displayed rows, link the parquet).
 
-Sections (only those with results present):
+Sections are grouped by **where the analysis comes from**, not by which arm produced it — the arm
+directories on disk keep their names, but a reader should see the provenance of a number before
+its value. Only sections with results present are rendered (`report.SECTIONS` holds the order):
 
 1. **Run summary** — model name, manifest highlights, data coverage (persons,
    cohorts, windows × replicates grid with evaluable counts and min_replicates flags).
-2. **Descriptives** — KM curves, ASFR/CCF/PPR figures + headline numbers; note comparing CCF to
-   user-supplied external reference values if provided (`report.reference_ccf` config key,
-   optional).
-3. **Backtesting** — the `scores` table pivoted (windows × outcomes × conditions) with analytic
-   CIs, reliability diagrams (predicted probability grouped into decile / equal-count bins by
-   default, `arms.backtesting.calibration_binning`), generated-vs-observed overlays, and the
-   waiting-time scatter. 
-4. **Forecasting** — combined Lexis heatmap + uncertainty map, illegal-move rates table
-   (generated vs observed side by side), seed-stability summaries.
+2. **Observed Sequences** (`descriptives/`) — computed from observed history alone: KM curves,
+   CCF, cohort ASFR; note comparing CCF to user-supplied external reference values if provided
+   (`report.reference_ccf` config key, optional).
+3. **Generated Sequences** (`forecasting/`) — computed from model output alone: combined Lexis
+   heatmap + uncertainty map, within-seed variance, illegal-move rates table, seed-stability
+   summaries.
+4. **Observed and Generated Comparison** (`backtesting/`) — the `scores` table pivoted (windows ×
+   outcomes × conditions) with analytic CIs, generated-vs-observed overlays, reliability diagrams
+   (predicted probability grouped into decile / equal-count bins by default,
+   `arms.backtesting.calibration_binning`), and the timing-error ridges.
 5. **Warnings** — verbatim list from manifest.
+
+Two conventions hold throughout the body:
+
+- **Explanations sit above what they explain.** Every plot group and every table renders as
+  heading → explanation → replicate-basis line → figures/table (`_figure_group`, and the `note`
+  argument to `_table_html` / `_sample_persons_html`). No block of prose covers several figure
+  groups at once.
+- **Every group declares its replicate basis.** `report.REPLICATE_BASIS` maps each group key to
+  `"averaged"` (values averaged across within-individual replicates, variance then computed
+  analytically from those per-individual variances) or `"trajectories"` (individual trajectories
+  across seeds, no within-individual bottom-up averaging).
 
 ## 3b. Cross-model comparison (stub — spec only, do not build in v1)
 

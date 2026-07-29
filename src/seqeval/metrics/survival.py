@@ -12,7 +12,22 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-__all__ = ["kaplan_meier", "median_survival"]
+__all__ = ["kaplan_meier", "median_survival", "step_sample"]
+
+
+def step_sample(
+    km_one: pd.DataFrame, grid: np.ndarray, *, value: str = "survival", before: float = 1.0
+) -> np.ndarray:
+    """One KM column read at ``grid`` times (step function; ``before`` ahead of the first event).
+
+    A curve only has rows at its own event times, so comparing or combining curves means sampling
+    them onto a shared grid first — right-continuous, holding each value until the next event.
+    """
+    g = km_one.sort_values("time")
+    times = g["time"].to_numpy()
+    col = g[value].to_numpy() if value in g.columns else np.full(len(g), np.nan)
+    idx = np.searchsorted(times, grid, side="right") - 1
+    return np.where(idx >= 0, col[np.clip(idx, 0, len(col) - 1)], before)
 
 
 def _n_persons(frame: pd.DataFrame) -> int:

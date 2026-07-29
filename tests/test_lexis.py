@@ -64,12 +64,21 @@ def _surface(cells, seed=None):
 
 def test_combined_forecast_only_beyond_observed():
     observed = _surface([(2000, 25), (2001, 26)])
-    forecast = pd.concat(
-        [_surface([(2001, 26), (2002, 27)], seed=s) for s in (0, 1)], ignore_index=True
-    )
+    # the forecast side arrives already pooled: one row per cell, over every trajectory
+    forecast = _surface([(2001, 26), (2002, 27)])
     combined = _combine_surfaces(observed, forecast, "year", subgroup=[])
     src = combined.set_index(["year", "age_bin"])["source"]
     assert src.loc[(2000, 25)] == "observed"
     assert src.loc[(2001, 26)] == "observed"  # present in observed -> not overwritten by forecast
     assert src.loc[(2002, 27)] == "forecast"  # only cell beyond the observed surface
     assert (combined["source"] == "forecast").sum() == 1
+
+
+def test_combined_takes_the_pooled_cell_verbatim():
+    """Nothing is aggregated across seeds here — the pooled estimate is what gets drawn."""
+    observed = _surface([(2000, 25)])
+    forecast = _surface([(2002, 27)]).assign(rate=0.37, ci_lo=0.30, ci_hi=0.44)
+    combined = _combine_surfaces(observed, forecast, "year", subgroup=[])
+    cell = combined[combined["source"] == "forecast"].iloc[0]
+    assert cell["rate"] == 0.37
+    assert (cell["ci_lo"], cell["ci_hi"]) == (0.30, 0.44)

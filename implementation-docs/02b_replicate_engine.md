@@ -134,6 +134,15 @@ Analytic throughout — no resampling anywhere in the engine. An aggregate's ban
 `z*sqrt(total_var)`; the replicate-only component stays available as `within_var` for callers that
 want to say how much of the uncertainty the seeds account for.
 
+**Where this decomposition applies.** `mean_variance_components` is for aggregates built *bottom-up
+from per-person means* — CCF and the forecasting arm's `replicate_variance_aggregate`. It is
+deliberately **not** used by the time-dependent backtest families (KM, PPR, cohort ASFR, timing
+error). Those treat each seed as its own synthetic population and pool every trajectory for the
+estimate, so no per-person mean exists to decompose and no within-individual term enters their
+intervals; their width comes from `metrics/pooling.design_effect_var` instead (see
+`metrics_reference.md` §4.1). `timing_distribution` above is still used, but only by
+`timing_coverage` — the timing-error ridge works off per-trajectory durations directly.
+
 ## 5. Relationship to consumers
 
 - **04 (backtesting)** replaces its ad-hoc `empirical_probability` with this engine: per

@@ -24,40 +24,34 @@ def _ccf(cohorts, values, complete, seeds=None):
     return frame
 
 
-def test_km_band_adds_sampling_to_monte_carlo():
-    """The band is the total uncertainty in the plotted curve, not just the seed-to-seed part."""
-    surv = np.array([[0.9, 0.5], [0.8, 0.4], [0.7, 0.6]])
-    greenwood = np.full((3, 2), 0.0025)
-    mean, lo, hi = B._km_total_ci(surv, greenwood, 0.95)
-    np.testing.assert_allclose(mean, surv.mean(axis=0))
-    expected = 1.959963985 * np.sqrt(0.0025 + surv.var(axis=0, ddof=1) / 3)
-    np.testing.assert_allclose(hi - mean, expected)
-    np.testing.assert_allclose(mean - lo, expected)
+def _pooled_km(times, survival, ci_lo=None, ci_hi=None):
+    """A pooled KM frame as `attach_km_pooled_ci` leaves it: the curve and its own interval."""
+    frame = pd.DataFrame({"time": [yd(t) for t in times], "survival": survival})
+    if ci_lo is not None:
+        frame["ci_lo"], frame["ci_hi"] = ci_lo, ci_hi
+    return frame
 
 
-def test_km_band_is_wider_than_the_replicate_only_band():
-    surv = np.array([[0.9, 0.5], [0.8, 0.4], [0.7, 0.6]])
-    _, lo_mc, hi_mc = B._km_total_ci(surv, np.zeros((3, 2)), 0.95)
-    _, lo, hi = B._km_total_ci(surv, np.full((3, 2), 0.0025), 0.95)
-    assert ((hi - lo) > (hi_mc - lo_mc)).all()
+def test_km_overlay_draws_the_interval_its_table_carries():
+    """The figure computes no variance — it shades the ci_lo/ci_hi the pooled table hands it."""
+    obs = _pooled_km([20, 30], [0.9, 0.5])
+    gen = _pooled_km([20, 30], [0.8, 0.4], ci_lo=[0.75, 0.33], ci_hi=[0.85, 0.47])
+    ax = B.plot_km_overlay(obs, gen).axes[0]
+
+    (band,) = ax.collections
+    ys = band.get_paths()[0].vertices[:, 1]
+    assert ys.min() == pytest.approx(0.33)
+    assert ys.max() == pytest.approx(0.85)
+    labels = [ln.get_label() for ln in ax.lines]
+    assert "generated (pooled)" in labels and "observed" in labels
 
 
-def test_km_band_keeps_the_sampling_floor_as_seeds_are_added():
-    """More seeds shrink the Monte-Carlo term only; the same women are re-run every time."""
-    greenwood = 0.0025
-    widths = []
-    for k in (3, 30):
-        surv = np.tile(np.array([[0.9, 0.5]]), (k, 1)) + np.linspace(-0.05, 0.05, k)[:, None]
-        _, lo, hi = B._km_total_ci(surv, np.full((k, 2), greenwood), 0.95)
-        widths.append(float((hi - lo).mean()))
-    assert widths[1] < widths[0]
-    assert widths[1] > 2 * 1.959963985 * np.sqrt(greenwood) * 0.99  # floors at the sampling term
-
-
-def test_km_band_stays_inside_the_unit_interval():
-    surv = np.array([[0.99, 0.02], [0.98, 0.01], [0.97, 0.03]])
-    _, lo, hi = B._km_total_ci(surv, np.full((3, 2), 0.01), 0.95)
-    assert (lo >= 0).all() and (hi <= 1).all()
+def test_km_overlay_without_an_interval_still_draws_the_curve():
+    """A frame with no CI columns loses its band, not its curve."""
+    obs = _pooled_km([20, 30], [0.9, 0.5])
+    ax = B.plot_km_overlay(obs, _pooled_km([20, 30], [0.8, 0.4])).axes[0]
+    assert not ax.collections
+    assert "generated (pooled)" in [ln.get_label() for ln in ax.lines]
 
 
 def test_ccf_jumpoff_panel_draws_one_labelled_curve_per_window():
@@ -233,63 +227,37 @@ def _seeded(rows: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_total_band_adds_sampling_to_monte_carlo():
-    """The keyed-frame band is the same two terms `_km_total_ci` adds on a sampled curve."""
-    gen = _seeded([
-        {"seed": s, "parity_from": 0, "ppr": p, "ppr_var": 0.0009}
-        for s, p in zip((0, 1, 2), (0.60, 0.66, 0.72), strict=True)
-    ])
-    cells, mean, half = B._total_band(
-        gen, value="ppr", var="ppr_var", by=["parity_from"], level=0.95
-    )
-    assert list(cells) == [0]
-    np.testing.assert_allclose(mean, [0.66])
-    mc = np.var([0.60, 0.66, 0.72], ddof=1) / 3
-    np.testing.assert_allclose(half, [1.959963985 * np.sqrt(0.0009 + mc)])
-
-
-def test_total_band_is_wider_than_the_replicate_only_band():
-    rows = [{"seed": s, "parity_from": 0, "ppr": p} for s, p in enumerate((0.6, 0.66, 0.72))]
-    _, _, mc_only = B._total_band(
-        pd.DataFrame(rows), value="ppr", var="ppr_var", by=["parity_from"], level=0.95
-    )
-    _, _, total = B._total_band(
-        pd.DataFrame(rows).assign(ppr_var=0.0009),
-        value="ppr", var="ppr_var", by=["parity_from"], level=0.95,
-    )
-    assert (total > mc_only).all()
-
-
-def test_total_band_keeps_the_sampling_term_with_a_single_seed():
-    """One seed leaves no across-seed variance to estimate, but the cell is still uncertain."""
-    gen = pd.DataFrame([{"seed": 0, "parity_from": 0, "ppr": 0.5, "ppr_var": 0.0025}])
-    _, _, half = B._total_band(gen, value="ppr", var="ppr_var", by=["parity_from"], level=0.95)
-    np.testing.assert_allclose(half, [1.959963985 * np.sqrt(0.0025)])
-
-
 def _ppr_frames():
     obs = pd.DataFrame({
         "parity_from": [0, 1, 2], "parity_to": [1, 2, 3],
         "ppr": [0.9, 0.6, 0.3], "n_at_risk": [100, 90, 54],
         "ppr_var": [0.0009, 0.0027, 0.0039],
     })
-    gen = pd.concat([
-        obs.assign(seed=s, ppr=obs["ppr"] + shift)
-        for s, shift in enumerate((-0.02, 0.0, 0.02))
-    ], ignore_index=True)
+    # the pooled frame as the arm hands it over: one row per transition, interval already attached
+    gen = obs.assign(
+        ppr=[0.88, 0.62, 0.31],
+        ci_lo=[0.85, 0.55, 0.20],
+        ci_hi=[0.91, 0.69, 0.42],
+    )
     return obs, gen
 
 
-def test_ppr_overlay_draws_the_band_mean_it_computed():
+def test_ppr_overlay_draws_the_interval_its_table_carries():
+    """The figure computes no variance — the bars are the ci_lo/ci_hi on the pooled frame."""
     obs, gen = _ppr_frames()
-    fig = B.plot_ppr_overlay(obs, gen, level=0.95)
-    ax = fig.axes[0]
-    _, mean, half = B._total_band(gen, value="ppr", var="ppr_var", by=["parity_from"], level=0.95)
-    # the errorbar container's centre line carries the across-seed mean; observed is a plain line
+    ax = B.plot_ppr_overlay(obs, gen, level=0.95).axes[0]
     lines = {tuple(np.round(ln.get_ydata(), 6)) for ln in ax.get_lines()}
-    assert tuple(np.round(mean, 6)) in lines
+    assert tuple(np.round(gen["ppr"].to_numpy(), 6)) in lines
     assert tuple(np.round(obs["ppr"].to_numpy(), 6)) in lines
-    assert half[2] > half[0]  # thinner denominator at the later transition -> wider interval
+
+    (bars,) = [c for c in ax.containers if hasattr(c, "errorbar")] or [ax.containers[0]]
+    caps = bars.lines[2][0].get_segments()
+    lo, hi = zip(*[(s[:, 1].min(), s[:, 1].max()) for s in caps], strict=True)
+    np.testing.assert_allclose(sorted(lo), sorted(gen["ci_lo"]), atol=1e-9)
+    np.testing.assert_allclose(sorted(hi), sorted(gen["ci_hi"]), atol=1e-9)
+    # a thinner denominator at the later transition still reads as a wider interval
+    widths = gen["ci_hi"] - gen["ci_lo"]
+    assert widths.iloc[2] > widths.iloc[0]
 
 
 def test_ppr_overlay_labels_transitions_not_bare_parities():
@@ -306,8 +274,27 @@ def _asfr_frames(cohorts=(1960, 1965)):
          "births": 50, "asfr_var": 0.0002}
         for c in cohorts for a in ages
     ])
-    gen = pd.concat([obs.assign(seed=s) for s in range(3)], ignore_index=True)
+    # the pooled frame: one row per (cohort, age_bin), interval already attached
+    gen = obs.assign(ci_lo=obs["asfr"] - 0.01, ci_hi=obs["asfr"] + 0.01)
     return obs, gen
+
+
+def test_asfr_overlay_shades_the_interval_its_table_carries():
+    """Cohort ASFR now carries a band; it is the pooled table's, not one computed here."""
+    obs, gen = _asfr_frames(cohorts=(1960,))
+    ax = [a for a in B.plot_asfr_overlay(obs, gen).axes if a.get_visible()][0]
+    (band,) = ax.collections
+    ys = band.get_paths()[0].vertices[:, 1]
+    assert ys.min() == pytest.approx(gen["ci_lo"].min())
+    assert ys.max() == pytest.approx(gen["ci_hi"].max())
+
+
+def test_asfr_jumpoff_panel_bands_every_jumpoff():
+    """Each jump-off's profile carries its own interval, so the panel is read the same way."""
+    obs, gen = _asfr_frames(cohorts=(1960,))
+    fig = B.plot_asfr_jumpoff_panel(obs, {yd(25): gen, yd(30): gen})
+    bands = [c for ax in fig.axes for c in ax.collections]
+    assert len(bands) == 2
 
 
 def test_asfr_overlay_draws_one_visible_panel_per_cohort():

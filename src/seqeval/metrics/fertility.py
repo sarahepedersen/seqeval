@@ -157,9 +157,17 @@ def parity_distribution(
 ) -> pd.DataFrame:
     """How completed parity is distributed across women in each cohort.
 
-    Returns ``[cohort, parity, n_replicates, n_women_equiv, share, n_women_total, n_persons,
-    suppressed]``, where ``n_persons`` is the distinct women with any replicate in the cell (the
-    count suppression is judged on, withheld with the rest of the cell).
+    Returns ``[cohort, parity, n_replicates, n_replicates_total, n_women_equiv, share,
+    n_women_total, n_persons, suppressed]``, where ``n_persons`` is the distinct women with any
+    replicate in the cell (the count suppression is judged on, withheld with the rest of the cell).
+
+    Two readings of "how much mass is here" live side by side, and they are not the same number
+    whenever women carry different replicate counts. ``n_replicates`` is the **direct count** of
+    (woman, seed) trajectories that landed at this parity, out of ``n_replicates_total`` — the
+    pooled synthetic population, which is what the figures draw. ``n_women_equiv``/``share`` weight
+    each woman to a total of 1 regardless of how many seeds she has, so they answer "what fraction
+    of *women*" instead. With balanced seeds the two are proportional and the picture is identical;
+    with unbalanced ones they are not.
     Where :func:`ccf` gives a cohort's mean births per woman, this gives the spread that mean is
     averaging over — the outcome uncertainty a single woman faces, as opposed to the uncertainty in
     the estimate of the mean. ``Σ_k k·share_k`` reproduces that mean exactly whenever ``max_parity``
@@ -209,6 +217,10 @@ def parity_distribution(
     )
     totals = counts.groupby("cohort", observed=True)["person_id"].nunique().rename("n_women_total")
     cells = cells.merge(totals, on="cohort", how="left")
+    # Trajectories, not women: the denominator for `n_replicates`, so a figure drawing the raw
+    # counts can normalise them without reaching for the woman-weighted total.
+    traj = counts.groupby("cohort", observed=True).size().rename("n_replicates_total")
+    cells = cells.merge(traj, on="cohort", how="left")
     cells["share"] = cells["n_women_equiv"] / cells["n_women_total"]
 
     cells = cells.rename(columns={"_n_women": "n_persons"})
@@ -220,7 +232,8 @@ def parity_distribution(
         also_null=("n_replicates", "n_women_equiv", "share"),
     )
     cols = [
-        "cohort", "parity", "n_replicates", "n_women_equiv", "share", "n_women_total", "n_persons",
+        "cohort", "parity", "n_replicates", "n_replicates_total", "n_women_equiv", "share",
+        "n_women_total", "n_persons",
     ]
     return cells[[*cols, "suppressed"]].sort_values(["cohort", "parity"]).reset_index(drop=True)
 
@@ -393,8 +406,10 @@ def lexis_surface(
     step. ``basis="period"`` gives ``(year, age_bin)`` cells (calendar time, limited to
     ``year_range``); ``basis="cohort"`` gives ``(cohort, age_bin)`` cells (``cohort_width``-year
     bands), the view that shows each cohort's age profile and its forecasted completion. Returns
-    ``[dim, age_bin, *extra_by, rate, n_events, person_years]`` where ``dim`` is ``year`` or
-    ``cohort``. Reuses births/exposure — never re-derives them.
+    ``[dim, age_bin, *extra_by, rate, rate_var, n_events, person_years]`` where ``dim`` is ``year``
+    or ``cohort``. ``rate_var`` is the Poisson variance of the cell rate, ``n_events/person_years²``
+    — the same within-cell quantity :func:`asfr` reports, and what a caller pooling several of these
+    surfaces needs. Reuses births/exposure — never re-derives them.
     """
     extra_by = list(extra_by)
     dim = "year" if basis == "period" else "cohort"
@@ -431,9 +446,12 @@ def lexis_surface(
     out["n_events"] = out["n_events"].fillna(0).astype(np.int64)
     out["person_years"] = out["person_days"] / DAYS_PER_YEAR
     out["rate"] = np.where(out["person_years"] > 0, out["n_events"] / out["person_years"], np.nan)
+    out["rate_var"] = np.where(
+        out["person_years"] > 0, out["n_events"] / out["person_years"] ** 2, np.nan
+    )
     if basis == "period":
         out = out[(out[dim] >= year_range[0]) & (out[dim] <= year_range[1])]
-    cols = [dim, "age_bin", *extra_by, "rate", "n_events", "person_years", "n_persons"]
+    cols = [dim, "age_bin", *extra_by, "rate", "rate_var", "n_events", "person_years", "n_persons"]
     return out[cols].sort_values([*extra_by, dim, "age_bin"]).reset_index(drop=True)
 
 

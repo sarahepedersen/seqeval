@@ -3,7 +3,7 @@
 Two concerns live here, both pure functions over already-written results:
 
 - **Manifest** (:func:`build_manifest` / :func:`write_manifest`): ``results/manifest.json`` records
-  everything needed to reproduce and audit a run — seqeval version, model, the SHA-256 of every
+  everything needed to reproduce and audit a run — seqeval model, the SHA-256 of every
   input file, the fully-resolved config, per-arm status/outputs/timing, data coverage, and the
   verbatim warning list surfaced by the lower layers. Two runs on identical inputs+config produce
   byte-identical manifests except for the ``timestamp_utc`` and ``duration_s`` fields (00 rule:
@@ -31,7 +31,6 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
-from seqeval import __version__
 from seqeval.metrics._disclosure import MIN_CELL
 from seqeval.units import days_to_years
 
@@ -40,7 +39,8 @@ logger = logging.getLogger("seqeval")
 MANIFEST_NAME = "manifest.json"
 REPORT_NAME = "report.html"
 
-#: Arms in execution / display order (00 section 5: descriptives -> backtesting -> forecasting).
+#: Arms in execution order (00 section 5: descriptives -> backtesting -> forecasting). The report
+#: presents them in a different order and under different names — see :data:`SECTIONS`.
 ARM_ORDER = ["descriptives", "backtesting", "forecasting"]
 
 #: Image suffixes embedded inline in the report; anything else is linked, not embedded.
@@ -143,7 +143,6 @@ def build_manifest(*, cfg, coverage: dict, arm_results: list[dict], warnings: li
             "duration_s": res["duration_s"],
         }
     return {
-        "seqeval_version": __version__,
         "timestamp_utc": datetime.now(UTC).isoformat(),
         "model": {"name": cfg.model.name},
         "config_hash": cfg.hash(),
@@ -201,11 +200,98 @@ ul.muted { margin: .3rem 0 1rem; padding-left: 1.2rem; }
 ul.muted li { margin: .15rem 0; }
 .subnav { margin: .2rem 0 .8rem; }
 .subnav a { margin-right: .8rem; }
+.basis { margin: .2rem 0 .6rem; }
 .warn { background: #fff8e1; border-left: 4px solid #f0ad4e; padding: .5rem 1rem; }
 .flag { color: #b34700; font-weight: 600; }
 .muted { color: #777; font-size: .85rem; }
 code { background: #f2f2f2; padding: .1rem .3rem; border-radius: 3px; }
 """
+
+#: How each plot/table group treats replicates — the distinction that governs how its interval
+#: should be read. Each entry is one of the keys of :data:`_BASIS_TEXT` (``"averaged"``,
+#: ``"trajectories"``, ``"observed"``), or ``None`` for a group where the distinction does not
+#: apply and no line is drawn.
+REPLICATE_BASIS: dict[str, str | None] = {
+    # Observed Sequences
+    "observed.km": "observed",
+    "observed.ccf": "observed",
+    "observed.asfr": "observed",
+    # Generated Sequences
+    "generated.lexis": "trajectories",
+    "generated.dispersion": "averaged",
+    "generated.replicate_variance_individual": "averaged",
+    "generated.replicate_occurrence": None,
+    "generated.violations": None,
+    "generated.replicate_variance_aggregate": "averaged",
+    "generated.violation_rates": None,
+    # Observed and Generated Comparison
+    "comparison.metrics": "averaged",
+    "comparison.km": "trajectories",
+    "comparison.ccf": "averaged",
+    "comparison.ppr": "trajectories",
+    "comparison.asfr": "trajectories",
+    "comparison.uncertainty": None,
+    "comparison.calibration": None,
+    "comparison.timing": "trajectories",
+}
+
+#: The two ways a group can be built, spelled out for the reader.
+_BASIS_TEXT = {
+    "averaged": (
+        "values are computed bottom-up by first averaging across within-individual replicates; CIs for means are "
+        "computed analytically the sum of per-individual variances and between individual differences (see 'Within seed variance' and 'replicate_variance_aggregate')."
+    ),
+    "trajectories": (
+        "values are computed using every generated trajectory; in other words, a synthetic population is created by pooling the `n` replicates from each individual. CIs come from the spread of all trajectories. The same metrics are saved for each of the K per-seed populations."
+    ),
+    "observed": (
+        "observed sequences only, so no within-individual variation exists. CIs reflect sample variance.")
+}
+
+
+def _basis_html(key: str) -> str:
+    """The replicate-basis line for a group.
+
+    Raises ``KeyError`` on an unknown key, so renaming a group cannot quietly drop its marker.
+    """
+    item = _basis_item(key)
+    return f'<ul class="basis muted">{item}</ul>' if item else ""
+
+
+def _basis_item(key: str) -> str:
+    """The replicate-basis bullet itself, or ``""`` for a group where it does not apply."""
+    value = REPLICATE_BASIS[key]
+    if value is None:
+        return ""
+    return f"<li><strong>Replicate handling:</strong> {_BASIS_TEXT[value]}</li>"
+
+
+def _with_basis(note: str, basis_key: str | None) -> str:
+    """``note`` with the replicate-basis bullet appended to it.
+
+    When the note is already a bullet list the basis joins it as one more item, rather than opening
+    a second list a hair below the first — one list is what a reader sees anyway, and it keeps the
+    spacing from depending on whether a group happens to have a note.
+    """
+    item = _basis_item(basis_key) if basis_key else ""
+    if not item:
+        return note
+    if note.rstrip().endswith("</ul>"):
+        note = note.rstrip()
+        return f'{note[: -len("</ul>")]}{item}</ul>'
+    return f'{note}<ul class="basis muted">{item}</ul>'
+
+
+def _rel_link(path: Path) -> str:
+    """An href to a result file, relative to ``report.html``.
+
+    Every table and figure is written by :class:`~seqeval.arms._common.OutputWriter` into
+    ``<results>/<arm>/``, while the report itself sits at ``<results>/report.html`` — so the link
+    needs the arm directory in front of it. A bare filename resolves to ``<results>/<name>``, which
+    does not exist, and the link silently 404s.
+    """
+    return f"{path.parent.name}/{path.name}"
+
 
 #: Extracts ``(outcome, jump-off age)`` from a ``reliability_<outcome>_w<age>`` figure stem.
 _RELIABILITY_RE = re.compile(r"^reliability_(.+)_w(\d+)$")
@@ -246,9 +332,11 @@ _FIGURE_SOURCES = (
     ("uncertainty_ccf_", "parity_distribution"),
     ("ccf_uncertainty", "parity_distribution"),
     ("ccf_overlay_", "aggregate_error"),
-    ("ppr_overlay_", "aggregate_error"),
-    ("asfr_overlay_", "aggregate_error"),
-    ("km_overlay_", "aggregate_error"),
+    # These three draw the pooled estimate and its interval, so the peek under each figure should
+    # be the table it was drawn from rather than the per-seed error summary.
+    ("ppr_overlay_", "ppr_pooled"),
+    ("asfr_overlay_", "asfr_pooled"),
+    ("km_overlay_", "km_pooled"),
     ("within_seed_variance", "within_seed_variance_distribution"),
     ("within_seed_variance_by_cohort", "within_seed_variance_distribution_by_cohort"),
 )
@@ -280,7 +368,9 @@ def _figure_html(fig: Path, *, link_parquet: bool = True) -> str:
     peek = ""
     source = _figure_source(fig) if link_parquet else None
     if source is not None:
-        caption += f' · <a href="{html.escape(source.name)}">{html.escape(source.name)}</a>'
+        caption += (
+            f' · <a href="{html.escape(_rel_link(source))}">{html.escape(source.name)}</a>'
+        )
         peek = _peek_html(source)
     return (
         f"<figure>{_b64_img(fig)}"
@@ -303,8 +393,14 @@ def _peek_html(path: Path) -> str:
     )
 
 
-def _table_html(path: Path, *, to_years: bool = False) -> str:
-    """Render a parquet table as a capped HTML table with a link to the full file."""
+def _table_html(
+    path: Path, *, to_years: bool = False, note: str = "", basis_key: str | None = None
+) -> str:
+    """Render a parquet table as a capped HTML table with a link to the full file.
+
+    ``note`` and the replicate-basis line sit between the caption and the table, so the reader
+    meets the explanation before the numbers.
+    """
     df = pd.read_parquet(path, engine="pyarrow")
     if to_years:
         df = _to_years_display(df)
@@ -313,8 +409,55 @@ def _table_html(path: Path, *, to_years: bool = False) -> str:
     table = shown.to_html(index=False, border=0, na_rep="")
     caption = f'<h3>{html.escape(path.stem)} <span class="muted">'
     caption += f"({n} rows" + (f", showing {_MAX_TABLE_ROWS}" if n > _MAX_TABLE_ROWS else "")
-    caption += f' · <a href="{html.escape(path.name)}">{html.escape(path.name)}</a>)</span></h3>'
-    return caption + table
+    caption += (
+        f' · <a href="{html.escape(_rel_link(path))}">{html.escape(path.name)}</a>)</span></h3>'
+    )
+    return caption + _with_basis(note, basis_key) + table
+
+
+def _figure_group(
+    label: str,
+    figs: list[Path],
+    *,
+    basis_key: str | None = None,
+    note: str = "",
+    level: int = 4,
+    anchor: str | None = None,
+) -> str:
+    """One plot group, rendered the same way everywhere: heading, explanation, basis, figures.
+
+    ``note`` is pre-rendered HTML (typically :func:`_bullets`). Returns ``""`` for an empty group,
+    so an artifact the run never produced simply drops out of the report.
+    """
+    if not figs:
+        return ""
+    ident = f' id="{html.escape(anchor)}"' if anchor else ""
+    cells = "".join(_figure_html(f) for f in figs)
+    return (
+        f"<h{level}{ident}>{html.escape(label)}</h{level}>"
+        f"{_with_basis(note, basis_key)}<div class='figrow'>{cells}</div>"
+    )
+
+
+def _grouped_figures(
+    arm_dir: Path, groups: tuple[tuple[str, str, str, str], ...], *, level: int = 3
+) -> str:
+    """Render an arm's figures as ``(label, glob, basis_key, note)`` groups, in the given order.
+
+    Whatever no group claims is emitted last under "Other figures", so a newly-added figure is
+    never silently dropped from the report just because no pattern matches it yet.
+    """
+    all_figs = sorted(p for p in arm_dir.iterdir() if p.suffix in _EMBED_SUFFIXES)
+    claimed: set[Path] = set()
+    parts = []
+    for label, pattern, basis_key, note in groups:
+        figs = [f for f in all_figs if f.match(pattern)]
+        claimed.update(figs)
+        parts.append(_figure_group(label, figs, basis_key=basis_key, note=note, level=level))
+    leftover = [f for f in all_figs if f not in claimed]
+    if leftover:
+        parts.append(_figure_group("Other figures", leftover, level=level))
+    return "\n".join(p for p in parts if p)
 
 
 #: Evaluability counts folded into the backtest metrics table, in display order.
@@ -355,11 +498,10 @@ def _min_cell(manifest: dict) -> int:
 
 
 def _run_summary_section(manifest: dict, results_dir: Path) -> str:
-    """Run summary: model, version, timestamp, data coverage, and backtest evaluability."""
+    """Run summary: model, timestamp, data coverage, and backtest evaluability."""
     cov = manifest.get("coverage", {})
     rows = [
         ("Model", manifest.get("model", {}).get("name", "")),
-        ("seqeval version", manifest.get("seqeval_version", "")),
         ("Run (UTC)", manifest.get("timestamp_utc", "")),
         ("Config hash", manifest.get("config_hash", "")[:16]),
         ("Persons", cov.get("n_persons", "")),
@@ -386,14 +528,40 @@ def _run_summary_section(manifest: dict, results_dir: Path) -> str:
     return "\n".join(out)
 
 
-def _descriptives_section(arm_dir: Path) -> str:
-    """Descriptives: figures only, each with a link to its backing parquet (no tables)."""
-    figures = sorted(p for p in arm_dir.iterdir() if p.suffix in _EMBED_SUFFIXES)
-    if not figures:
+#: Observed-only figure groups, in display order: ``(label, glob, basis key, note)``.
+_OBSERVED_GROUPS = (
+    (
+        "Kaplan-Meier Curves",
+        "km_*.png",
+        "observed.km",
+        _bullets(
+            "Time to each outcome in the observed registry sequences by cohort."
+        ),
+    ),
+    (
+        "Completed cohort fertility (CCF) by parity",
+        "ccf_*.png",
+        "observed.ccf",
+        _bullets(
+            "Estimated mean completed cohort fertility with 95% confidence intervals beside the observed distribution of completed "
+            "parity (outcome variation)."
+        ),
+    ),
+    (
+        "Cohort ASFR",
+        "asfr_*.png",
+        "observed.asfr",
+        _bullets("Observed age-specific fertility rates by cohort."),
+    ),
+)
+
+
+def _observed_section(arm_dir: Path) -> str:
+    """Observed sequences: figures computed from observed history alone, grouped by measure."""
+    body = _grouped_figures(arm_dir, _OBSERVED_GROUPS)
+    if not body:
         return ""
-    parts = ['<h2 id="descriptives">Descriptives</h2>']
-    parts.extend(_figure_html(fig, link_parquet=True) for fig in figures)
-    return "\n".join(parts)
+    return '<h2 id="observed">Observed Sequences</h2>\n' + body
 
 
 def _backtest_metrics_table(arm_dir: Path) -> str:
@@ -465,16 +633,22 @@ def _backtest_metrics_table(arm_dir: Path) -> str:
         "variance: the sd of the per-person "
         "loss for MSE, the delta method for R², and DeLong's for AUC. Each already "
         "carries replicate variation, since every person's loss is computed from "
-        "their own <code>p̂</code> (see `within_person_variation` below). ECE has no CI, since we "
+        "their own <code>p̂</code> (see 'Within-seed variance'). ECE has no CI, since we "
         "use quantile binning."
         if has_ci
         else ""
     )
+    p_hat = (
+        "<code>p̂</code> is defined for a particular outcome (e.g., first birth by age 35) and "
+        "jump-off age (e.g., 20, 25, 30). It is the raw MLE estimate of the number of trajectory "
+        "replicates for that individual that reach the outcome by the jump-off age, divided by the "
+        "total number of replicates for that individual."
+    )
     note = _bullets(
+        p_hat,
         "MSE is the squared-error using <code>p̂</code> (from the replicate mean) versus the "
-        "observed outcome.",
+        "observed outcome. This is equal to the Brier score for binary outcomes.",
         "R² is the MSE rescaled by the outcome variance (1 = perfect, 0 = base rate).",
-        "AUC is rank-based using `sklearn.metrics.roc_auc_score` from the p̂ calculated from the "
         "MLE estimator across replicates. It checks whether the P(p̂ | event  >  p̂ | no event) "
         "for a given outcome.",
         "ECE is the expected calibration error, measuring the average deviation between "
@@ -485,7 +659,12 @@ def _backtest_metrics_table(arm_dir: Path) -> str:
         "<code>n_settled</code> were already determined in the observed prefix and "
         "<code>n_uncovered</code> ran out of observation before the frame closed.",
     )
-    return f"<h3>Backtest metrics</h3><table>{header}{''.join(rows)}</table>{note}"
+    return (
+        f"{p_hat}"
+        '<h3 id="backtest-metrics">Backtest metrics</h3>'
+        f"{_with_basis(note, 'comparison.metrics')}"
+        f"<table>{header}{''.join(rows)}</table>"
+    )
 
 
 def _calibration_subsections(arm_dir: Path) -> str:
@@ -506,60 +685,118 @@ def _calibration_subsections(arm_dir: Path) -> str:
         m = _RELIABILITY_RE.match(p.stem)
         return int(m.group(2)) if m else 0
 
-    parts = ['<h3 id="calibration">Calibration</h3>']
+    note = _bullets(
+        "The calibration/reliability diagram bins individuals by their <code>p̂</code> for a "
+        "particular outcome and jump-off age. We use a fixed number of quantile bins (having the "
+        "same number of individuals) rather than fixed-width.",
+        "The x-axis is the mean <code>p̂</code> for the bin, and the y-axis is the proportion of "
+        "observed individuals for which that outcome was actually reached after the jump-off age. "
+        "A diagonal line is perfect calibration.",
+        "Below the reliability curve we show the distribution of the <code>p̂</code>.",
+    )
+    parts = [
+        '<h3 id="calibration">Calibration</h3>',
+        _with_basis(note, "comparison.calibration"),
+    ]
     links = " ".join(
         f'<a href="#cal-{html.escape(o)}">{html.escape(o)}</a>' for o in sorted(groups)
     )
     parts.append(f'<p class="subnav muted">Jump to: {links}</p>')
     for outcome in sorted(groups):
-        parts.append(f'<h4 id="cal-{html.escape(outcome)}">{html.escape(outcome)}</h4>')
-        cells = "".join(_figure_html(f) for f in sorted(groups[outcome], key=jumpoff))
-        parts.append(f'<div class="figrow">{cells}</div>')
+        parts.append(
+            _figure_group(
+                outcome,
+                sorted(groups[outcome], key=jumpoff),
+                anchor=f"cal-{outcome}",
+            )
+        )
     return "\n".join(parts)
 
 
-#: Generated-vs-observed overlay figure families rendered in the backtesting section, in order.
+#: Generated-vs-observed overlay figure families, in display order, each carrying the explanation
+#: that belongs above it: ``(label, glob, basis key, note)``.
 _OVERLAY_GROUPS = (
-    ("Kaplan-Meier Curves", "km_overlay_*.png"),
-    # CCF keeps only the cross-jump-off panel; a single window's CCF is the inference-vs-outcome
-    # figure, which carries the same estimate and interval plus the outcome distribution.
-    ("Completed cohort fertility (CCF)", "ccf_overlay_all_jumpoffs.png"),
-    ("Parity progression ratios (PPR)", "ppr_overlay_*.png"),
-    ("Cohort ASFR", "asfr_overlay_*.png"),
+    (
+        "Kaplan-Meier Curves",
+        "km_overlay_*.png",
+        "comparison.km",
+        _bullets(
+            "Comparison of the time to outcome in the observed registry sequences versus the "
+            "generated sequences. The model begins generating from each jumpoff year, so the "
+            "observed history is known up to t_2 (i.e., for jumpoff 35, the shape of the generated "
+            "curve deviates from the observed based on births predicted after the age of 35).",
+            "The shown generated curve is one Kaplan-Meier fit over every trajectory — all replicates "
+            "pooled into a single synthetic population, with no within-individual averaging. The results are also broken down into K separate seed populations in <code>km_by_seed.parquet</code>, the "
+            "plotted curve in <code>km_pooled.parquet</code>.",
+            "The band is the fully-pooled curve's between-person uncertainty. It starts from Greenwood's "
+            "variance within one seed's population and is narrowed by however much the seeds "
+            "actually disagree: seeds that produce identical curves keep the full one-population "
+            "width, seeds that behave like independent samples shrink it toward 1/K of it. The "
+            "three terms are on the table as <code>mean_var</code>, <code>between_var</code> and "
+            "<code>pooled_var</code>.",
+        ),
+    ),
+    (
+        "Parity progression ratios (PPR)",
+        "ppr_overlay_*.png",
+        "comparison.ppr",
+        _bullets(
+            "PPR is the proportion of individuals at parity X who ultimately move to the next "
+            "parity. The generated sequences are grouped by jump-off; for example, if an "
+            "individual is at parity 1 before the jumpoff, the model can predict her into parity "
+            "2 or not. Only individuals eligible for the transition are included (smaller sample "
+            "for 5->6 transition, for example, so the CIs will be wider to account for sample "
+            "variance).",
+            "Each ratio is computed over all replicates pooled into one synthetic population "
+            "(<code>ppr_pooled.parquet</code>); the K separate seed populations are in "
+            "<code>ppr_by_seed.parquet</code>.",
+            "The bars are the binomial between-person variance of the transition within one seed's "
+            "population, narrowed by how much the seeds actually disagree — the same "
+            "<code>mean_var</code> / <code>between_var</code> / <code>pooled_var</code> columns as "
+            "the KM curves.",
+        ),
+    ),
+    (
+        "Cohort ASFR",
+        "asfr_overlay_all_jumpoffs.png",
+        "comparison.asfr",
+        _bullets(
+            "Generated age-specific fertility rates by cohort. The generated ASFRs begin at their "
+            "specific jump-off point (to the left of that is observed history, to the right is "
+            "entirely computed from model-generated sequences).",
+            "Each rate pools every replicate's trajectories into one synthetic population "
+            "(<code>asfr_pooled.parquet</code>); the K separate seed populations are in "
+            "<code>asfr_by_seed.parquet</code>.",
+            "This cross-jump-off panel is drawn without bands — one shaded interval per jump-off "
+            "per cohort would bury the profiles. The interval is on the single-jump-off figures "
+            "(<code>asfr_overlay_w&lt;age&gt;.png</code>) and in <code>ci_lo</code>/"
+            "<code>ci_hi</code> on the pooled table.",
+        ),
+    ),
+    (
+        "Analytic completed cohort fertility (CCF)",
+        "ccf_overlay_all_jumpoffs.png",
+        "comparison.ccf",
+        _bullets(
+            "CCF by cohort computed from generated sequences at different jump-off years. The model sees the observed sequence up to t_2, and then all generated births are considered alongside the number of births pre-jumpoff." \
+            "The CCF CIs are "
+            "<code>±z·&radic;total_var</code>, a sum of the within-individual inference variation "
+            "and the between-people variation divided by the number of women. (see `replicate_variance_aggregate`)"
+        ),
+    ),
 )
-
 
 
 def _gen_vs_obs_section(arm_dir: Path) -> str:
     """Observed-vs-generated overlays: observed 'truth' under the across-seed band, if present."""
-    blocks = []
-    for label, pattern in _OVERLAY_GROUPS:
-        figs = sorted(arm_dir.glob(pattern))
-        if figs:
-            cells = "".join(_figure_html(f) for f in figs)
-            blocks.append(f"<h4>{html.escape(label)}</h4><div class='figrow'>{cells}</div>")
+    blocks = [
+        _figure_group(label, sorted(arm_dir.glob(pattern)), basis_key=basis_key, note=note)
+        for label, pattern, basis_key, note in _OVERLAY_GROUPS
+    ]
+    blocks = [b for b in blocks if b]
     if not blocks:
         return ""
-    return (
-        '<h3 id="gen-vs-obs">Generated vs observed sequences</h3>'
-        + _bullets(
-            "The Kaplan-Meier CIs are the total uncertainty in "
-            "the plotted mean: Greenwood's sampling variance averaged over seeds, plus the "
-            "within-individual replicate variance (see `within_person_variance` below).",
-            "The CCF bands are "
-            "<code>±z·&radic;total_var</code>, a sum of the within-individual inference variation "
-            "and the between-people variation divided by the number of women. (see inference vs "
-            "outcome uncertainty below)",
-            "The PPR bars are the binomial variance of each transition averaged over seeds, plus "
-            "the across-seed variance over K. Later transitions rest on the women who reached that "
-            "parity, so they widen on their own — a wide bar at parity 4 is a thin denominator, "
-            "not a worse model.",
-            "The cohort ASFR profiles are drawn without a band. Each panel's dotted rule is the "
-            "jump-off age: everything to its left is replayed history, and the generated profile "
-            "only begins where the model starts producing.",
-        )
-        + "".join(blocks)
-    )
+    return '<h3 id="gen-vs-obs">Generated vs observed sequences</h3>' + "".join(blocks)
 
 
 def _uncertainty_section(arm_dir: Path) -> str:
@@ -569,23 +806,19 @@ def _uncertainty_section(arm_dir: Path) -> str:
         return ""
     cells = "".join(_figure_html(f) for f in figs)
     return (
-        '<h3 id="uncertainty">Inference vs outcome uncertainty</h3>'
-        + _bullets(
+        '<h3 id="uncertainty">CCF by parity: inference vs outcome uncertainty</h3>'
+        + _with_basis(
+            _bullets(
+            "Estimated mean completed cohort fertility beside the distribution of completed parity from the generated sequences.",
             "Inference (left): The 95% CI is the "
             "uncertainty in the CCF estimate mean — it is "
-            "<code>±z·&radic;total_var</code>, a total-variance measure of both the "
-            "within-individual inference variation (between replicates of the same individual) "
-            "and the between-people estimation uncertainty in the sample.",
+            "computed using all sequences (pooling a theoretical population made up of n replicates of each individual).",
             "Outcome (right): The histograms are "
             "distributions of estimated completed parity across the cohort. "
             "Counts are in <code>parity_distribution.parquet</code>",
-            "Every individual replicate "
-            "reflected, not the average across replicates. An individual is placed in each parity "
-            "in proportion to "
-            "how often their replicate trajectories landed there (e.g. five seeds giving 2, 2, 3, "
-            "2, 3 contribute "
-            "0.6 to parity "
-            "2 and 0.4 to parity 3",
+            "Like the mean, each individual replicate is counted in the outcome distribution (synthetic pooled population).",
+            ),
+            "comparison.uncertainty",
         )
         + f'<div class="figrow">{cells}</div>'
     )
@@ -599,7 +832,8 @@ def _timing_error_section(arm_dir: Path) -> str:
     cells = "".join(_figure_html(f) for f in figs)
     return (
         '<h3 id="timing-error">Timing error</h3>'
-        + _bullets(
+        + _with_basis(
+            _bullets(
             "For each outcome, the distribution of "
             "<code>observed − predicted</code> timing (in years). The bins are fixed-width "
             "intervals of predicted value, the same in every figure, so jump-offs can be read "
@@ -607,16 +841,25 @@ def _timing_error_section(arm_dir: Path) -> str:
             "Mass to the right "
             "of the dashed zero line is an event that happened later than predicted. Mass to the "
             "left is an event that happened earlier than predicted.",
-            "The counts are in "
-            "<code>timing_error.parquet</code>.",
+            "One observation is one generated trajectory, not one person: a woman's seeds each "
+            "carry their own predicted time and each contribute their own error, with no median "
+            "taken across her replicates first.",
+            "Only trajectories where the model actually produced the outcome are counted. Each figure states how many trajectories did not show the outcome (for individuals for whom at least one did), and the counts are on "
+            "every row of the table as <code>n_excluded</code> of <code>n_trajectories</code>. "
+            "Read the shape as the timing of the events the model did predict; it says nothing "
+            "about the ones it missed.",
+            "The counts are in <code>timing_error.parquet</code>, and per seed population in "
+            "<code>timing_error_by_seed.parquet</code>.",
+            ),
+            "comparison.timing",
         )
         + f'<div class="figrow">{cells}</div>'
     )
 
 
-def _backtesting_section(arm_dir: Path) -> str:
-    """Backtesting: metrics table, coverage, gen-vs-obs overlays, and calibration subsections."""
-    parts = ['<h2 id="backtesting">Backtesting</h2>']
+def _comparison_section(arm_dir: Path) -> str:
+    """Observed against generated: metrics table, overlays, calibration, and timing error."""
+    parts = ['<h2 id="comparison">Observed and Generated Comparison</h2>']
     for block in (
         _backtest_metrics_table(arm_dir),
         _gen_vs_obs_section(arm_dir),
@@ -629,128 +872,206 @@ def _backtesting_section(arm_dir: Path) -> str:
     return "\n".join(parts) if len(parts) > 1 else ""
 
 
-def _sample_persons_html(path: Path, n_people: int = 5, *, to_years: bool = False) -> str:
+def _sample_persons_html(
+    path: Path,
+    n_people: int = 5,
+    *,
+    to_years: bool = False,
+    note: str = "",
+    basis_key: str | None = None,
+    n_seeds: int | None = None,
+) -> str:
     """A per-person table down-sampled to a few deterministically-chosen individuals (no full dump).
 
     Used for tables with one-or-more rows per ``person_id`` (individual violations, individual seed
     stability) where an aggregate or a 50-row head is unhelpful — five sampled persons show the
     shape of a record. The full table stays in the linked parquet.
+
+    ``n_seeds`` samples the replicate axis too. A table with one row per (person, seed, event) runs
+    to K rows per person before it shows a second person, so a 50-row window would otherwise be a
+    couple of people seen through every one of their seeds; sampling seeds as well as people trades
+    replicate depth for a wider view of the population, which is what these tables are shown for.
     """
     df = pd.read_parquet(path, engine="pyarrow")
     if df.empty or "person_id" not in df.columns:
-        return _table_html(path, to_years=to_years)
+        return _table_html(path, to_years=to_years, note=note, basis_key=basis_key)
     people = df["person_id"].drop_duplicates()
     k = min(n_people, len(people))
     chosen = set(people.sample(n=k, random_state=0))
-    sub = df[df["person_id"].isin(chosen)].sort_values("person_id", kind="stable")
+    sub = df[df["person_id"].isin(chosen)]
+
+    seed_note = ""
+    if n_seeds is not None and "seed" in sub.columns:
+        seeds = sub["seed"].dropna().drop_duplicates()
+        k_seeds = min(n_seeds, len(seeds))
+        if k_seeds:
+            keep = set(seeds.sample(n=k_seeds, random_state=0))
+            # A null seed is an observed row, not a replicate — these tables stack the observed
+            # baseline under the generated rows, and dropping it would leave nothing to compare to.
+            sub = sub[sub["seed"].isin(keep) | sub["seed"].isna()]
+            seed_note = f" × {k_seeds} of {len(seeds)} seeds"
+
+    sort_cols = ["person_id"] + (["seed"] if "seed" in sub.columns else [])
+    sub = sub.sort_values(sort_cols, kind="stable")
     if to_years:
         sub = _to_years_display(sub)
     n = len(sub)
     table = sub.head(_MAX_TABLE_ROWS).to_html(index=False, border=0, na_rep="")
     caption = (
-        f'<h3>{html.escape(path.stem)} <span class="muted">({k} sampled persons, {n} rows'
+        f'<h3>{html.escape(path.stem)} <span class="muted">'
+        f"({k} sampled persons{seed_note}, {n} rows"
         + (f", showing {_MAX_TABLE_ROWS}" if n > _MAX_TABLE_ROWS else "")
-        + f' · <a href="{html.escape(path.name)}">{html.escape(path.name)}</a>)</span></h3>'
+        + f' · <a href="{html.escape(_rel_link(path))}">{html.escape(path.name)}</a>)</span></h3>'
     )
-    return caption + table
+    return caption + _with_basis(note, basis_key) + table
 
 
-def _forecasting_section(arm_dir: Path) -> str:
-    """Forecasting: figures, per-person tables sampled to 5 individuals, and aggregate tables."""
-    figures = sorted(p for p in arm_dir.iterdir() if p.suffix in _EMBED_SUFFIXES)
-    parts = ['<h2 id="forecasting">Forecasting</h2>']
-    parts.extend(_figure_html(fig) for fig in figures)
+#: Generated-only figure groups, in display order: ``(label, glob, basis key, note)``.
+_GENERATED_GROUPS = (
+    (
+        "Lexis surface",
+        "lexis_*.png",
+        "generated.lexis",
+        _bullets(
+            "Outcome heat map over cohort and age. The red line marks where the observed data "
+            "ends and the rate is computed solely from model forecasts.",
+            "Each forecast cell pools every replicate's trajectories into one synthetic population "
+            "(<code>lexis_cohort_pooled.parquet</code>) rather than summarising the individuals or seeds separately. The K separate seed surfaces are in "
+            "<code>lexis_cohort_forecast.parquet</code>. In the parquet, each pooled cell carries its own "
+            "<code>ci_lo</code>/<code>ci_hi</code> (uncertainty not shown in the surface).",
+        ),
+    ),
+    (
+        "Within-seed variance",
+        "within_seed_variance*.png",
+        "generated.dispersion",
+        _bullets(
+            "How much a single person's replicates disagree with each other — the inference "
+            "uncertainty that the <code>within_var</code> term below is built from."
+        ),
+    ),
+)
+
+#: Per-person tables (down-sampled to a few individuals), in display order:
+#: ``(stem, basis key, note, n_seeds)``. The note is rendered above the table. ``n_seeds`` further
+#: samples the replicate axis for tables that carry one row per (person, seed, violation) and would
+#: otherwise show a handful of people entirely through one seed's worth of rows; ``None`` keeps
+#: every seed of the sampled people.
+_GENERATED_PERSON_TABLES = (
+    ("replicate_variance_individual", "generated.replicate_variance_individual", "", None),
+    (
+        "replicate_occurrence",
+        "generated.replicate_occurrence",
+        '<p class="muted">Per-person replicate summary of the named '
+        "<code>outcome</code>: whether it occurs inside <code>horizon</code>, and how "
+        "much the seeds disagree about when (<code>timing_spread</code>, the q90–q10 "
+        "width). <code>p_hat</code> is the raw replicate frequency "
+        "<code>n_occurred/n</code>.</p>",
+        None,
+    ),
+    ("violations", "generated.violations", "", 3),
+)
+
+#: Aggregate tables, in display order: ``(stem, basis key, note)``.
+_GENERATED_AGGREGATE_TABLES = (
+    (
+        "replicate_variance_aggregate",
+        "generated.replicate_variance_aggregate",
+        _bullets(
+            "The variance of each CCF, split by within-individual "
+            "and between-person.",
+            "<code>within_var</code> is within-individual replicate variance — "
+            "rerunning inference on the same person to get a different trajectory;",
+            "<code>between_var</code> is how much individuals differ, divided by "
+            "<code>n</code>.",
+            "Both terms are inference error in the mean rather than the "
+            "spread of individual outcomes (see the backtesting "
+            "outcome-uncertainty figure).",
+            "The terms sum to "
+            "<code>total_var</code>, which is what <code>se_total</code>, "
+            "<code>ci_total</code> and the CCF figure band all report.",
+            "<code>forecast_share</code> is the fraction of each estimate contributed "
+            "by post-jump-off generated events: 0 rests entirely on observed history, "
+            "1 entirely on model output.",
+        ),
+    ),
+    (
+        "violation_rates",
+        "generated.violation_rates",
+        _bullets(
+            "<code>rate_per_event</code> is the share of the events that "
+            "break a given rule — <code>n_events</code> counts only that event "
+            "kind.",
+            "e.g.: the rate reads directly as \"x% of generated births came too soon "
+            "after the last one\".",
+            "Violations are counted per event, so one sequence "
+            "offending three times contributes three.",
+        ),
+    ),
+)
+
+
+def _generated_section(arm_dir: Path) -> str:
+    """Generated sequences: figures, per-person tables sampled to 5 individuals, and aggregates."""
+    parts = ['<h2 id="generated">Generated Sequences</h2>']
+    figures = _grouped_figures(arm_dir, _GENERATED_GROUPS)
+    if figures:
+        parts.append(figures)
     # per-person tables → sample 5 individuals; aggregate tables → full. Ages/times shown in years.
-    for name in ("replicate_variance_individual", "replicate_occurrence", "violations"):
+    for name, basis_key, note, n_seeds in _GENERATED_PERSON_TABLES:
         p = arm_dir / f"{name}.parquet"
         if p.exists():
-            parts.append(_sample_persons_html(p, to_years=True))
-            if name == "replicate_occurrence":
-                parts.append(
-                    '<p class="muted">Per-person replicate summary of the named '
-                    "<code>outcome</code>: whether it occurs inside <code>horizon</code>, and how "
-                    "much the seeds disagree about when (<code>timing_spread</code>, the q90–q10 "
-                    "width). <code>p_hat</code> is the raw replicate frequency "
-                    "<code>n_occurred/n</code>.</p>"
+            parts.append(
+                _sample_persons_html(
+                    p, to_years=True, note=note, basis_key=basis_key, n_seeds=n_seeds
                 )
-    for name in ("replicate_variance_aggregate", "violation_rates"):
+            )
+    for name, basis_key, note in _GENERATED_AGGREGATE_TABLES:
         p = arm_dir / f"{name}.parquet"
         if p.exists():
-            parts.append(_table_html(p, to_years=True))
-            if name == "replicate_variance_aggregate":
-                parts.append(
-                    _bullets(
-                        "The variance of each CCF, split by within-individual "
-                        "and between-person.",
-                        "<code>within_var</code> is within-individual replicate variance — "
-                        "rerunning inference on the same person to get a different trajectory;",
-                        "<code>between_var</code> is how much individuals differ, divided by "
-                        "<code>n</code>.",
-                        "Both terms are error in the <em>mean</em> rather than the "
-                        "spread of individual outcomes (see the backtesting "
-                        "outcome-uncertainty figure).",
-                        "The terms sum to "
-                        "<code>total_var</code>, which is what <code>se_total</code>, "
-                        "<code>ci_total</code> and the CCF figure band all report.",
-                        "<code>forecast_share</code> is the fraction of each estimate contributed "
-                        "by post-jump-off generated events: 0 rests entirely on observed history, "
-                        "1 entirely on model output.",
-                    )
-                )
-            if name == "violation_rates":
-                parts.append(
-                    _bullets(
-                        "<code>rate_per_event</code> is the share of the events that "
-                        "break a given rule — <code>n_events</code> counts only that event "
-                        "kind.",
-                        "e.g.: the rate reads directly as \"x% of generated births came too soon "
-                        "after the last one\".",
-                        "Violations are counted per event, so one sequence "
-                        "offending three times contributes three.",
-                    )
-                )
+            parts.append(_table_html(p, to_years=True, note=note, basis_key=basis_key))
     return "\n".join(parts) if len(parts) > 1 else ""
 
 
-def _warnings_section(manifest: dict) -> str:
-    """Verbatim warning list from the manifest."""
-    warnings = manifest.get("warnings", [])
-    if not warnings:
-        body = '<p class="muted">No warnings emitted.</p>'
-    else:
-        items = "".join(f"<li>{html.escape(str(w))}</li>" for w in warnings)
-        body = f'<div class="warn"><ul>{items}</ul></div>'
-    return f'<h2 id="warnings">Warnings</h2>{body}'
+#: Report sections in display order, grouped by where the analysis comes from rather than by which
+#: arm produced it: ``(anchor, title, arm directory, renderer)``. The arm directory names on disk
+#: are unchanged; only the presentation is regrouped.
+SECTIONS = (
+    ("observed", "Observed Sequences", "descriptives", _observed_section),
+    ("generated", "Generated Sequences", "forecasting", _generated_section),
+    ("comparison", "Observed and Generated Comparison", "backtesting", _comparison_section),
+)
 
 
 def build_report(results_dir: str | Path) -> Path:
     """Build ``results/report.html`` from an existing results dir; return its path.
 
-    Reads ``manifest.json`` for the run summary and warnings, then embeds the figures and tables
-    found under each present arm directory. Missing arm dirs are skipped gracefully.
+    Reads ``manifest.json`` for the run summary, then embeds the figures and tables found under each
+    present arm directory. Missing arm dirs are skipped gracefully. The run's warnings are not
+    rendered here — ``manifest.json`` carries the verbatim list, and the CLI logs them as they are
+    raised, which is where they are actionable.
     """
     results_dir = Path(results_dir)
     manifest = read_manifest(results_dir) or {}
 
-    arm_renderers = {
-        "descriptives": _descriptives_section,
-        "backtesting": _backtesting_section,
-        "forecasting": _forecasting_section,
-    }
     sections = [_run_summary_section(manifest, results_dir)]
-    present_arms = []
-    for arm in ARM_ORDER:
+    present = []
+    for anchor, _title, arm, renderer in SECTIONS:
         arm_dir = results_dir / arm
         if arm_dir.is_dir():
-            section = arm_renderers[arm](arm_dir)
+            section = renderer(arm_dir)
             if section:
                 sections.append(section)
-                present_arms.append(arm)
-    sections.append(_warnings_section(manifest))
-
+                present.append(anchor)
     model = manifest.get("model", {}).get("name", "")
-    nav_targets = ["summary", *present_arms, "warnings"]
-    nav = " ".join(f'<a href="#{t}">{t}</a>' for t in nav_targets)
+    nav_targets = ["summary", *present]
+    nav_labels = {
+        "summary": "Run summary",
+        **{anchor: title for anchor, title, _, _ in SECTIONS},
+    }
+    nav = " ".join(
+        f'<a href="#{t}">{html.escape(nav_labels[t])}</a>' for t in nav_targets
+    )
     doc = (
         "<!doctype html><html><head><meta charset='utf-8'>"
         f"<title>seqeval report — {html.escape(str(model))}</title>"
@@ -760,5 +1081,5 @@ def build_report(results_dir: str | Path) -> Path:
     )
     path = results_dir / REPORT_NAME
     path.write_text(doc)
-    logger.info("report: wrote %s (%d arm section(s))", path, len(present_arms))
+    logger.info("report: wrote %s (%d section(s))", path, len(present))
     return path

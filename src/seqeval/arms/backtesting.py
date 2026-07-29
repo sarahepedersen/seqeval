@@ -21,7 +21,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from seqeval.arms._common import OutputWriter, combine_prefix
+from seqeval.arms._common import OutputWriter, combine_prefix, pool_seeds
 from seqeval.config import (
     DEFAULT_COHORT_WIDTH,
     FERTILITY_TARGETS,
@@ -48,7 +48,7 @@ from seqeval.core.specs import (
 from seqeval.io.loaders import Bundle
 from seqeval.io.schema import GEN_KEYS, OBS_KEYS
 from seqeval.metrics import fertility as fe
-from seqeval.metrics import ml
+from seqeval.metrics import ml, pooling
 from seqeval.metrics import survival as sv
 from seqeval.units import days_to_years
 from seqeval.viz import backtest as viz_backtest
@@ -60,6 +60,10 @@ logger = logging.getLogger("seqeval")
 
 _RUN_KEYS = ["person_id", "age_start", "age_stop"]
 _EXTRA_BY = ("seed", "age_start", "age_stop")
+# The same grouping minus `seed`, for the pooled pass over all N×K trajectories at once. The window
+# keys stay in: `observation_spans` reads `age_stop` out of the key list to set each span's start,
+# so dropping them would silently move the generated exposure back to age 0.
+_POOLED_BY = ("age_start", "age_stop")
 _FERTILE = (15.0, 50.0)
 # Width of a timing-error bin on the ridge; one year is the resolution a reader of ages expects.
 _ERROR_BIN_YEARS = 1.0
@@ -115,7 +119,16 @@ def run(
             "aggregate_error",
             "coverage",
             "timing_error",
+            "timing_error_by_seed",
             "parity_distribution",
+            # Each seed is its own synthetic population: `*_by_seed` keeps all K of them, `*_pooled`
+            # is the single estimate over every trajectory at once (05b) — what the figures draw.
+            "km_by_seed",
+            "km_pooled",
+            "ppr_by_seed",
+            "ppr_pooled",
+            "asfr_by_seed",
+            "asfr_pooled",
         )
     }
     # Overlay curves kept across the window loop, keyed by family ("ccf" / "km:<outcome>"), so the
@@ -334,7 +347,7 @@ def _score_row(joined, summary, tables, binning) -> dict:
         "r2": ml.r2(joined),
     }
     if tables is not None:
-        td, obs_tte, _ = tables
+        td, obs_tte, _, _ = tables
         scores["timing_coverage"] = ml.timing_coverage(td, obs_tte)
     return scores
 
@@ -355,31 +368,49 @@ def _timing_horizon(spec, t2) -> int:
 
 
 def _timing_tables(spec, gen_w, observed, t1, t2):
-    """``(timing_distribution, observed tte, horizon_days)`` for a framed (timed) outcome."""
+    """``(timing_distribution, observed tte, horizon, generated tte)`` for a framed outcome.
+
+    ``timing_distribution`` collapses a person's replicates to quantiles, which is what
+    :func:`~seqeval.metrics.ml.timing_coverage` scores. The error ridge does not use it — it works
+    off the per-trajectory ``tte_gen`` directly, since each seed is its own synthetic population.
+    """
     combined = combine_prefix(observed, gen_w, t1, t2)
     tte_gen = time_to_event(combined, GEN_KEYS, spec.tte)
     horizon = _timing_horizon(spec, t2)
     td = rep.timing_distribution(tte_gen, run_keys=_RUN_KEYS, seed_col="seed", horizon=horizon)
     obs_tte = time_to_event(observed, OBS_KEYS, spec.tte)
-    return td, obs_tte, horizon
+    return td, obs_tte, horizon, tte_gen
 
 
 def _emit_timing_ridge(spec, tables, t2, out, desc, scored, acc, label) -> None:
-    """Timing-error ridge + its binned table for a timed outcome (one figure per jump-off).
+    """Timing-error ridge plus its per-seed and pooled tables (one figure per jump-off).
 
     The error is measured in the outcome's own duration units, so an origin-less outcome compares
     ages at the event and an origin-based one compares elapsed times from its origin. Both reduce to
     the same signed difference, which is why one figure serves both and only the label changes.
+
+    One row per generated trajectory, not per person: a trajectory that predicts the outcome inside
+    the frame contributes its own error, and one that never reaches the outcome is excluded and
+    counted. The ridge draws the pooled distribution and states the exclusion beneath it.
     """
-    td, obs_tte, horizon = tables
-    err = ml.timing_error_distribution(
-        td, obs_tte, horizon_days=horizon, persons=scored, error_bin_years=_ERROR_BIN_YEARS,
-        pred_bin_years=_PRED_BIN_YEARS, min_cell=out.min_cell,
-    )
+    _, obs_tte, horizon, tte_gen = tables
+    pairs = ml.timing_pairs(tte_gen, obs_tte, horizon_days=horizon, persons=scored)
+    binning = {
+        "error_bin_years": _ERROR_BIN_YEARS,
+        "pred_bin_years": _PRED_BIN_YEARS,
+        "min_cell": out.min_cell,
+    }
+    err = ml.timing_error_distribution(pairs, **binning)
     if err.empty:
         return
+    by_seed = ml.timing_error_distribution(pairs, by=["seed"], **binning)
+
     err.insert(0, "outcome", spec.name)
     acc["timing_error"].append(_stamp(err, label))
+    if not by_seed.empty:
+        by_seed.insert(0, "outcome", spec.name)
+        acc["timing_error_by_seed"].append(_stamp(by_seed, label))
+
     is_age = spec.tte.origin is None
     unit = "age at event" if is_age else "waiting time"
     out.figure(
@@ -388,6 +419,7 @@ def _emit_timing_ridge(spec, tables, t2, out, desc, scored, acc, label) -> None:
             err,
             xlabel=f"observed − predicted {unit} (years)",
             title=f"Timing error — {desc}",
+            min_cell=out.min_cell,
         ),
     )
 
@@ -448,7 +480,7 @@ def _score_aggregate_target(
     if target.startswith("km:"):
         _emit_km_overlay(
             target[len("km:") :], combined, observed, outcomes, t2, out,
-            replicate_spec.level, panels,
+            replicate_spec.level, panels, acc, t1,
         )
     elif target == "ccf":
         var_m = fe.ccf_variance(gen_births, gen_spans, persons, cohort_width=cohort_width)
@@ -471,38 +503,113 @@ def _score_aggregate_target(
             ),
         )
     elif target == "ppr":
-        _stash_panel(panels, "ppr", obs_m, gen_m, t2)
+        pooled_births, pooled_spans, _, n_people = _pooled_inputs(
+            combined, persons, birth_token
+        )
+        pooled = fe.ppr(
+            pooled_births, pooled_spans, max_parity=fertility_grid.max_parity,
+            extra_by=_POOLED_BY,
+        )
+        pooled = pooling.attach_pooled_ci(
+            _relabel_units(pooled, n_people), gen_m,
+            value="ppr", var="ppr_var", on=[*_POOLED_BY, "parity_from"],
+            level=replicate_spec.level, clip=(0.0, 1.0),
+        )
+        label = _cell_label(t1, t2, target, None)
+        acc["ppr_by_seed"].append(_stamp(gen_m, label))
+        acc["ppr_pooled"].append(_stamp(pooled, label))
+        _stash_panel(panels, "ppr", obs_m, pooled, t2)
         out.figure(
             f"ppr_overlay_w{jumpoff_y}",
             viz_backtest.plot_ppr_overlay(
-                obs_m, gen_m, level=replicate_spec.level,
+                obs_m, pooled, level=replicate_spec.level,
                 title=f"Parity progression — jump-off {jumpoff_y}y",
             ),
         )
     elif target == "asfr_cohort":
-        _stash_panel(panels, "asfr_cohort", obs_m, gen_m, t2)
+        pooled_births, pooled_spans, persons_pooled, n_people = _pooled_inputs(
+            combined, persons, birth_token
+        )
+        bins = AgeBins.from_years(*_FERTILE, fertility_grid.age_bin_width)
+        pooled = fe.asfr(
+            pooled_births, pooled_spans, persons_pooled, mode="cohort", bins=bins,
+            extra_by=_POOLED_BY, cohort_width=cohort_width,
+        )
+        pooled = pooling.attach_pooled_ci(
+            _relabel_units(pooled, n_people), gen_m,
+            value="asfr", var="asfr_var", on=[*_POOLED_BY, "cohort", "age_bin"],
+            level=replicate_spec.level, clip=(0.0, None),
+        )
+        label = _cell_label(t1, t2, target, None)
+        acc["asfr_by_seed"].append(_stamp(gen_m, label))
+        acc["asfr_pooled"].append(_stamp(pooled, label))
+        _stash_panel(panels, "asfr_cohort", obs_m, pooled, t2)
         out.figure(
             f"asfr_overlay_w{jumpoff_y}",
             viz_backtest.plot_asfr_overlay(
-                obs_m, gen_m, jumpoff_days=t2,
+                obs_m, pooled, jumpoff_days=t2, level=replicate_spec.level,
                 title=f"Cohort ASFR — jump-off {jumpoff_y}y",
             ),
         )
 
 
-def _emit_km_overlay(name, combined, observed, outcomes, t2, out, level, panels) -> None:
-    """Emit the observed KM curve under the generated across-seed mean + Monte-Carlo CI band."""
+def _pooled_inputs(combined, persons, birth_token):
+    """``(births, spans, persons, n_source_people)`` for the pooled N×K synthetic population."""
+    pooled_seq, persons_pooled = pool_seeds(combined, persons)
+    return (
+        births(pooled_seq, _RUN_KEYS, birth_event=birth_token),
+        observation_spans(pooled_seq, _RUN_KEYS),
+        persons_pooled,
+        int(combined["person_id"].nunique()),
+    )
+
+
+def _relabel_units(pooled: pd.DataFrame, n_people: int) -> pd.DataFrame:
+    """Rename the pooled frame's per-cell person count to ``n_units``; add the real head-count.
+
+    Every metric counts distinct ``person_id``, which in the pooled population is one *trajectory*.
+    Calling that ``n_persons`` would read as N·K people, so it becomes ``n_units`` — trajectories in
+    that cell. ``n_source_persons`` is the window's distinct people, the denominator the interval is
+    really scaled to, and is constant down the table rather than per-cell.
+    """
+    out = pooled.rename(columns={"n_persons": "n_units"})
+    out["n_source_persons"] = int(n_people)
+    return out
+
+
+def _emit_km_overlay(name, combined, observed, outcomes, t2, out, level, panels, acc, t1) -> None:
+    """Observed KM under the pooled generated curve, and both the per-seed and pooled tables.
+
+    The per-seed curves are K separate synthetic populations, each carrying its own Greenwood
+    variance; the pooled curve is one product-limit estimate over every trajectory at once, and its
+    interval is the design effect those K curves actually show
+    (:func:`seqeval.metrics.pooling.attach_km_pooled_ci`).
+    """
     spec = outcomes[name]
     obs_km = sv.kaplan_meier(time_to_event(observed, OBS_KEYS, spec), by=[])
-    gen_km = sv.kaplan_meier(time_to_event(combined, GEN_KEYS, spec), by=["seed"])
+    by_seed = sv.kaplan_meier(time_to_event(combined, GEN_KEYS, spec), by=list(_EXTRA_BY))
+
+    pooled_seq, _ = pool_seeds(combined)
+    pooled = sv.kaplan_meier(time_to_event(pooled_seq, _RUN_KEYS, spec), by=list(_POOLED_BY))
+    pooled = pooling.attach_km_pooled_ci(
+        _relabel_units(pooled, combined["person_id"].nunique()),
+        by_seed,
+        by=list(_POOLED_BY),
+        level=level,
+    )
+
+    label = _cell_label(t1, t2, f"km:{name}", None)
+    acc["km_by_seed"].append(_stamp(by_seed, label))
+    acc["km_pooled"].append(_stamp(pooled, label))
+
     jumpoff_y = round(days_to_years(t2))
     out.figure(
         f"km_overlay_{name}_w{jumpoff_y}",
-        viz_backtest.plot_km_seed_band(
-            obs_km, gen_km, title=f"{name} survival — jump-off {jumpoff_y}y", level=level
+        viz_backtest.plot_km_overlay(
+            obs_km, pooled, title=f"{name} survival — jump-off {jumpoff_y}y", level=level
         ),
     )
-    _stash_panel(panels, f"km:{name}", obs_km, gen_km, t2)
+    _stash_panel(panels, f"km:{name}", obs_km, pooled, t2)
 
 
 def _stash_panel(

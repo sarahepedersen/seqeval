@@ -92,7 +92,7 @@ def test_report_states_the_policy_and_still_renders_every_arm(restricted_run):
     html = (restricted_run / "report.html").read_text()
     assert "Individual-level output" in html and "Minimum cell size" in html
     assert "This run was written with" not in html  # no disclosure banner
-    for anchor in ("summary", "descriptives", "backtesting", "forecasting", "warnings"):
+    for anchor in ("summary", "observed", "generated", "comparison"):
         assert f'id="{anchor}"' in html
     # the views that replaced the per-person ones are the ones carrying the section
     assert 'id="timing-error"' in html and 'id="uncertainty"' in html

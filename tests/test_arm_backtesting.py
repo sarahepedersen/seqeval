@@ -139,9 +139,10 @@ _GRID = FertilityGrid()
 
 
 def _run_arm(
-    tmp_path, windows=((0.0, 25.0), (0.0, 30.0)), n_seeds=10, fertility_grid=_GRID
+    tmp_path, windows=((0.0, 25.0), (0.0, 30.0)), n_seeds=10, fertility_grid=_GRID,
+    cfg_yaml=_CFG_YAML,
 ):
-    cfg = Config.model_validate(yaml.safe_load(_CFG_YAML))
+    cfg = Config.model_validate(yaml.safe_load(cfg_yaml))
     rng = np.random.default_rng(0)
     h = S.default_hazards()
     obs, pers = S.simulate_cohort(1200, (1960, 1985), h, None, rng, no_event_fraction=1.0)
@@ -185,6 +186,54 @@ def test_arm_writes_scores_and_tables(tmp_path):
     assert not scores.duplicated(["age_stop", "outcome", "condition", "metric"]).any()
     assert {"roc_auc", "brier_corrected", "mse", "r2", "ece"} <= set(scores["metric"])
     assert "log_loss" not in set(scores["metric"])  # removed from the backtest score set
+
+
+def _run_arm_all_targets(tmp_path):
+    """The arm with every time-dependent family switched on, including a KM curve."""
+    return _run_arm(
+        tmp_path,
+        cfg_yaml=_CFG_YAML.replace(
+            "aggregate_targets: [ccf, ppr, asfr_cohort]",
+            "aggregate_targets: [ccf, ppr, asfr_cohort, km:first_birth]",
+        ),
+    )
+
+
+def test_each_seed_population_is_kept_beside_the_pooled_one(tmp_path):
+    """K synthetic populations on disk, and one pooled estimate over every trajectory."""
+    out = _run_arm_all_targets(tmp_path)
+    names = {p.name for p in out.written}
+    assert {
+        "km_by_seed.parquet", "km_pooled.parquet",
+        "ppr_by_seed.parquet", "ppr_pooled.parquet",
+        "asfr_by_seed.parquet", "asfr_pooled.parquet",
+        "timing_error_by_seed.parquet",
+    } <= names
+
+    for family in ("km", "ppr", "asfr"):
+        by_seed = pd.read_parquet(out.dir / f"{family}_by_seed.parquet")
+        pooled = pd.read_parquet(out.dir / f"{family}_pooled.parquet")
+        assert by_seed["seed"].nunique() > 1, family
+        assert "seed" not in pooled.columns, family
+        # the pooled pass counts trajectories, and says how many people they came from
+        assert {"n_units", "n_source_persons"} <= set(pooled.columns), family
+        assert (pooled["n_source_persons"] < pooled["n_units"].max()).all(), family
+        # nothing leaks the synthetic per-trajectory identity
+        assert "source_person_id" not in pooled.columns, family
+        assert "person_id" not in pooled.columns, family
+
+
+def test_pooled_interval_lies_between_its_two_limits(tmp_path):
+    """N people's worth at one end, N·K at the other; the seeds decide where it lands."""
+    out = _run_arm_all_targets(tmp_path)
+    for family in ("km", "ppr", "asfr"):
+        pooled = pd.read_parquet(out.dir / f"{family}_pooled.parquet")
+        rows = pooled.dropna(subset=["mean_var", "pooled_var"])
+        assert len(rows), family
+        assert (rows["pooled_var"] <= rows["mean_var"] + 1e-12).all(), family
+        assert (rows["pooled_var"] >= rows["mean_var"] / rows["k_seeds"] - 1e-12).all(), family
+        drawn = pooled.dropna(subset=["ci_lo", "ci_hi"])
+        assert (drawn["ci_lo"] <= drawn["ci_hi"]).all(), family
 
 
 def test_scores_carry_analytic_cis(tmp_path):

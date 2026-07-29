@@ -46,6 +46,40 @@ def combine_prefix(observed: pd.DataFrame, gen_w: pd.DataFrame, t1: int, t2: int
     return combined
 
 
+def pool_seeds(
+    frame: pd.DataFrame, persons: pd.DataFrame | None = None, *, seed_col: str = "seed"
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """One synthetic population of N×K trajectories: every ``(person_id, seed)`` becomes a person.
+
+    Re-keys ``person_id`` to a dense integer id per trajectory, keeping the original as
+    ``source_person_id``. Every metric that groups by ``person_id`` — Kaplan-Meier, PPR, ASFR — then
+    treats each trajectory as its own individual with no change to the metric itself, which is what
+    "pool the generated sequences" means: no per-person aggregate underneath the estimate.
+
+    ``persons`` is expanded the same way when given, so the ``birth_year``/cohort merges inside the
+    fertility metrics still resolve. The id map is built from the sorted pairs, so a rerun on the
+    same inputs produces the same ids.
+    """
+    units = (
+        frame[["person_id", seed_col]]
+        .drop_duplicates()
+        .sort_values(["person_id", seed_col], kind="stable")
+        .reset_index(drop=True)
+    )
+    units["unit_id"] = np.arange(len(units), dtype=np.int64)
+
+    pooled = frame.merge(units, on=["person_id", seed_col], how="left")
+    pooled = pooled.rename(columns={"person_id": "source_person_id", "unit_id": "person_id"})
+
+    if persons is None:
+        return pooled, None
+    persons_pooled = persons.merge(units, on="person_id", how="inner")
+    persons_pooled = persons_pooled.rename(
+        columns={"person_id": "source_person_id", "unit_id": "person_id"}
+    )
+    return pooled, persons_pooled
+
+
 @dataclass
 class OutputWriter:
     """Resolves paths, stamps the model column, saves frames/figures, and records the writes.

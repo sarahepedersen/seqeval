@@ -33,8 +33,17 @@ def lexis_surface(births, spans, persons, *, occurrence=1, bins: AgeBins, year_r
 surface from generated sequences (rows with age > age_stop supply the missing upper-right
 triangle), and produce:
 
-- `lexis_observed.parquet`, `lexis_forecast.parquet` (per seed), `lexis_combined.parquet`
-  (observed cells + seed-median forecast cells, with a `source ∈ {observed, forecast}` column).
+- `lexis_observed.parquet`, `lexis_forecast.parquet` (per seed), `lexis_pooled.parquet`,
+  `lexis_combined.parquet` (observed cells + pooled forecast cells, with a
+  `source ∈ {observed, forecast}` column).
+
+  The forecast side follows the same per-seed-population rule as the time-dependent backtest
+  families: each seed is its own synthetic population (`lexis_forecast.parquet`), and the surface
+  that gets drawn is one estimate over **all N×K trajectories at once** (`lexis_pooled.parquet`,
+  built via `arms/_common.pool_seeds`) — not a per-cell summary across seeds. Each cell carries its
+  Poisson `rate_var` and the design-effect interval from `metrics/pooling.py`
+  (see `metrics_reference.md` §4.1). `_combine_surfaces` therefore aggregates nothing; it tags the
+  pooled cells and stacks them under the observed ones.
 
 `viz/lexis.py`:
 

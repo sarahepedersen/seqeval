@@ -68,6 +68,7 @@ def test_arm_writes_all_tables_and_figures(tmp_path):
     assert {
         "lexis_cohort_observed.parquet",
         "lexis_cohort_forecast.parquet",
+        "lexis_cohort_pooled.parquet",
         "lexis_cohort_combined.parquet",
         "violations.parquet",
         "violation_rates.parquet",
@@ -82,6 +83,36 @@ def test_arm_writes_all_tables_and_figures(tmp_path):
     assert {"within_seed_variance.png", "within_seed_variance_by_cohort.png"} <= names
     for p in out.written:
         assert p.exists() and p.stat().st_size > 0
+
+
+def test_lexis_forecast_cells_are_pooled_over_every_trajectory(tmp_path):
+    """The surface drawn is one estimate over all N×K trajectories, not a per-cell seed summary."""
+    out = _run(tmp_path)
+    by_seed = pd.read_parquet(out.dir / "lexis_cohort_forecast.parquet")
+    pooled = pd.read_parquet(out.dir / "lexis_cohort_pooled.parquet")
+    combined = pd.read_parquet(out.dir / "lexis_cohort_combined.parquet")
+
+    assert by_seed["seed"].nunique() > 1
+    assert "seed" not in pooled.columns
+    cell = ["cohort", "age_bin"]
+    assert not pooled.duplicated(cell).any()
+    # trajectories counted as units, with the head-count they came from alongside
+    assert {"n_units", "n_source_persons"} <= set(pooled.columns)
+    assert (pooled["n_source_persons"] < pooled["n_units"].max()).all()
+
+    # the interval sits between its two limits, exactly as the backtest families do
+    rows = pooled.dropna(subset=["mean_var", "pooled_var"])
+    assert len(rows)
+    assert (rows["pooled_var"] <= rows["mean_var"] + 1e-12).all()
+    assert (rows["pooled_var"] >= rows["mean_var"] / rows["k_seeds"] - 1e-12).all()
+
+    # every forecast cell in the combined surface is its pooled cell, taken verbatim. A fixture
+    # whose observed surface already covers every cell has none, and then there is nothing to check
+    fc = combined[combined["source"] == "forecast"].merge(
+        pooled[[*cell, "rate"]], on=cell, how="left", suffixes=("", "_pooled")
+    )
+    if len(fc):
+        np.testing.assert_allclose(fc["rate"], fc["rate_pooled"])
 
 
 def test_violation_rates_report_observed_baseline(tmp_path):

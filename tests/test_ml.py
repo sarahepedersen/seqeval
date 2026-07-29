@@ -158,63 +158,95 @@ def test_aggregate_error_alignment_raises():
         ml.aggregate_error(_ccf_gen(), obs, value_col="ccf", on=["cohort"])
 
 
-def _timing_frames(pred_years, obs_years, observed=None):
-    """A (timing_distribution, observed tte) pair with one person per predicted/observed value."""
+def _tte_frames(pred_years, obs_years, *, obs_observed=None, pred_observed=None, n_seeds=1):
+    """A (generated tte, observed tte) pair — one generated row per ``(person, seed)`` trajectory.
+
+    ``pred_observed`` marks trajectories where the model produced the outcome at all; the default
+    is every one of them, so a test says nothing about exclusion unless it asks to.
+    """
     n = len(pred_years)
     person = np.arange(n)
-    td = pd.DataFrame({"person_id": person, "q50": [yd(v) for v in pred_years]})
+    gen = pd.DataFrame(
+        {
+            "person_id": np.tile(person, n_seeds),
+            "seed": np.repeat(np.arange(n_seeds), n),
+            "duration": np.tile(np.array([yd(v) for v in pred_years], dtype=np.int64), n_seeds),
+            "observed": (
+                np.ones(n * n_seeds, dtype=bool)
+                if pred_observed is None
+                else np.tile(np.asarray(pred_observed, dtype=bool), n_seeds)
+            ),
+        }
+    )
     obs_tte = pd.DataFrame(
         {
             "person_id": person,
-            "duration": [yd(v) for v in obs_years],
-            "observed": np.ones(n, dtype=bool) if observed is None else observed,
+            "duration": np.array([yd(v) for v in obs_years], dtype=np.int64),
+            "observed": np.ones(n, dtype=bool) if obs_observed is None else obs_observed,
         }
     )
-    return td, obs_tte
+    return gen, obs_tte
 
 
-def _scope(td, obs_tte, **kw):
-    kw.setdefault("horizon_days", None)
-    kw.setdefault("persons", None)
-    kw.setdefault("drop_projected_beyond", True)
-    return ml._timing_scope(td, obs_tte, **kw)
+def _pairs(pred_years, obs_years, *, horizon_days=None, persons=None, **kw):
+    gen, obs_tte = _tte_frames(pred_years, obs_years, **kw)
+    return ml.timing_pairs(gen, obs_tte, horizon_days=horizon_days, persons=persons)
 
 
 def test_scope_keeps_only_events_observed_inside_the_horizon():
-    td, obs_tte = _timing_frames([20, 30, 45], [22, 33, 40], observed=[True, True, False])
-    scoped = _scope(td, obs_tte, horizon_days=yd(50))
-    assert list(scoped["person_id"]) == [0, 1]  # censored person dropped
+    pairs = _pairs([20, 30, 45], [22, 33, 40], obs_observed=[True, True, False],
+                   horizon_days=yd(50))
+    assert list(pairs["person_id"]) == [0, 1]  # censored person dropped
     # a person whose observed wait exceeds the horizon has no predicted counterpart
-    td, obs_tte = _timing_frames([20, 30], [22, 60])
-    assert list(_scope(td, obs_tte, horizon_days=yd(50))["person_id"]) == [0]
+    assert list(_pairs([20, 30], [22, 60], horizon_days=yd(50))["person_id"]) == [0]
 
 
-def test_scope_drops_persons_projected_past_the_frame():
-    """A predicted median sitting on the horizon is the cap, not a date — not timing signal."""
-    td, obs_tte = _timing_frames([20, 50], [22, 44])
-    assert list(_scope(td, obs_tte, horizon_days=yd(50))["person_id"]) == [0]
-    kept = _scope(td, obs_tte, horizon_days=yd(50), drop_projected_beyond=False)
-    assert list(kept["person_id"]) == [0, 1]
+def test_unpredicted_trajectories_are_excluded_not_capped():
+    """A trajectory the model never brought to the outcome has no predicted time to difference."""
+    # person 1's trajectory runs past the frame; person 2's never sees the event at all
+    pairs = _pairs([20, 60, 30], [22, 44, 33], pred_observed=[True, True, False],
+                   horizon_days=yd(50))
+    assert list(pairs["person_id"]) == [0, 1, 2]  # every candidate is kept as a row
+    assert list(pairs["predicted"]) == [True, False, False]
+    assert pairs.loc[pairs["person_id"] != 0, "pred"].isna().all()
+
+    out = ml.timing_error_distribution(pairs, pred_bin_years=50, min_cell=0)
+    assert out["n_trajectories"].iloc[0] == 3
+    assert out["n_excluded"].iloc[0] == 2
+    # nothing is parked on the horizon: only the one real prediction is binned
+    assert out["n_pred_bin"].iloc[0] == 1
 
 
 def test_scope_restricts_to_the_scored_population():
     """The arm passes its condition-minus-settled set, matching the reliability panel."""
-    td, obs_tte = _timing_frames([20, 30, 35], [22, 33, 36])
-    scoped = _scope(td, obs_tte, horizon_days=yd(50), persons={0, 2})
-    assert list(scoped["person_id"]) == [0, 2]
+    pairs = _pairs([20, 30, 35], [22, 33, 36], horizon_days=yd(50), persons={0, 2})
+    assert list(pairs["person_id"]) == [0, 2]
+
+
+def test_every_seed_contributes_its_own_error():
+    """No per-person median: K seeds mean K rows, and K counts in the table."""
+    pairs = _pairs([30, 30], [33, 33], n_seeds=4)
+    assert len(pairs) == 8
+    out = ml.timing_error_distribution(pairs, pred_bin_years=50, min_cell=0)
+    assert out["n_pred_bin"].iloc[0] == 8
+    assert out["n_trajectories"].iloc[0] == 8
+
+    per_seed = ml.timing_error_distribution(pairs, by=["seed"], pred_bin_years=50, min_cell=0)
+    assert sorted(per_seed["seed"].unique()) == [0, 1, 2, 3]
+    assert (per_seed.groupby("seed")["n_pred_bin"].first() == 2).all()
 
 
 def _uniform_pairs(n_per_bin=10, n_bins=6, offset=0.0):
     """``n_bins`` distinct predicted values, ``n_per_bin`` persons each, all off by ``offset``."""
     pred = np.repeat(np.arange(25, 25 + n_bins), n_per_bin).astype(float)
-    return _timing_frames(pred, pred + offset)
+    return _pairs(pred, pred + offset)
 
 
 def test_error_is_observed_minus_predicted():
     """Positive error means the event happened later than the model said."""
     pred = [30] * 5 + [31] * 5
-    td, obs_tte = _timing_frames(pred, [p + 3 for p in pred])
-    out = ml.timing_error_distribution(td, obs_tte, pred_bin_years=50)
+    pairs = _pairs(pred, [p + 3 for p in pred])
+    out = ml.timing_error_distribution(pairs, pred_bin_years=50)
     landed = out[out["n_persons"] == 10].iloc[0]
     assert landed["error_lo"] == pytest.approx(yd(3), abs=1)
 
@@ -222,19 +254,18 @@ def test_error_is_observed_minus_predicted():
 def test_zero_is_always_a_bin_edge():
     """No cell may mix events that came early with events that came late."""
     for offset in (0.0, 0.4, -2.7, 1.5):
-        td, obs_tte = _uniform_pairs(offset=offset)
-        out = ml.timing_error_distribution(td, obs_tte)
+        out = ml.timing_error_distribution(_uniform_pairs(offset=offset))
         straddles = (out["error_lo"] < 0) & (out["error_hi"] > 0)
         assert not straddles.any()
 
 
 def test_predicted_bins_are_the_same_intervals_across_jumpoffs():
     """Fixed-width bins, so the same predicted-age range is the same bin in every figure."""
-    early, obs_early = _uniform_pairs(n_per_bin=10, n_bins=10)          # predicted ages 25..34
-    late, obs_late = _timing_frames([32.0] * 40 + [33.0] * 40, [35.0] * 80)  # predicted ages 32..33
+    early = _uniform_pairs(n_per_bin=10, n_bins=10)                      # predicted ages 25..34
+    late = _pairs([32.0] * 40 + [33.0] * 40, [35.0] * 80)                # predicted ages 32..33
 
-    a = ml.timing_error_distribution(early, obs_early, pred_bin_years=2)
-    b = ml.timing_error_distribution(late, obs_late, pred_bin_years=2)
+    a = ml.timing_error_distribution(early, pred_bin_years=2)
+    b = ml.timing_error_distribution(late, pred_bin_years=2)
     def edges(out):
         return out.groupby("pred_bin")[["pred_lo", "pred_hi"]].first()
 
@@ -245,18 +276,33 @@ def test_predicted_bins_are_the_same_intervals_across_jumpoffs():
     assert set(edges(b).index) < set(edges(a).index)
 
 
+def test_per_seed_and_pooled_tables_share_their_bins():
+    """The two views of one run must line up, or a seed cannot be read against the pool."""
+    pairs = _pairs(np.repeat(np.arange(25.0, 31.0), 8), np.repeat(np.arange(26.0, 32.0), 8),
+                   n_seeds=3)
+    pooled = ml.timing_error_distribution(pairs, pred_bin_years=2, min_cell=0)
+    per_seed = ml.timing_error_distribution(pairs, by=["seed"], pred_bin_years=2, min_cell=0)
+    edges = ["pred_lo", "pred_hi"]
+    shared = (
+        per_seed.groupby("pred_bin")[edges].first()
+        .join(pooled.groupby("pred_bin")[edges].first(), rsuffix="_pooled", how="inner")
+    )
+    assert len(shared)
+    np.testing.assert_allclose(shared["pred_lo"], shared["pred_lo_pooled"])
+    np.testing.assert_allclose(shared["pred_hi"], shared["pred_hi_pooled"])
+
+
 def test_predicted_bins_are_anchored_to_the_bin_width():
     """Anchoring is absolute, not relative to the data, or two runs would not line up."""
-    td, obs_tte = _uniform_pairs(n_per_bin=5, n_bins=10)
-    out = ml.timing_error_distribution(td, obs_tte, pred_bin_years=2)
+    out = ml.timing_error_distribution(_uniform_pairs(n_per_bin=5, n_bins=10), pred_bin_years=2)
     lo = out.groupby("pred_bin")["pred_lo"].first() / yd(2)
     np.testing.assert_allclose(lo, np.round(lo), atol=1e-6)
 
 
 def test_empty_predicted_bins_are_dropped_not_drawn():
     """A gap in predicted values leaves no blank ridge."""
-    td, obs_tte = _timing_frames([26.0] * 20 + [40.0] * 20, [28.0] * 40)
-    out = ml.timing_error_distribution(td, obs_tte, pred_bin_years=2)
+    pairs = _pairs([26.0] * 20 + [40.0] * 20, [28.0] * 40)
+    out = ml.timing_error_distribution(pairs, pred_bin_years=2)
     assert (out.groupby("pred_bin")["n_pred_bin"].first() > 0).all()
     assert out["pred_bin"].nunique() == 2
 
@@ -265,8 +311,7 @@ def test_small_cells_are_withheld_and_unrecoverable():
     # one predicted bin: 20 people arrive a year late, 3 stragglers six years late
     pred = [30, 31] * 10 + [30, 31, 30]
     obs = [p + 1 for p in pred[:20]] + [p + 6 for p in pred[20:]]
-    td, obs_tte = _timing_frames(pred, obs)
-    out = ml.timing_error_distribution(td, obs_tte, pred_bin_years=50)
+    out = ml.timing_error_distribution(_pairs(pred, obs), pred_bin_years=50)
     hidden = out[out["suppressed"]]
     assert len(hidden) >= 2  # the lone small cell drags a second one with it
     assert hidden["n_persons"].isna().all()
@@ -275,23 +320,20 @@ def test_small_cells_are_withheld_and_unrecoverable():
 
 def test_output_carries_no_person_identifier():
     """The table the ridge is drawn from must name nobody."""
-    td, obs_tte = _uniform_pairs()
-    out = ml.timing_error_distribution(td, obs_tte)
+    out = ml.timing_error_distribution(_uniform_pairs())
     assert "person_id" not in out.columns
     assert (out["n_persons"].dropna() >= 0).all()
 
 
 def test_a_single_predicted_value_still_gets_its_own_fixed_bin():
     """Fixed bins need no spread in the predictions; the value falls where it falls."""
-    td, obs_tte = _timing_frames([30] * 5, [31] * 5)
-    out = ml.timing_error_distribution(td, obs_tte, pred_bin_years=2, min_cell=0)
+    out = ml.timing_error_distribution(_pairs([30] * 5, [31] * 5), pred_bin_years=2, min_cell=0)
     assert out["pred_bin"].nunique() == 1
     assert out["pred_lo"].iloc[0] <= yd(30) < out["pred_hi"].iloc[0]
 
 
 def test_no_pairs_returns_an_empty_frame():
-    td, obs_tte = _timing_frames([], [])
-    assert ml.timing_error_distribution(td, obs_tte).empty
+    assert ml.timing_error_distribution(_pairs([], [])).empty
 
 
 # --- analytic score intervals -------------------------------------------------------------------

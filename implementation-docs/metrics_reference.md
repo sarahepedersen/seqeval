@@ -242,6 +242,56 @@ bias = metric_generated − metric_observed
 is placed on the bias. The demo report does not surface this table by default, but it is written to
 `aggregate_error.parquet`.
 
+### 4.1 Per-seed populations and the pooled estimate — `metrics/pooling.py`
+
+For the **time-dependent** families — KM survival, PPR, cohort ASFR, the timing-error ridge, and the
+forecasting arm's Lexis surface — each seed is treated as its own synthetic population. Nothing is
+averaged within an individual, and no within-individual variance term enters any of their intervals.
+
+Two tables per family are written (from the backtesting arm, except Lexis, which is 05):
+
+| table | what it is |
+|---|---|
+| `<family>_by_seed.parquet` | the metric computed once per seed, each carrying its own ordinary between-person sampling variance (`greenwood_var` / `ppr_var` / `asfr_var`) |
+| `<family>_pooled.parquet` | the metric computed once over **all N×K trajectories at once**, via `arms/_common.pool_seeds`, which re-keys every `(person_id, seed)` pair to its own `person_id`. This is the estimate every figure draws |
+
+The pooled frames report `n_units` (trajectories in the cell) and `n_source_persons` (the people
+they were generated for) rather than a single ambiguous `n_persons`.
+
+**The interval on the pooled estimate.** The N×K rows are not N×K independent people:
+`combine_prefix` replays the *same* observed prefix under every seed, so below the jump-off a
+person's K trajectories are exact duplicates, while above it they diverge. Running the sampling
+formula on the pooled table would be up to `√K` too narrow. `design_effect_var` measures the
+duplication off the per-seed values instead of assuming it:
+
+```
+mean_var    = mean_s(var_s)              # per-seed sampling variance, averaged
+between_var = var_s(estimate_s, ddof=1)  # spread of the K per-seed estimates
+
+pooled_var  = clip(mean_var − (K−1)/K · between_var,  mean_var/K,  mean_var)
+```
+
+Seeds that agree exactly give `mean_var` — one population's worth, N people. Seeds that behave like
+independent samples give `mean_var/K` — the naive N·K answer. Everything real lands between, and the
+clip keeps it there. A single seed keeps `mean_var`. All five quantities (`k_seeds`, `mean_var`,
+`between_var`, `pooled_var`, `se`) sit on the pooled table beside `ci_lo`/`ci_hi`, so a figure's band
+can be checked against the parquet it links to.
+
+`between_var` is a sample variance over K numbers, so at the handful of seeds a typical run has it
+carries real noise — near the independent limit its own error exceeds the quantity it estimates, and
+cells scatter toward whichever bound the noise pushed them to. The clip bounds that in both
+directions; more seeds tighten it. On the demo run (K=5) the KM curves sit at a median
+`pooled_var/mean_var` of 0.84 — the observed prefix is shared, so the seeds really are near
+duplicates — while PPR and ASFR sit near 0.30, with ~40% of cells clipped to the `mean_var/K` floor.
+
+KM needs one extra step (`attach_km_pooled_ci`): seeds do not share event times, so each curve's
+`survival` and `greenwood_var` are step-sampled onto the pooled curve's grid (`survival.step_sample`)
+before the components are formed. The product-limit table's own log-log `ci_lo`/`ci_hi` are dropped —
+they are exactly the interval this correction exists to replace.
+
+CCF is **not** in this set. It is a scalar per cohort, and keeps its `within_var`/`between_var`/
+`total_var` decomposition (§2).
+
 ---
 
 ## 5. Coverage accounting (the shrinking denominator)

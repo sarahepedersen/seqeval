@@ -18,17 +18,18 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from seqeval.arms._common import OutputWriter, combine_prefix
+from seqeval.arms._common import OutputWriter, combine_prefix, pool_seeds
 from seqeval.config import DEFAULT_COHORT_WIDTH, ForecastingConfig
 from seqeval.core import replicates as rep
 from seqeval.core.outcomes import births, observation_spans, time_to_event
 from seqeval.core.slicing import AgeBins, cohort_bins
 from seqeval.core.specs import ReplicateSpec, Rule, TTESpec
 from seqeval.io.loaders import Bundle
-from seqeval.io.schema import GEN_KEYS, OBS_KEYS
+from seqeval.io.schema import GEN_KEYS, OBS_KEYS, RUN_KEYS
 from seqeval.metrics import dispersion as md
 from seqeval.metrics import fertility as fe
 from seqeval.metrics import plausibility as pl
+from seqeval.metrics import pooling
 from seqeval.viz import dispersion as viz_dispersion
 from seqeval.viz import lexis as viz_lexis
 
@@ -135,10 +136,36 @@ def _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width) -> 
         basis=basis,
         cohort_width=cohort_width,
     )
-    combined = _combine_surfaces(obs_surface, fc_by_seed, dim, subgroup)
+
+    # Each seed is its own synthetic population; the surface drawn is the one estimate over every
+    # trajectory at once, with no per-cell aggregate across seeds underneath it (05b).
+    pooled_seq, persons_pooled = pool_seeds(combined_seq, persons)
+    fc_pooled = fe.lexis_surface(
+        births(pooled_seq, RUN_KEYS, birth_event=target),
+        observation_spans(pooled_seq, RUN_KEYS),
+        persons_pooled,
+        occurrence=occurrence,
+        bins=bins,
+        year_range=year_range,
+        extra_by=tuple(subgroup),
+        basis=basis,
+        cohort_width=cohort_width,
+    )
+    fc_pooled = fc_pooled.rename(columns={"n_persons": "n_units"})
+    fc_pooled["n_source_persons"] = int(combined_seq["person_id"].nunique())
+    fc_pooled = pooling.attach_pooled_ci(
+        fc_pooled,
+        fc_by_seed,
+        value="rate",
+        var="rate_var",
+        on=[dim, "age_bin", *subgroup],
+        clip=(0.0, None),
+    )
+    combined = _combine_surfaces(obs_surface, fc_pooled, dim, subgroup)
 
     out.frame(f"{prefix}_observed", obs_surface)
     out.frame(f"{prefix}_forecast", fc_by_seed)
+    out.frame(f"{prefix}_pooled", fc_pooled)
     out.frame(f"{prefix}_combined", combined)
     out.figure(
         f"{prefix}_combined",
@@ -146,22 +173,18 @@ def _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width) -> 
     )
 
 
-def _combine_surfaces(observed_surface, forecast_by_seed, dim, subgroup) -> pd.DataFrame:
-    """Observed cells (source=observed) + seed-median forecast cells absent from observed."""
+def _combine_surfaces(observed_surface, forecast_pooled, dim, subgroup) -> pd.DataFrame:
+    """Observed cells (source=observed) + pooled forecast cells absent from observed.
+
+    ``forecast_pooled`` is already one estimate per cell over all N×K trajectories, so there is
+    nothing to aggregate here — the cells are taken as they are and merely tagged and stacked.
+    """
     cell = [dim, "age_bin", *subgroup]
-    fc_median = (
-        forecast_by_seed.groupby(cell, observed=True)
-        .agg(
-            rate=("rate", "median"),
-            n_events=("n_events", "median"),
-            person_years=("person_years", "median"),
-        )
-        .reset_index()
-    )
     obs = observed_surface.copy()
     obs["source"] = "observed"
     observed_cells = set(map(tuple, observed_surface[cell].to_numpy()))
-    fc_new = fc_median[[tuple(r) not in observed_cells for r in fc_median[cell].to_numpy()]].copy()
+    keep = [tuple(r) not in observed_cells for r in forecast_pooled[cell].to_numpy()]
+    fc_new = forecast_pooled[keep].copy()
     fc_new["source"] = "forecast"
     return pd.concat([obs, fc_new], ignore_index=True).sort_values(cell).reset_index(drop=True)
 

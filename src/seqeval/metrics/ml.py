@@ -314,89 +314,75 @@ def timing_coverage(
     return float(inside.mean())
 
 
-def _timing_scope(
-    td: pd.DataFrame,
+def timing_pairs(
+    tte_gen: pd.DataFrame,
     obs_tte: pd.DataFrame,
     *,
     horizon_days: int | None,
-    persons: Iterable | None,
-    drop_projected_beyond: bool,
+    persons: Iterable | None = None,
+    seed_col: str = "seed",
 ) -> pd.DataFrame:
-    """Per-person ``[person_id, pred, obs]`` waiting times (days) on the scored population.
+    """One row per generated **trajectory**: ``[person_id, seed, pred, obs, predicted]`` in days.
 
-    Three rules decide who is comparable at all:
+    Each seed is its own synthetic population, so a person contributes K rows rather than one
+    summary of their replicates — the timing error is a property of a trajectory, not of a person.
 
-    - the event must have been **observed**, and observed *inside* the frame horizon — the
-      predictive distribution is defective (capped at ``horizon_days``), so a person whose event
-      landed outside it has no predicted counterpart to compare against;
+    Two rules decide which trajectories are comparable at all:
+
+    - the person's event must have been **observed**, and observed *inside* the frame horizon;
+      without a truth there is nothing to difference against;
     - membership in ``persons``, the arm's scored population (condition minus settled-at-jump-off);
       a settled person's event sits in the replayed observed prefix and would land exactly on the
-      truth by construction;
-    - ``drop_projected_beyond`` removes persons whose predicted median reached the horizon, where
-      ``q50`` is the cap itself rather than a predicted time.
+      truth by construction.
+
+    Every surviving trajectory is a candidate. ``predicted`` marks the ones where the model actually
+    produced the outcome inside the horizon; the rest have no predicted time, so ``pred`` is NaN and
+    :func:`timing_error_distribution` counts them as excluded rather than capping them at the
+    horizon — a cap would pile invented mass at the frame edge and read as a confident late call.
     """
-    seen = obs_tte.loc[obs_tte["observed"], ["person_id", "duration"]]
-    m = td.merge(seen, on="person_id", how="inner")
+    seen = obs_tte.loc[obs_tte["observed"], ["person_id", "duration"]].rename(
+        columns={"duration": "obs"}
+    )
+    m = tte_gen.merge(seen, on="person_id", how="inner")
     if persons is not None:
         m = m[m["person_id"].isin(set(persons))]
     if horizon_days is not None:
-        m = m[m["duration"] <= horizon_days]
-        if drop_projected_beyond:
-            m = m[m["q50"] < horizon_days]
-    return pd.DataFrame(
+        m = m[m["obs"] <= horizon_days]
+
+    predicted = m["observed"].to_numpy()
+    if horizon_days is not None:
+        predicted = predicted & (m["duration"].to_numpy() <= horizon_days)
+    out = pd.DataFrame(
         {
             "person_id": m["person_id"].to_numpy(),
-            "pred": m["q50"].to_numpy().astype(np.int64),
-            "obs": m["duration"].to_numpy().astype(np.int64),
+            "pred": np.where(predicted, m["duration"].to_numpy(), np.nan),
+            "obs": m["obs"].to_numpy().astype(np.int64),
+            "predicted": predicted,
         }
     )
+    if seed_col in m.columns:
+        out.insert(1, seed_col, m[seed_col].to_numpy())
+    return out
 
 
 _TIMING_ERROR_COLUMNS = [
     "pred_bin", "pred_lo", "pred_hi", "pred_median", "n_pred_bin",
-    "error_lo", "error_hi", "n_persons", "suppressed",
+    "error_lo", "error_hi", "n_persons", "suppressed", "n_trajectories", "n_excluded",
 ]
 
 
-def timing_error_distribution(
-    td: pd.DataFrame,
-    obs_tte: pd.DataFrame,
-    *,
-    horizon_days: int | None = None,
-    persons: Iterable | None = None,
-    drop_projected_beyond: bool = True,
-    error_bin_years: float = 1.0,
-    pred_bin_years: float = 2.0,
-    min_cell: int = MIN_CELL,
-) -> pd.DataFrame:
-    """Binned distribution of timing error, by how early or late the model predicted.
+def _timing_cells(pairs: pd.DataFrame, *, error_bin_years: float, pred_bin_years: float) -> list:
+    """Cell rows for one already-scoped set of trajectories (no suppression yet)."""
+    n_trajectories = len(pairs)
+    kept = pairs[pairs["predicted"].astype(bool)]
+    n_excluded = n_trajectories - len(kept)
+    if kept.empty:
+        return []
 
-    Returns ``[pred_bin, pred_lo, pred_hi, pred_median, n_pred_bin, error_lo, error_hi, n_persons,
-    suppressed]`` — a count per (predicted-value bin × signed-error bin), day-valued, with no person
-    identifier anywhere. The error is ``observed - predicted``: **positive means the event happened
-    later than predicted**, so mass to the right of zero is a model that predicts too early.
-
-    Predicted bins are fixed ``pred_bin_years``-wide intervals anchored at a multiple of the width,
-    so the same predicted-age range is the same bin in every figure and jump-offs can be read
-    against each other. A later jump-off simply has fewer bins — the ones its people no longer
-    reach. Bins nobody lands in are dropped rather than drawn empty, and ``pred_bin`` is the global
-    index of the interval, so it stays comparable across tables. Error bins are shared across all
-    rows and likewise anchored, which puts **zero on a bin edge** — no cell can mix early with late.
-    Cells are then suppressed per :func:`~seqeval.metrics._disclosure.suppress_small_cells`.
-
-    The population is :func:`_timing_scope`'s, which is narrower than
-    :func:`timing_coverage`'s — that one scores every person whose event occurred, with no horizon,
-    ``persons``, or projected-beyond restriction. The two therefore describe different people.
-    """
-    pairs = _timing_scope(
-        td, obs_tte,
-        horizon_days=horizon_days, persons=persons, drop_projected_beyond=drop_projected_beyond,
-    )
     width = years_to_days(error_bin_years)
-    pred, error = pairs["pred"].to_numpy(), (pairs["obs"] - pairs["pred"]).to_numpy()
+    pred = kept["pred"].to_numpy().astype(np.int64)
+    error = kept["obs"].to_numpy().astype(np.int64) - pred
 
-    if not len(pred):
-        return pd.DataFrame({c: pd.Series(dtype="float64") for c in _TIMING_ERROR_COLUMNS})
     pred_width = years_to_days(pred_bin_years)
     first = int(np.floor(pred.min() / pred_width))
     last = int(np.floor(pred.max() / pred_width))
@@ -420,17 +406,77 @@ def timing_error_distribution(
                     "pred_bin": first + b,
                     "pred_lo": float(pred_edges[b]),
                     "pred_hi": float(pred_edges[b + 1]),
-                    "pred_median": float(np.median(pred[in_bin])) if in_bin.any() else np.nan,
+                    "pred_median": float(np.median(pred[in_bin])),
                     "n_pred_bin": int(in_bin.sum()),
                     "error_lo": float(error_edges[e]),
                     "error_hi": float(error_edges[e + 1]),
                     "n_persons": int(n),
+                    "n_trajectories": n_trajectories,
+                    "n_excluded": n_excluded,
                 }
             )
-    cells = pd.DataFrame(rows)
-    return suppress_small_cells(cells, count_col="n_persons", by=["pred_bin"], min_cell=min_cell)[
-        _TIMING_ERROR_COLUMNS
-    ]
+    return rows
+
+
+def timing_error_distribution(
+    pairs: pd.DataFrame,
+    *,
+    by: list[str] = (),
+    error_bin_years: float = 1.0,
+    pred_bin_years: float = 2.0,
+    min_cell: int = MIN_CELL,
+) -> pd.DataFrame:
+    """Binned distribution of timing error, by how early or late the model predicted.
+
+    ``pairs`` is :func:`timing_pairs` — one row per generated trajectory. Returns ``[*by, pred_bin,
+    pred_lo, pred_hi, pred_median, n_pred_bin, error_lo, error_hi, n_persons, suppressed,
+    n_trajectories, n_excluded]``: a count per (predicted-value bin × signed-error bin), day-valued,
+    with no person identifier anywhere. The error is ``observed - predicted``: **positive means the
+    event happened later than predicted**, so mass to the right of zero is a model that predicts too
+    early.
+
+    ``by=["seed"]`` bins each synthetic population separately; ``by=()`` pools every trajectory into
+    one distribution. Both anchor their bins the same way, so the two tables line up cell for cell.
+
+    ``n_trajectories`` and ``n_excluded`` ride on every row: the candidates the group started with,
+    and how many of them the model never brought to the outcome inside the frame. The figure states
+    the exclusion, because a distribution of timing error among *predicted* events says nothing
+    about the events that were never predicted.
+
+    Predicted bins are fixed ``pred_bin_years``-wide intervals anchored at a multiple of the width,
+    so the same predicted-age range is the same bin in every figure and jump-offs can be read
+    against each other. A later jump-off simply has fewer bins — the ones its people no longer
+    reach. Bins nobody lands in are dropped rather than drawn empty, and ``pred_bin`` is the global
+    index of the interval, so it stays comparable across tables. Error bins are shared across all
+    rows and likewise anchored, which puts **zero on a bin edge** — no cell can mix early with late.
+    Cells are then suppressed per :func:`~seqeval.metrics._disclosure.suppress_small_cells`.
+    """
+    by = list(by)
+    empty = pd.DataFrame({c: pd.Series(dtype="float64") for c in _TIMING_ERROR_COLUMNS})
+    if pairs.empty:
+        return empty if not by else empty.assign(**{c: pd.Series(dtype="object") for c in by})
+
+    groups = [((), pairs)] if not by else list(pairs.groupby(by, observed=True))
+    blocks = []
+    for key, grp in groups:
+        rows = _timing_cells(
+            grp, error_bin_years=error_bin_years, pred_bin_years=pred_bin_years
+        )
+        if not rows:
+            continue
+        block = pd.DataFrame(rows)
+        key_tuple = key if isinstance(key, tuple) else (key,)
+        for col, val in zip(by, key_tuple, strict=True):
+            block.insert(0, col, val)
+        blocks.append(block)
+    if not blocks:
+        return empty if not by else empty.assign(**{c: pd.Series(dtype="object") for c in by})
+
+    cells = pd.concat(blocks, ignore_index=True)
+    suppressed = suppress_small_cells(
+        cells, count_col="n_persons", by=[*by, "pred_bin"], min_cell=min_cell
+    )
+    return suppressed[[*by, *_TIMING_ERROR_COLUMNS]]
 
 
 def subgroup_rates(

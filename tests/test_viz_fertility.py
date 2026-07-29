@@ -51,8 +51,13 @@ def test_colorbar_ticks_track_the_line_colours():
         np.testing.assert_allclose(line.get_color(), ramp(c), atol=0.01)
 
 
-def _parity(cohorts, shares, n_women_total=500, suppressed=None):
-    """A parity_distribution-shaped frame: one row per (cohort, parity)."""
+def _parity(cohorts, shares, n_women_total=500, suppressed=None, n_seeds=1):
+    """A parity_distribution-shaped frame: one row per (cohort, parity).
+
+    ``n_seeds`` scales the trajectory counts away from the woman-weighted ones, so a test can tell
+    which of the two the figure is actually drawing.
+    """
+    n_replicates_total = n_women_total * n_seeds
     rows = []
     for c in cohorts:
         for k, share in enumerate(shares):
@@ -60,7 +65,8 @@ def _parity(cohorts, shares, n_women_total=500, suppressed=None):
                 {
                     "cohort": c,
                     "parity": k,
-                    "n_replicates": share * n_women_total,
+                    "n_replicates": share * n_replicates_total,
+                    "n_replicates_total": n_replicates_total,
                     "n_women_equiv": share * n_women_total,
                     "share": share,
                     "n_women_total": n_women_total,
@@ -118,12 +124,27 @@ def test_parity_bars_sit_at_integer_parities_with_a_top_coded_last_tick():
     assert list(ax.get_yticks()) == [0, 1, 2, 3, 4]
     assert [t.get_text() for t in ax.get_yticklabels()][-1] == "4+"
 
-def test_bar_width_tracks_the_share():
+def test_bar_width_tracks_the_count():
     fig = F.plot_ccf_inference_vs_outcome(
         _variance([1960]), _parity([1960], [0.1, 0.2, 0.4, 0.2, 0.1])
     )
     widths = [p.get_width() for p in fig.axes[1].patches]
-    assert widths[2] == pytest.approx(2 * widths[1])  # twice the share, twice the bar
+    assert widths[2] == pytest.approx(2 * widths[1])  # twice the count, twice the bar
+
+
+def test_bars_are_the_trajectory_counts_not_the_woman_weighted_shares():
+    """The two coincide with balanced seeds; the figure must draw the counts it claims to."""
+    par = _parity([1960], [0.1, 0.2, 0.4, 0.2, 0.1], n_seeds=5)
+    # break the proportionality: parity 1 holds twice the trajectories its women-weight implies
+    par.loc[par["parity"] == 1, "n_replicates"] *= 2
+    widths = [
+        p.get_width()
+        for p in F.plot_ccf_inference_vs_outcome(_variance([1960]), par).axes[1].patches
+    ]
+    # counts now read 0.1, 0.4, 0.4, 0.2, 0.1 of the total -> parity 1 matches parity 2
+    assert widths[1] == pytest.approx(widths[2])
+    # ...which the woman-weighted `share` column would have drawn as half
+    assert par.loc[par["parity"] == 1, "share"].iloc[0] == pytest.approx(0.2)
 
 def test_withheld_parities_are_hatched_rather_than_absent():
     fig = F.plot_ccf_inference_vs_outcome(

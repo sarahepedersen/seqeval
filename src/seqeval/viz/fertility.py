@@ -169,25 +169,40 @@ def _padded_range(lo: np.ndarray, hi: np.ndarray) -> tuple[float, float]:
     return bottom - pad, top + pad
 
 
+def _parity_fraction(parity: pd.DataFrame) -> pd.Series:
+    """Each cell's direct trajectory count over its cohort's total — what the bars are drawn from.
+
+    ``n_replicates`` counts (woman, seed) trajectories, so this is the pooled synthetic
+    population's own histogram. The alternative, ``share``, weights every woman to 1 regardless of
+    her replicate count; the two coincide with balanced seeds and diverge without them, and the
+    figure should be drawing the counts it claims to.
+    """
+    total = parity["n_replicates_total"].replace(0, np.nan)
+    return parity["n_replicates"] / total
+
+
 def _draw_parity_columns(ax, parity: pd.DataFrame, cohorts: np.ndarray) -> None:
-    """Per cohort, the share of women at each completed parity, as bars grown from the cohort tick.
+    """Per cohort, the trajectory counts at each completed parity, as bars from the cohort tick.
 
     Every bar starts at its cohort's x position rather than being centred on it, so within a cohort
     the parities share a baseline and their lengths can be compared directly — which is the whole
     question the panel is asked (how the mass splits across parities). A centred bar makes two
-    shares of 0.3 and 0.4 look nearly alike; against a common left edge the difference is a length.
+    counts of 0.3n and 0.4n look nearly alike; against a common left edge the difference is a
+    length.
 
-    One scale is used for every cohort, so bars are also comparable *across* cohorts.
+    Bar length is the cell's count over its cohort's total, so cohorts of different sizes stay
+    comparable; one scale is used for every cohort.
     """
-    if parity.empty:
+    if parity.empty or "n_replicates_total" not in parity.columns:
         return
     spacing = float(np.min(np.diff(np.sort(cohorts)))) if len(cohorts) > 1 else 1.0
-    widest = float(parity["share"].max() or 1.0)
+    fraction = _parity_fraction(parity)
+    widest = float(fraction.max() or 1.0)
     unit = 0.8 * spacing / widest
     for cohort, sub in parity.groupby("cohort", observed=True):
         shown = sub[~sub["suppressed"]]
         ax.barh(
-            shown["parity"], shown["share"] * unit, height=0.72, left=cohort,
+            shown["parity"], _parity_fraction(shown) * unit, height=0.72, left=cohort,
             color="tab:blue", alpha=0.35, zorder=2,
         )
         _draw_suppressed_parity(ax, sub, cohort, unit)
@@ -205,7 +220,8 @@ def _draw_suppressed_parity(ax, sub: pd.DataFrame, cohort, unit: float) -> None:
     hidden = sub[sub["suppressed"]]
     if hidden.empty:
         return
-    total = float(sub["n_women_total"].iloc[0]) or 1.0
+    # Same denominator the drawn bars use, so the cap is on their scale rather than the women one.
+    total = float(sub["n_replicates_total"].iloc[0]) or 1.0
     cap = (MIN_CELL - 1) / total * unit
     ax.barh(
         hidden["parity"], cap, height=0.72, left=cohort,
@@ -214,11 +230,15 @@ def _draw_suppressed_parity(ax, sub: pd.DataFrame, cohort, unit: float) -> None:
 
 
 def _uncertainty_ratio(half: np.ndarray, parity: pd.DataFrame) -> str:
-    """One line naming how much wider the outcome spread is than the interval on the mean."""
+    """One line naming how much wider the outcome spread is than the interval on the mean.
+
+    Weighted by the same trajectory counts the bars are, so the sd quoted describes the
+    distribution the reader is looking at.
+    """
     ci = float(np.median(half))
     sds = []
     for _, sub in parity.groupby("cohort", observed=True):
-        share = sub["share"].fillna(0).to_numpy()
+        share = _parity_fraction(sub).fillna(0).to_numpy()
         k = sub["parity"].to_numpy().astype(float)
         mass = share.sum()
         if mass <= 0:

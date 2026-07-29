@@ -21,106 +21,40 @@ from seqeval.viz._ridge import draw_ridges
 from seqeval.viz._style import DEFAULT_LEVEL, new_fig, stratum_colors
 
 
-def _km_total_ci(
-    surv: np.ndarray, greenwood: np.ndarray, level: float
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Across-seed mean KM curve and its total CI, from ``(n_seeds, n_times)`` stacks.
-
-    Two sources, added as variances at each time point, exactly as ``total_var`` is built for CCF:
-
-    - **Sampling** — ``greenwood.mean(axis=0)``, the Greenwood variance of one seed's curve averaged
-      over seeds. Every seed re-runs the *same* women, so this does not shrink as seeds are added.
-    - **Monte-Carlo** — ``var(surv, ddof=1)/K``, the standard error of the plotted across-seed mean,
-      which does shrink as ``1/K``. ``ddof=1`` because it is a sample variance over seeds used to
-      infer the mean curve.
-
-    A band drawn from the Monte-Carlo term alone answers only "would other seeds move this curve",
-    which at a handful of seeds is the smaller question by far.
-    """
-    k = surv.shape[0]
-    mean = surv.mean(axis=0)
-    sampling = np.nanmean(greenwood, axis=0)
-    monte_carlo = surv.var(axis=0, ddof=1) / k if k > 1 else np.zeros_like(mean)
-    half = norm.ppf(1 - (1 - level) / 2) * np.sqrt(np.nan_to_num(sampling) + monte_carlo)
-    return mean, np.clip(mean - half, 0.0, 1.0), np.clip(mean + half, 0.0, 1.0)
-
-
-def _total_band(
-    gen: pd.DataFrame, *, value: str, var: str, by: list[str], level: float
-) -> tuple[pd.Index, np.ndarray, np.ndarray]:
-    """``(cells, mean, half_width)`` for a seed-replicated aggregate table, keyed by ``by``.
-
-    The same two variances :func:`_km_total_ci` adds at each time point, here added in each cell of
-    a tidy metric frame rather than on a sampled curve:
-
-    - **Sampling** — ``gen[var]`` averaged over seeds: the variance of one seed's cell estimate
-      under its own sampling model (binomial for a PPR, Poisson for an ASFR). Every seed re-runs the
-      *same* women, so this does not shrink as seeds are added.
-    - **Monte-Carlo** — ``var(ddof=1)/K`` over the seeds' cell values, the standard error of the
-      plotted across-seed mean. This is the term that shrinks as ``1/K``.
-
-    A cell with one seed keeps the sampling term alone rather than losing its band. Cells whose
-    variance column is missing or NaN contribute nothing there instead of poisoning the sum.
-    """
-    g = gen.groupby(by, observed=True)[value]
-    mean = g.mean()
-    k = g.size()
-    sampling = (
-        gen.groupby(by, observed=True)[var].mean().reindex(mean.index)
-        if var in gen.columns
-        else pd.Series(np.nan, index=mean.index)
-    )
-    monte_carlo = (g.var(ddof=1) / k).where(k > 1)
-    total = np.nan_to_num(sampling.to_numpy()) + np.nan_to_num(monte_carlo.to_numpy())
-    half = norm.ppf(1 - (1 - level) / 2) * np.sqrt(total)
-    return mean.index, mean.to_numpy(), half
-
-
-def _km_stacks(gen_km: pd.DataFrame, grid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """``(survival, greenwood_var)`` stacks, one row per seed, sampled onto ``grid``."""
-    surv, gw = [], []
-    has_greenwood = "greenwood_var" in gen_km.columns
-    for _, g in gen_km.groupby("seed", observed=True):
-        surv.append(_step_sample(g, grid))
-        # A curve without Greenwood carries no sampling information, so it contributes none rather
-        # than poisoning the mean.
-        gw.append(
-            _step_sample(g, grid, value="greenwood_var", before=0.0)
-            if has_greenwood
-            else np.zeros(len(grid))
+def _draw_km_curve(ax, gen_km: pd.DataFrame, *, color, line_label, band_label) -> None:
+    """One pooled generated KM curve inside the interval its own table carries."""
+    g = gen_km.sort_values("time")
+    if g.empty:
+        return
+    years = days_to_years(g["time"].to_numpy())
+    if {"ci_lo", "ci_hi"} <= set(g.columns):
+        ax.fill_between(
+            years, g["ci_lo"], g["ci_hi"], step="post", alpha=0.3, color=color,
+            label=band_label if band_label else "_nolegend_",
         )
-    if not surv:
-        return np.empty((0, len(grid))), np.empty((0, len(grid)))
-    return np.vstack(surv), np.nan_to_num(np.vstack(gw))
+    ax.step(years, g["survival"], where="post", color=color, label=line_label)
 
 
-def plot_km_seed_band(
+def plot_km_overlay(
     obs_km: pd.DataFrame,
     gen_km: pd.DataFrame,
     *,
     title: str | None = None,
     level: float = DEFAULT_LEVEL,
 ) -> Figure:
-    """Observed KM curve overlaid with the generated across-seed mean and its Monte-Carlo CI.
+    """Observed KM curve overlaid with the pooled generated curve and its interval.
 
-    ``gen_km`` carries a ``seed`` column (one KM curve per seed); survival and Greenwood variance
-    are sampled on a common day grid, then :func:`_km_total_ci` gives the pointwise mean and its
-    band (years axes). The band is the total uncertainty in the plotted curve — the finite sample of
-    women plus the finite number of seeds — on the same footing as the CCF overlay's
-    ``total_var``.
+    ``gen_km`` is the *pooled* product-limit estimate over every generated trajectory at once, with
+    the ``ci_lo``/``ci_hi`` computed upstream by
+    :func:`seqeval.metrics.pooling.attach_km_pooled_ci`. Nothing is averaged per person and nothing
+    is computed here — the figure draws the columns the parquet beside it carries, so the band can
+    be checked against the table.
     """
-    grid = np.union1d(obs_km["time"].to_numpy(), gen_km["time"].to_numpy())
-    stacked, greenwood = _km_stacks(gen_km, grid)
-
     fig, ax = new_fig()
-    years = days_to_years(grid)
-    if len(stacked):
-        mean, lo, hi = _km_total_ci(stacked, greenwood, level)
-        ax.fill_between(
-            years, lo, hi, step="post", alpha=0.3, color="tab:orange",
-            label=f"generated {level:.0%} CI",
-        )
-        ax.step(years, mean, where="post", color="tab:orange", label="generated mean")
+    _draw_km_curve(
+        ax, gen_km, color="tab:orange", line_label="generated (pooled)",
+        band_label=f"{level:.0%} CI",
+    )
     ax.step(
         days_to_years(obs_km["time"].to_numpy()),
         obs_km["survival"],
@@ -203,27 +137,16 @@ def plot_km_jumpoff_panel(
     title: str | None = None,
     level: float = DEFAULT_LEVEL,
 ) -> Figure:
-    """Every jump-off's generated KM curve on one axes, against a single observed curve.
+    """Every jump-off's pooled generated KM curve on one axes, against a single observed curve.
     """
     jumpoffs = sorted(gen_by_jumpoff)
-    grid = np.union1d(
-        obs_km["time"].to_numpy(),
-        np.concatenate([g["time"].to_numpy() for g in gen_by_jumpoff.values()])
-        if gen_by_jumpoff
-        else np.empty(0),
-    )
-    years = days_to_years(grid)
-
     fig, ax = new_fig()
     for t2, color in zip(jumpoffs, stratum_colors(len(jumpoffs), lo=0.1, hi=0.85), strict=True):
-        gen_km = gen_by_jumpoff[t2]
-        stacked, greenwood = _km_stacks(gen_km, grid)
-        if not len(stacked):
-            continue
-        mean, lo, hi = _km_total_ci(stacked, greenwood, level)
         jump_y = days_to_years(t2)
-        ax.fill_between(years, lo, hi, step="post", alpha=0.2, color=color, label="_nolegend_")
-        ax.step(years, mean, where="post", color=color, lw=2, label=f"jump-off {jump_y:.0f}y")
+        _draw_km_curve(
+            ax, gen_by_jumpoff[t2], color=color,
+            line_label=f"jump-off {jump_y:.0f}y", band_label=None,
+        )
         ax.axvline(jump_y, color=color, lw=0.8, ls=":", alpha=0.7)
     ax.step(
         days_to_years(obs_km["time"].to_numpy()),
@@ -238,7 +161,7 @@ def plot_km_jumpoff_panel(
     ax.set_ylim(0, 1.02)
     if title:
         ax.set_title(title)
-    ax.legend(fontsize=8, title=f"bands: {level:.0%} replicate CI", title_fontsize=7)
+    ax.legend(fontsize=8, title=f"bands: {level:.0%} CI (pooled)", title_fontsize=7)
     return fig
 
 
@@ -282,14 +205,18 @@ def _ppr_labels(ppr: pd.DataFrame) -> dict[int, str]:
 
 
 def _draw_ppr_series(ax, gen_ppr, level, *, color, label, dodge: float = 0.0) -> None:
-    """One generated PPR series: across-seed means with total-CI bars, one x per transition."""
-    cells, mean, half = _total_band(
-        gen_ppr, value="ppr", var="ppr_var", by=["parity_from"], level=level
-    )
-    if not len(cells):
+    """One pooled PPR series with the interval its own table carries, one x per transition."""
+    g = gen_ppr.sort_values("parity_from")
+    if g.empty:
         return
-    x = cells.to_numpy().astype(float) + dodge
-    ax.errorbar(x, mean, yerr=half, fmt="o-", color=color, capsize=3, lw=1.6, label=label)
+    x = g["parity_from"].to_numpy().astype(float) + dodge
+    value = g["ppr"].to_numpy()
+    yerr = (
+        np.vstack([value - g["ci_lo"].to_numpy(), g["ci_hi"].to_numpy() - value])
+        if {"ci_lo", "ci_hi"} <= set(g.columns)
+        else None
+    )
+    ax.errorbar(x, value, yerr=yerr, fmt="o-", color=color, capsize=3, lw=1.6, label=label)
 
 
 def _draw_observed_ppr(ax, obs_ppr: pd.DataFrame) -> None:
@@ -322,17 +249,17 @@ def plot_ppr_overlay(
     title: str | None = None,
     level: float = DEFAULT_LEVEL,
 ) -> Figure:
-    """Observed parity progression ratios under the generated across-seed mean and its CI.
+    """Observed parity progression ratios under the pooled generated ratios and their CI.
 
-    ``gen_ppr`` carries a ``seed`` column (one set of transitions per seed); the interval is
-    :func:`_total_band` — the binomial sampling variance of each transition averaged over seeds plus
-    the across-seed variance over K, the same two terms as the survival and CCF bands.
+    ``gen_ppr`` is the *pooled* estimate over every generated trajectory at once, carrying the
+    ``ci_lo``/``ci_hi`` computed upstream by
+    :func:`seqeval.metrics.pooling.attach_pooled_ci`.
 
-    Later transitions rest on the women who reached that parity, so the bands widen to the right on
+    Later transitions rest on the women who reached that parity, so the bars widen to the right on
     their own; a wide interval at parity 4 is a thin denominator, not a worse model.
     """
     fig, ax = new_fig()
-    _draw_ppr_series(ax, gen_ppr, level, color="tab:orange", label="generated mean")
+    _draw_ppr_series(ax, gen_ppr, level, color="tab:orange", label="generated (pooled)")
     _draw_observed_ppr(ax, obs_ppr)
     _finish_ppr_axes(
         ax, obs_ppr, gen_ppr, title=title, legend_title=f"bars: {level:.0%} CI"
@@ -370,12 +297,18 @@ def plot_ppr_jumpoff_panel(
 # =================================================================================================
 # cohort ASFR
 # =================================================================================================
+#: Panel size for the cohort-ASFR small multiples (inches). These carry a per-cell band now, and a
+#: one-year age grid under a band needs room to stay readable.
+_ASFR_PANEL = (5.0, 4.0)
+
+
 def _asfr_grid(cohorts: list) -> tuple[Figure, np.ndarray]:
     """A shared-axes small-multiple grid, one panel per cohort, with the spares hidden."""
     ncols = min(3, max(len(cohorts), 1))
     nrows = int(np.ceil(max(len(cohorts), 1) / ncols))
     fig, axes = plt.subplots(
-        nrows, ncols, figsize=(3.4 * ncols, 2.9 * nrows), sharex=True, sharey=True, squeeze=False,
+        nrows, ncols, figsize=(_ASFR_PANEL[0] * ncols, _ASFR_PANEL[1] * nrows),
+        sharex=True, sharey=True, squeeze=False,
     )
     flat = axes.ravel()
     for ax in flat[len(cohorts) :]:
@@ -383,23 +316,26 @@ def _asfr_grid(cohorts: list) -> tuple[Figure, np.ndarray]:
     return fig, flat
 
 
-def _draw_asfr_panel(ax, gen_cohort, *, color, label) -> None:
-    """One cohort's generated age profile: the across-seed mean, drawn without a band."""
+def _draw_asfr_panel(ax, gen_cohort, *, color, label, band: bool = True) -> None:
+    """One cohort's pooled generated age profile, inside the interval its own table carries."""
     if gen_cohort.empty:
         return
-    profile = gen_cohort.groupby("age_bin", observed=True)["asfr"].mean().sort_index()
-    ax.plot(profile.index.to_numpy().astype(float), profile.to_numpy(), color=color, lw=1.6,
-            label=label)
+    g = gen_cohort.sort_values("age_bin")
+    ages = g["age_bin"].to_numpy().astype(float)
+    if band and {"ci_lo", "ci_hi"} <= set(g.columns):
+        ax.fill_between(ages, g["ci_lo"], g["ci_hi"], color=color, alpha=0.2, lw=0)
+    ax.plot(ages, g["asfr"].to_numpy(), color=color, lw=1.6, label=label)
 
 
-def _finish_asfr_grid(fig, axes, cohorts, *, title) -> Figure:
+def _finish_asfr_grid(fig, axes, cohorts, *, title, level: float | None = None) -> Figure:
     for ax in axes[: len(cohorts)]:
         ax.grid(True, alpha=0.3, linewidth=0.5)
         ax.set_ylim(bottom=0)
-    for ax in axes[: len(cohorts)]:
-        ax.set_xlabel("age (years)", fontsize=8)
-    axes[0].set_ylabel("ASFR (births/woman-year)", fontsize=8)
-    axes[0].legend(fontsize=7)
+        ax.set_xlabel("age (years)", fontsize=9)
+        ax.tick_params(labelsize=8)
+    axes[0].set_ylabel("ASFR (births/woman-year)", fontsize=9)
+    legend_title = f"bands: {level:.0%} CI (pooled)" if level is not None else None
+    axes[0].legend(fontsize=8, title=legend_title, title_fontsize=7)
     if title:
         fig.suptitle(title)
     fig.tight_layout()
@@ -412,13 +348,15 @@ def plot_asfr_overlay(
     *,
     jumpoff_days: int | None = None,
     title: str | None = None,
+    level: float = DEFAULT_LEVEL,
 ) -> Figure:
-    """Observed cohort age-fertility profiles under the generated mean, one panel each.
+    """Observed cohort age-fertility profiles under the pooled generated profile, one panel each.
 
     A cohort ASFR is a ``(cohort, age)`` surface, so it is drawn as small multiples: one panel per
-    birth cohort, age along x, the observed profile in black beneath the generated across-seed mean.
-    Panels share both axes so the cohorts can be compared by eye. No interval is drawn — at one-year
-    age bins the shape of the profile is the question, and a band per cell obscures it.
+    birth cohort, age along x, the observed profile in black beneath the pooled generated one.
+    Panels share both axes so the cohorts can be compared by eye. The shaded band is the interval
+    the pooled table carries; it is drawn flat rather than as error bars so the shape of the profile
+    stays the thing you read.
 
     ``jumpoff_days`` marks the jump-off **age** in every panel. The jump-off is an age, not a date,
     so the rule falls in the same place for every cohort: everything to its left is replayed
@@ -430,15 +368,17 @@ def plot_asfr_overlay(
     obs_by = dict(list(obs_asfr.groupby("cohort", observed=True)))
     for ax, cohort in zip(axes, cohorts, strict=False):
         sub = gen_asfr[gen_asfr["cohort"] == cohort]
-        _draw_asfr_panel(ax, sub, color="tab:orange", label="generated mean")
+        _draw_asfr_panel(
+            ax, sub, color="tab:orange", label=f"generated (pooled, {level:.0%} CI)"
+        )
         o = obs_by.get(cohort)
         if o is not None:
             o = o.sort_values("age_bin")
             ax.plot(o["age_bin"], o["asfr"], color="black", lw=1.4, label="observed")
         if jumpoff_days is not None:
             ax.axvline(days_to_years(jumpoff_days), color="0.4", lw=0.9, ls=":")
-        ax.set_title(f"cohort {cohort}", fontsize=9, loc="left")
-    return _finish_asfr_grid(fig, axes, cohorts, title=title)
+        ax.set_title(f"cohort {cohort}", fontsize=10, loc="left")
+    return _finish_asfr_grid(fig, axes, cohorts, title=title, level=level)
 
 
 def plot_asfr_jumpoff_panel(
@@ -448,12 +388,13 @@ def plot_asfr_jumpoff_panel(
     title: str | None = None,
     level: float = DEFAULT_LEVEL,
 ) -> Figure:
-    """The same cohort grid with every jump-off's generated profile drawn in each panel.
+    """The same cohort grid with every jump-off's pooled generated profile drawn in each panel.
 
     Each jump-off gets a color, and a dotted rule of its own color marks the age it starts
     forecasting from — so a panel shows directly how much of a cohort's profile the model is being
-    asked to produce, and whether the fit degrades as that share grows. ``level`` is accepted so
-    every cross-jump-off panel has one signature; these profiles carry no band.
+    asked to produce, and whether the fit degrades as that share grows. Each profile carries its own
+    interval; because a later jump-off's profile begins where the earlier ones are already well
+    under way, the bands overlap far less than the curves do.
     """
     jumpoffs = sorted(gen_by_jumpoff)
     cohorts = sorted(
@@ -474,8 +415,8 @@ def plot_asfr_jumpoff_panel(
         if o is not None:
             o = o.sort_values("age_bin")
             ax.plot(o["age_bin"], o["asfr"], color="black", lw=1.4, label="observed")
-        ax.set_title(f"cohort {cohort}", fontsize=9, loc="left")
-    return _finish_asfr_grid(fig, axes, cohorts, title=title)
+        ax.set_title(f"cohort {cohort}", fontsize=10, loc="left")
+    return _finish_asfr_grid(fig, axes, cohorts, title=title, level=level)
 
 
 def majority_complete(gen_ccf: pd.DataFrame) -> pd.Series:
@@ -560,7 +501,31 @@ def plot_timing_ridge(
         "← predicts too late          predicts too early →",
         xy=(0.5, -0.16), xycoords="axes fraction", ha="center", fontsize=7, color="0.35",
     )
+    note = _exclusion_note(errors)
+    if note:
+        ax.annotate(
+            note, xy=(0.5, -0.23), xycoords="axes fraction", ha="center", fontsize=7,
+            color="0.35",
+        )
     return fig
+
+
+def _exclusion_note(errors: pd.DataFrame) -> str:
+    """What the ridge leaves out: trajectories the model never brought to the outcome.
+
+    A distribution of timing error among predicted events says nothing about the events that were
+    never predicted, so the figure has to say how many of those there were.
+    """
+    if not {"n_trajectories", "n_excluded"} <= set(errors.columns):
+        return ""
+    total = float(errors["n_trajectories"].iloc[0])
+    excluded = float(errors["n_excluded"].iloc[0])
+    if not total or excluded <= 0:
+        return ""
+    return (
+        f"excludes {excluded:,.0f} of {total:,.0f} trajectories ({excluded / total:.1%}) "
+        "with no predicted event inside the frame"
+    )
 
 
 def _draw_bin_median(ax, sub: pd.DataFrame, base: float, color) -> None:
@@ -573,14 +538,3 @@ def _draw_bin_median(ax, sub: pd.DataFrame, base: float, color) -> None:
     idx = min(idx, len(sub) - 1)
     mid = days_to_years((sub["error_lo"].iloc[idx] + sub["error_hi"].iloc[idx]) / 2)
     ax.plot([mid, mid], [base, base + 0.12], color=color, lw=1.6, solid_capstyle="butt", zorder=4)
-
-
-def _step_sample(
-    km_one: pd.DataFrame, grid: np.ndarray, *, value: str = "survival", before: float = 1.0
-) -> np.ndarray:
-    """One KM column at ``grid`` times (step function; ``before`` ahead of the first event)."""
-    g = km_one.sort_values("time")
-    times = g["time"].to_numpy()
-    col = g[value].to_numpy() if value in g.columns else np.full(len(g), np.nan)
-    idx = np.searchsorted(times, grid, side="right") - 1
-    return np.where(idx >= 0, col[np.clip(idx, 0, len(col) - 1)], before)

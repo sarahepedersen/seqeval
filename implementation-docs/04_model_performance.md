@@ -98,12 +98,24 @@ backtesting:
 **Timing calibration scope.** A framed outcome's timing figure compares predicted vs observed
 timing on the population its reliability diagram scores: persons in the `given` condition whose
 answer was *not* already settled at the jump-off (a settled event sits in the observed prefix every
-replicate replays, so it would land on `y = x` for free), whose event was observed inside the frame,
-and whom the model does not project past the frame (a predicted median equal to the horizon is the
-cap, not a date). The axes therefore span exactly the reachable region: jump-off → frame close for
-an origin-less outcome (whose duration is an age), 0 → frame close for an origin-based one. Because
-the axes cover exactly that reachable region, nothing lands off-screen and there is no display
-window to configure.
+replicate replays, so it would land on `y = x` for free) and whose event was observed inside the
+frame. The axes therefore span exactly the reachable region: jump-off → frame close for an
+origin-less outcome (whose duration is an age), 0 → frame close for an origin-based one. Because the
+axes cover exactly that reachable region, nothing lands off-screen and there is no display window to
+configure.
+
+One observation is one **trajectory**, not one person (`ml.timing_pairs`): each seed carries its own
+predicted time and contributes its own error, with no median taken across a person's replicates
+first. A trajectory where the model never produced the outcome inside the frame has no predicted
+time at all, so it is **excluded rather than capped at the horizon** — capping would pile invented
+mass on the frame edge and read as a confident late call. `n_excluded` of `n_trajectories` rides on
+every row of `timing_error.parquet`, and the figure states the exclusion beneath its axes: the ridge
+describes the timing of the events the model *did* predict and says nothing about the ones it
+missed. `timing_error_by_seed.parquet` holds the same distribution per synthetic population; both
+anchor their bins identically, so a seed can be read against the pool.
+
+`timing_distribution` (02b) still collapses a person's replicates to quantiles, but only for
+`timing_coverage` — the error ridge does not use it.
 
 Requested-but-absent windows are skipped with a warning naming them (00 §1: we evaluate what
 inference produced; we never re-run models).
@@ -162,8 +174,11 @@ Axes in years (`days_to_years` at plot time, per 00 §3).
   diagonal reference, histogram of p_hat underneath (one panel per window/outcome); a
 - `viz/backtest.py`: (a) metric-vs-jump-off-age lines (x = age_stop in years, y =
   AUC/corrected-Brier/RMSE with analytic CI bands, one line per outcome); (b) observed vs
-  generated overlay plots reusing 03 viz (KM curves with generated seed-band: median + IQR
-  across seeds).
+  generated overlay plots reusing 03 viz. The overlays draw the **pooled** estimate and the
+  `ci_lo`/`ci_hi` its own table carries — no variance is computed in the viz layer, so every band
+  is checkable against the parquet the figure links to (see `metrics_reference.md` §4.1). Cohort
+  ASFR carries a band on its single-jump-off figures; the cross-jump-off panel omits it, because one
+  shaded interval per jump-off per cohort buries the profiles.
 
 ## 4. Tests
 
