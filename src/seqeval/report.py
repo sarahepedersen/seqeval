@@ -643,8 +643,8 @@ def _backtest_metrics_table(arm_dir: Path) -> str:
         "MSE is the squared-error using <code>p̂</code> (from the replicate mean) versus the "
         "observed outcome. This is equal to the Brier score for binary outcomes.",
         "R² is the MSE rescaled by the outcome variance (1 = perfect, 0 = base rate).",
-        "MLE estimator across replicates. It checks whether the P(p̂ | event  >  p̂ | no event) "
-        "for a given outcome.",
+        "AUC is rank-based, computed from <code>p̂</code>. It checks whether "
+        "P(p̂ | event) > P(p̂ | no event) for a given outcome.",
         "ECE is the expected calibration error, measuring the average deviation between "
         "predicted probabilities and actual outcomes among binned p̂ values. We use quantile "
         "binning for ECE and the reliability diagrams (see below).",
@@ -681,12 +681,14 @@ def _calibration_subsections(arm_dir: Path) -> str:
 
     note = _bullets(
         "The calibration/reliability diagram bins individuals by their <code>p̂</code> for a "
-        "particular outcome and jump-off age. We use a fixed number of quantile bins (having the "
-        "same number of individuals) rather than fixed-width.",
+        "particular outcome and jump-off age. We use a fixed number of quantile bins rather than " \
+        "fixed-width ones. Bin counts are in <code>calibration.parquet</code>.",
         "The x-axis is the mean <code>p̂</code> for the bin, and the y-axis is the proportion of "
         "observed individuals for which that outcome was actually reached after the jump-off age. "
         "A diagonal line is perfect calibration.",
-        "Below the reliability curve we show the distribution of the <code>p̂</code>.",
+        "Below the reliability curve we show the distribution of the <code>p̂</code>. This is the "
+        "true distribution over the <code>k/n</code> grid — one bar per attainable value, from "
+        "<code>p_hat_distribution.parquet</code>.",
     )
     parts = [
         '<h3 id="calibration">Calibration</h3>',

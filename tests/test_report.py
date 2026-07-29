@@ -190,7 +190,7 @@ def test_replicate_basis_renders_the_chosen_wording(demo_config, tmp_path, monke
     assert observed.count("Replicate handling:") == 2  # the unset group is silent, not blank
 
 
-def test_an_unknown_basis_key_raises(demo_config, tmp_path, monkeypatch):
+def test_an_unknown_basis_key_raises(monkeypatch):
     """A renamed group must fail loudly rather than lose its marker."""
     monkeypatch.delitem(report.REPLICATE_BASIS, "comparison.km")
     with pytest.raises(KeyError):

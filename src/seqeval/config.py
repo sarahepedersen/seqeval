@@ -278,10 +278,14 @@ class BacktestingConfig(_Strict):
     probability_outcomes: list[ProbabilityOutcomeConfig] = []
     aggregate_targets: list[str] = []
     min_seeds: int = 5
-    # How the reliability curve / p_hat histogram group predicted probabilities: "quantile" makes
-    # equal-count decile bins (each point rests on the same number of persons); "uniform" makes
+    # How the reliability curve / p_hat histogram group predicted probabilities: "quantile" aims at
+    # equal-count bins (each point resting on roughly the same number of persons); "uniform" makes
     # fixed-width [0,1] bins. Same choice feeds the reported ECE so graph and score agree.
     calibration_binning: Literal["uniform", "quantile"] = "quantile"
+    # How many bins to ask for. `p_hat = k/n` lives on a grid of `n + 1` points, so quantile binning
+    # can realize at most one bin per distinct p_hat: asking for more than the replicate count buys
+    # nothing. Roughly `n_seeds / 5` is a sane ceiling — 10 bins wants ~50 seeds behind it.
+    calibration_bins: int = Field(default=10, ge=2)
 
 
 class RuleConfig(_Strict):

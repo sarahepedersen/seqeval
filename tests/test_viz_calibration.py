@@ -32,14 +32,52 @@ def test_reliability_is_square():
     assert C.plot_reliability(cal).axes[0].get_aspect() == 1.0
 
 
-def test_counts_come_from_the_curves_own_bins():
-    """One bar per calibration row, so the curve and the counts cannot disagree."""
+def test_counts_fall_back_to_the_curves_own_bins():
+    """With no distribution to draw, the panel is the calibration bins — the old behaviour."""
     cal = ml.calibration_table(_joined(), n_bins=10, strategy="quantile")
     fig = C.plot_reliability(cal)
     assert len(fig.axes) == 2
     bars = sorted(fig.axes[1].patches, key=lambda p: p.get_x())
     assert [p.get_x() for p in bars] == list(cal["bin_left"])
     assert [p.get_height() for p in bars] == list(cal["n"])
+
+
+def _atomic(n_seeds=5, weights=(0.3, 0.35, 0.2, 0.1, 0.04, 0.01), n=2000):
+    """A joined frame whose p_hat sits on the k/n grid, weighted toward the low end."""
+    rng = np.random.default_rng(0)
+    grid = np.arange(n_seeds + 1) / n_seeds
+    p = rng.choice(grid, size=n, p=weights)
+    return pd.DataFrame(
+        {"p_hat": p, "y_true": (rng.random(n) < p).astype(int), "n": n_seeds}
+    )
+
+
+def test_the_count_panel_draws_the_p_hat_grid_not_the_bins():
+    """A wide equal-count bin must not read as weight spread across its whole range."""
+    joined = _atomic()
+    cal = ml.calibration_table(joined, n_bins=10, strategy="quantile")
+    dist = ml.p_hat_distribution(joined, min_cell=0)
+    bars = sorted(C.plot_reliability(cal, dist).axes[1].patches, key=lambda p: p.get_x())
+
+    # one bar per attainable p_hat, centred on its own value
+    assert len(bars) == len(dist)
+    centres = [p.get_x() + p.get_width() / 2 for p in bars]
+    np.testing.assert_allclose(centres, dist["p_hat"], atol=1e-9)
+    assert [p.get_height() for p in bars] == list(dist["n_persons"])
+    # and no bar spans more than one grid step, unlike the calibration bins
+    step = 1 / 5
+    assert max(p.get_width() for p in bars) <= step
+    assert (cal["bin_right"] - cal["bin_left"]).max() > step
+
+
+def test_withheld_atoms_are_hatched_rather_than_drawn_as_zero():
+    joined = _atomic(weights=(0.3, 0.35, 0.2, 0.1489, 0.0001, 0.001), n=20000)
+    cal = ml.calibration_table(joined, n_bins=10, strategy="quantile")
+    dist = ml.p_hat_distribution(joined, min_cell=5)
+    assert dist["suppressed"].any(), "fixture should produce at least one thin atom"
+    hatched = [p for p in C.plot_reliability(cal, dist).axes[1].patches if p.get_hatch()]
+    assert len(hatched) == int(dist["suppressed"].sum())
+    assert all(p.get_height() > 0 for p in hatched)  # "at most this many", never a false zero
 
 
 def test_empty_bins_are_not_drawn_as_zero_height_bars():

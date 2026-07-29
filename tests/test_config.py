@@ -120,6 +120,17 @@ def test_calibration_binning_rejects_unknown_value():
         C.Config.model_validate(d)
 
 
+def test_calibration_bins_is_configurable_and_bounded():
+    """More replicates support more bins, so the count has to be a knob, not a constant."""
+    assert C.load_config(_REF).arms.backtesting.calibration_bins == 10
+    d = _ref_dict()
+    d["arms"]["backtesting"]["calibration_bins"] = 20
+    assert C.Config.model_validate(d).arms.backtesting.calibration_bins == 20
+    d["arms"]["backtesting"]["calibration_bins"] = 1  # a single bin says nothing about calibration
+    with pytest.raises(ValidationError):
+        C.Config.model_validate(d)
+
+
 def test_within_origin_on_outcome_without_origin():
     d = _ref_dict()
     d["arms"]["backtesting"]["probability_outcomes"].append(

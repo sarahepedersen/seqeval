@@ -115,6 +115,7 @@ def run(
         for k in (
             "probabilities",
             "calibration",
+            "p_hat_distribution",
             "scores",
             "aggregate_error",
             "coverage",
@@ -161,7 +162,9 @@ def run(
                 acc,
                 out,
                 bundle.label,
-                cfg.calibration_binning,
+                # One (strategy, n_bins) pair for both consumers, so the drawn reliability curve
+                # and the reported ECE can never be binned differently.
+                (cfg.calibration_binning, cfg.calibration_bins),
             )
 
         for target in cfg.aggregate_targets:
@@ -237,13 +240,18 @@ def _score_probability_outcome(
     else:
         out.withhold("probabilities")  # never assembled, so the writer never sees it
 
-    cal = ml.calibration_table(joined, n_bins=10, strategy=binning)
+    strategy, n_bins = binning
+    cal = ml.calibration_table(joined, n_bins=n_bins, strategy=strategy)
     acc["calibration"].append(_stamp(cal, label))
+    # Where the people actually are on the p_hat grid. Distinct from the calibration bins, which
+    # are chosen for equal occupancy and so say nothing about where the mass sits.
+    dist = ml.p_hat_distribution(joined, min_cell=out.min_cell)
+    acc["p_hat_distribution"].append(_stamp(dist, label))
 
     desc = describe_outcome(spec, jumpoff_days=t2, label_fn=label_fn)
     out.figure(
         f"reliability_{spec.name}_w{int(round(days_to_years(t2)))}",
-        viz_calibration.plot_reliability(cal, title=desc),
+        viz_calibration.plot_reliability(cal, dist, title=desc, min_cell=out.min_cell),
     )
     # Timed outcomes also get a timing-error ridge, drawn on the same population this reliability
     # diagram scores: the condition minus the settled. The tables it needs also carry the timing
@@ -338,7 +346,7 @@ def _score_row(joined, summary, tables, binning) -> dict:
     brier = ml.brier(joined)
     median_n = float(summary["n"].median())
     scores = {
-        "ece": ml.ece(ml.calibration_table(joined, strategy=binning)),
+        "ece": ml.ece(ml.calibration_table(joined, n_bins=binning[1], strategy=binning[0])),
         "roc_auc": ml.roc_auc(joined),
         "auc_grid_resolution": 1.0 / median_n if median_n else np.nan,
         "brier_raw": brier["raw"],

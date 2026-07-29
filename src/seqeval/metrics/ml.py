@@ -85,13 +85,25 @@ def join_truth(probs: pd.DataFrame, obs_outcomes: pd.DataFrame) -> pd.DataFrame:
 
 
 def _bin_edges(p: np.ndarray, n_bins: int, strategy: str) -> np.ndarray:
-    if strategy == "quantile":
-        edges = np.unique(np.quantile(p, np.linspace(0, 1, n_bins + 1)))
-        edges[0], edges[-1] = 0.0, 1.0
-        return edges
+    """Bin edges over ``[0, 1]``; quantile edges collapse where ``p̂`` ties.
+
+    ``p̂ = k/n`` lives on a grid of ``n + 1`` points, so a quantile cut point can never split an
+    atom: where a single grid value carries more than one bin's worth of mass, the edges either
+    side of it coincide and ``np.unique`` drops the duplicate. The realized bin count is therefore
+    at most ``min(n_bins, distinct p̂ values)`` — few seeds mean few bins, whatever is requested.
+    """
     if strategy == "uniform":
         return np.linspace(0.0, 1.0, n_bins + 1)
-    raise ValueError(f"unknown strategy {strategy!r}; use uniform | quantile")
+    if strategy != "quantile":
+        raise ValueError(f"unknown strategy {strategy!r}; use uniform | quantile")
+    edges = np.unique(np.quantile(p, np.linspace(0, 1, n_bins + 1)))
+    if len(edges) < 2:
+        # Every p̂ identical — one atom, so one bin spanning the whole probability range. Without
+        # this the two assignments below would both write to the same element and leave a
+        # single-element array, which yields no bins at all and a silently empty table.
+        return np.array([0.0, 1.0])
+    edges[0], edges[-1] = 0.0, 1.0
+    return edges
 
 
 def calibration_table(
@@ -127,6 +139,36 @@ def calibration_table(
             }
         )
     return pd.DataFrame(rows)
+
+
+def p_hat_distribution(joined: pd.DataFrame, *, min_cell: int = MIN_CELL) -> pd.DataFrame:
+    """How many people sit on each value of ``p̂``: ``[p_hat, n_persons, n_total, suppressed]``.
+
+    ``p̂ = k/n`` is atomic — with ``n`` replicates it can only take ``n + 1`` values — so its
+    distribution is a set of spikes on that grid, not a density. Calibration *bins* are a different
+    object: they are chosen to hold roughly equal numbers of people, so a single bin can span a
+    wide stretch of the axis while nearly all of its mass sits on one atom at the edge. Reporting
+    the bin counts as if they were the distribution puts the weight in the wrong place.
+
+    Every attainable grid point gets a row, including the empty ones, so a gap in the distribution
+    is visible as a true zero rather than as a value that was never possible. Cells are withheld per
+    :func:`~seqeval.metrics._disclosure.suppress_small_cells`.
+    """
+    p = joined["p_hat"].to_numpy()
+    if not len(p):
+        return pd.DataFrame(
+            {c: pd.Series(dtype="float64") for c in ("p_hat", "n_persons", "n_total", "suppressed")}
+        )
+    counts = pd.Series(p).value_counts()
+    # The grid is set by the replicate count, so a value nobody landed on is still a real zero.
+    n_rep = int(pd.Series(joined["n"]).median()) if "n" in joined.columns else 0
+    grid = np.round(np.arange(n_rep + 1) / n_rep, 12) if n_rep > 0 else np.sort(counts.index)
+    cells = pd.DataFrame({"p_hat": grid})
+    cells["n_persons"] = (
+        cells["p_hat"].map(lambda v: int(counts.get(v, 0))).astype(np.int64)
+    )
+    cells["n_total"] = int(len(p))
+    return suppress_small_cells(cells, count_col="n_persons", by=[], min_cell=min_cell)
 
 
 def ece(calibration: pd.DataFrame) -> float:

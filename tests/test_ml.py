@@ -72,6 +72,87 @@ def test_calibration_ece_and_perfect_case():
     assert ml.ece(cal) == pytest.approx(0.0, abs=1e-9)
 
 
+def _grid(p_hat, y_true, n_seeds):
+    """A joined frame whose p_hat sits on the `k/n` grid a run of `n_seeds` replicates produces."""
+    return pd.DataFrame(
+        {
+            "p_hat": p_hat,
+            "y_true": y_true,
+            "k": np.round(np.asarray(p_hat) * n_seeds).astype(int),
+            "n": n_seeds,
+            "person_id": np.arange(len(p_hat)),
+        }
+    )
+
+
+def test_quantile_bins_cannot_split_a_tie():
+    """p_hat = k/n is atomic, so a coarse replicate grid caps how many bins can exist."""
+    rng = np.random.default_rng(0)
+    # 5 seeds -> p_hat has 6 possible values, so 10 bins are unreachable whatever the sample size
+    p = rng.choice([0.0, 0.2, 0.4, 0.6, 0.8, 1.0], size=4000, p=[0.01, 0.04, 0.05, 0.2, 0.4, 0.3])
+    cal = ml.calibration_table(_grid(p, rng.random(4000) < p, 5), n_bins=10, strategy="quantile")
+    assert 2 <= len(cal) <= 6  # at most one bin per distinct p_hat, never the 10 requested
+    assert cal["n"].sum() == 4000  # nobody is dropped by the collapse
+
+    # 50 seeds -> a finer grid, so the requested count is essentially reachable
+    p50 = np.round(rng.beta(6, 2, size=4000) * 50) / 50
+    joined50 = _grid(p50, rng.random(4000) < p50, 50)
+    cal50 = ml.calibration_table(joined50, n_bins=10, strategy="quantile")
+    assert len(cal50) >= 9
+    # and the bins are near-equal-count, which is what quantile binning is for
+    assert cal50["n"].max() / cal50["n"].min() < 4
+
+
+def test_a_single_distinct_p_hat_still_yields_one_bin():
+    """A degenerate p_hat must not silently produce an empty table and a NaN ECE."""
+    joined = _grid(np.full(50, 0.4), np.r_[np.ones(20), np.zeros(30)], 5)
+    cal = ml.calibration_table(joined, n_bins=10, strategy="quantile")
+    assert len(cal) == 1
+    assert cal["n"].iloc[0] == 50
+    assert cal["p_mean"].iloc[0] == pytest.approx(0.4)
+    assert cal["y_rate"].iloc[0] == pytest.approx(0.4)
+    assert ml.ece(cal) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_every_person_lands_in_exactly_one_bin():
+    rng = np.random.default_rng(1)
+    p = np.round(rng.random(2000) * 50) / 50
+    for strategy in ("quantile", "uniform"):
+        cal = ml.calibration_table(_grid(p, rng.random(2000) < p, 50), strategy=strategy)
+        assert cal["n"].sum() == 2000, strategy
+
+
+def test_p_hat_distribution_is_the_grid_not_the_bins():
+    """The distribution lives on the k/n atoms; calibration bins are a different grouping."""
+    rng = np.random.default_rng(0)
+    p = rng.choice([0.0, 0.2, 0.4, 0.6, 0.8, 1.0], size=2000, p=[0.3, 0.35, 0.2, 0.1, 0.04, 0.01])
+    joined = _grid(p, rng.random(2000) < p, 5)
+
+    d = ml.p_hat_distribution(joined, min_cell=0)
+    # every attainable value gets a row, so a gap reads as a true zero, not as an impossible value
+    np.testing.assert_allclose(d["p_hat"], [0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    assert d["n_persons"].sum() == 2000
+    assert (d["n_total"] == 2000).all()
+
+    # the top calibration bin spans a wide range, but the mass inside it sits on its left edge
+    cal = ml.calibration_table(joined, n_bins=10, strategy="quantile")
+    top = cal.iloc[-1]
+    inside = d[(d["p_hat"] >= top["bin_left"]) & (d["p_hat"] <= top["bin_right"])]
+    assert inside["n_persons"].sum() == top["n"]
+    assert inside.iloc[0]["n_persons"] / top["n"] > 0.5  # most of the bar is its leftmost atom
+
+
+def test_p_hat_distribution_withholds_thin_atoms():
+    p = np.r_[np.full(300, 0.2), np.full(300, 0.4), np.full(3, 1.0)]
+    d = ml.p_hat_distribution(_grid(p, np.zeros(len(p), dtype=bool), 5), min_cell=5)
+    hidden = d[d["suppressed"]]
+    assert len(hidden) >= 2  # the lone thin atom drags a second one with it
+    assert hidden["n_persons"].isna().all()
+    # a value nobody reached is a published zero, never a suppressed cell
+    zeros = d[(d["n_persons"] == 0)]
+    assert not zeros["suppressed"].any()
+
+
 def test_roc_auc_perfect_and_degenerate():
     perfect = pd.DataFrame({"p_hat": [0.1, 0.2, 0.8, 0.9], "y_true": [0, 0, 1, 1], "k": 1, "n": 5})
     assert ml.roc_auc(perfect) == pytest.approx(1.0)
