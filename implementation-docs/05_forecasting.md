@@ -57,24 +57,35 @@ Subgroup Lexis: honor `extra_by` from persons covariates (education, region) whe
 
 ## 2. `metrics/plausibility.py` — illegal-move rules engine
 
-Rules are **data, not code** (extensibility beyond fertility). Config values in years; events by
-alias (typed as `RuleConfig` in 01's `config.py`):
+Rules are **data, not code** (extensibility beyond fertility). Config values in years (typed as
+`RuleConfig` in 01's `config.py`).
+
+The subject of a rule is written **either** as an `event` alias — every occurrence of that token —
+**or** as an `outcome` name from the top-level registry, which pins one ordinal occurrence. Exactly
+one of the two. `not_before`/`not_after` take either kind: an alias anchors on the token's *first*
+occurrence, an outcome name on the occurrence it names.
 
 ```yaml
 forecasting:
   illegal_moves:
+    # token form: constrains every occurrence
     - {name: birth_after_50,  event: birth, max_age: 50}
     - {name: birth_before_12, event: birth, min_age: 12}
     - {name: implausible_spacing, event: birth, min_spacing: 0.6, severity: warn}
-    - {name: birth_after_death, event: birth, not_after: death}   # generic ordering rule; only
-                                                                  # valid if 'death' is a
-                                                                  # declared event alias
-    - {name: divorce_before_marriage, event: divorce, not_before: marriage}   # the mirror rule:
-                                                                  # flags the divorce itself,
-                                                                  # including when no marriage
-                                                                  # exists at all
     - {name: parity_cap, event: birth, max_count: 15, severity: warn}
+    - {name: birth_after_death, event: birth, not_after: death}   # only valid if 'death' is a
+                                                                 # declared event alias
+    # outcome form: constrains one occurrence, which is what an ordering rule usually wants
+    - {name: divorce_before_marriage, outcome: first_divorce, not_before: first_marriage}
+    - {name: second_birth_unmarried, outcome: second_birth, not_before: first_marriage}
 ```
+
+`not_before` flags the divorce itself, **including when no marriage exists at all**; `not_after`
+only constrains groups where the anchor exists. That asymmetry is deliberate and unchanged.
+
+An outcome's `origin` is ignored here: a rule constrains where an occurrence sits in the sequence,
+not a duration measured from something else. `min_spacing` and `max_count` describe the whole stream,
+so they require `event` and are rejected with `outcome`.
 
 `config.resolve_rules` (01) converts to the day-valued, raw-token `Rule` in `core/specs.py`:
 
@@ -82,10 +93,14 @@ forecasting:
 @dataclass(frozen=True)
 class Rule:
     name: str; event: Any                       # raw token
+    occurrence: int | None = None               # None = every occurrence (the `event:` form);
+                                                # an int pins one (the `outcome:` form)
     min_age: int | None = None; max_age: int | None = None    # days
     min_spacing: int | None = None                            # days
     not_after: Any | None = None                              # raw token
     not_before: Any | None = None                             # raw token
+    not_after_occurrence: int = 1                # which occurrence of the anchor to measure against
+    not_before_occurrence: int = 1
     max_count: int | None = None
     severity: Literal["illegal", "warn"] = "illegal"
 
@@ -142,7 +157,10 @@ forecasting:
     years: [1960, 2035]        # calendar years
     subgroup_by: []            # from declared persons.covariates (validated in 01)
   illegal_moves: [ ...rules as above... ]
-  seed_stability: {individual: true, aggregate: [ccf]}
+  # one block, or a list of them; every stem a block writes ends in `_<name>`
+  replicate_variance:
+    - {individual: true, aggregate: [ccf], subgroup_by: [cohort]}
+    - {individual: true, event: marriage, aggregate: []}   # `event` is what the spread counts
 ```
 
 Behavior: uses ALL generated windows by default (forecasting wants the longest futures; document
@@ -155,9 +173,10 @@ that users typically point this arm at conditions-at-birth or late-jump-off runs
 - Lexis: on fully-observed synthetic data, surface cells match direct computation on a couple of
   hand-checked cells; combined surface has `forecast` source only in cells beyond observed spans.
 - Rules engine: parametrized unit tests per rule type on constructed frames (violations found,
-  clean data passes; `not_after` flags event X occurring after the first event Y within the same
-  sequence group; `not_before` flags X before the first Y *and* X with no Y at all; spacing
-  computed in exact integer days).
+  clean data passes; `not_after` flags event X occurring after the anchor occurrence of Y within the
+  same sequence group; `not_before` flags X before it *and* X with that occurrence absent entirely;
+  spacing computed in exact integer days; `occurrence` narrows the subject to one ordinal, ordered by
+  age rather than row order).
 - `violation_rates` denominators correct (per-group vs per-event).
 - Seed stability: perfect-model synthetic data with many seeds → occurrence disagreement (p_hat(1−p_hat)) matches
   binomial expectation from empirical p (loose tolerance).

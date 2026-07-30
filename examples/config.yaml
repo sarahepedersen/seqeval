@@ -70,13 +70,24 @@ arms:
                                   # forecast to the end of their fertile range
       subgroup_by: []
     illegal_moves:                   # assessment of demographic plausibility (either disallowed or should be predicted infrequently)
+      # `event:` constrains EVERY occurrence of the token.
       - {event: birth, max_age: 45, name: birth_after_45}
       - {event: birth, min_age: 15, name: birth_before_15}
       - {event: birth, min_spacing: 0.6, name: birth_min_spacing}
+      # `outcome:` pins ONE ordinal occurrence, and `not_before`/`not_after` take an outcome name or
+      # an event alias (an alias means that token's first occurrence). This is how you say "event A
+      # may not precede event B" — 
+      #   - {outcome: first_divorce, not_before: first_marriage, name: divorce_before_marriage}
+      #       flags a divorce before the first marriage AND a divorce with no marriage at all
     replicate_variance:
-      individual: true
-      aggregate: [ccf]
-      subgroup_by: [cohort]
+      - individual: true
+        aggregate: [ccf]             # CCF is about births by definition — leave it empty elsewhere
+        subgroup_by: [cohort]
+        # event: birth               # which event the WITHIN-SEED SPREAD counts; defaults to the
+                                     # lexis outcome's event
+        # name: births               # output suffix; defaults to `event`, else the lexis outcome
+      # A second analysis of the same run, asking the same question of a different event:
+      # - {individual: true, event: marriage, name: marriage, aggregate: [], subgroup_by: [cohort]}
 
 output:
   dir: results/

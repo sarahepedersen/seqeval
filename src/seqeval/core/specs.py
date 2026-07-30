@@ -192,28 +192,42 @@ class Rule:
         Stable identifier for the rule.
     event : Any
         Raw event token the rule applies to.
+    occurrence : int or None, default None
+        Which ordinal occurrence of ``event`` the rule is about (1 = first). ``None`` — what an
+        ``event:``-keyed config entry produces — means every occurrence. Naming an outcome in the
+        config pins this, so ``second_birth`` constrains the second birth and leaves the first
+        alone.
     min_age, max_age : int or None
         Flag occurrences younger than ``min_age`` / older than ``max_age`` (days).
     min_spacing : int or None
-        Flag consecutive occurrences closer together than this (days).
+        Flag consecutive occurrences closer together than this (days). About the whole stream, so it
+        is only meaningful with ``occurrence`` unset.
     not_after : Any or None
-        Flag an ``event`` occurring after this other token has occurred.
+        Flag the subject occurring after the anchor token's ``not_after_occurrence``-th occurrence.
     not_before : Any or None
-        Flag an ``event`` occurring before this other token's first occurrence — including when
-        the other token never occurs at all (a divorce with no marriage anywhere is a violation).
+        Flag the subject occurring before the anchor token's ``not_before_occurrence``-th occurrence
+        — including when that occurrence never happens at all (a divorce with no marriage anywhere
+        is a violation).
+    not_after_occurrence, not_before_occurrence : int, default 1
+        Which ordinal occurrence of the anchor token to measure against. An event alias in the
+        config leaves these at 1 (the first occurrence); an outcome name sets them.
     max_count : int or None
-        Flag sequences with more than this many occurrences of ``event``.
+        Flag sequences with more than this many occurrences of ``event``. About the whole stream, so
+        it is only meaningful with ``occurrence`` unset.
     severity : {"illegal", "warn"}, default "illegal"
         Whether a violation is a hard illegal move or a soft implausibility warning.
     """
 
     name: str
     event: Any
+    occurrence: int | None = None
     min_age: int | None = None
     max_age: int | None = None
     min_spacing: int | None = None
     not_after: Any | None = None
     not_before: Any | None = None
+    not_after_occurrence: int = 1
+    not_before_occurrence: int = 1
     max_count: int | None = None
     severity: Literal["illegal", "warn"] = "illegal"
 

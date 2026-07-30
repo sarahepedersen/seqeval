@@ -189,9 +189,11 @@ days the event must fall inside, so a row is readable on its own.
 - **Timing — `timing_spread`.** Inter-quantile width of the predicted age at first occurrence across
   seeds: `q90 − q10`. Wider = the seeds disagree more about *when*.
 
-**`replicate_variance_individual`** — the birth-event count, independent of any configured outcome.
+**`replicate_variance_individual`** — the count of one event, independent of any configured outcome.
+Which event is `forecasting.replicate_variance.event`, defaulting to the target event of the `lexis`
+outcome (births on a fertility run).
 
-- **Count — `expected_quantum`, `within_seed_var`, `within_seed_cv`.** Predictive mean, variance and
+- **Count — `expected_count`, `within_seed_var`, `within_seed_cv`.** Predictive mean, variance and
   coefficient of variation across seeds of that person's completed event count.
 
 These are plug-in dispersions, **not** resampling procedures. In the report both tables are

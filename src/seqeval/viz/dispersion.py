@@ -14,12 +14,22 @@ from seqeval.metrics._disclosure import MIN_CELL
 from seqeval.units import days_to_years
 from seqeval.viz._ridge import draw_distribution_columns
 
+#: Default noun for the quantity being counted. The dispersion is over a *count of one event*, and
+#: which event is configurable (``forecasting.replicate_variance.event``), so the callers pass the
+#: event's natural-language plural and these strings only supply the surrounding words.
+DEFAULT_EVENT_LABEL = "events"
+
 _LABELS = {
-    "within_seed_var": "within-seed variance of completed births",
-    "within_seed_cv": "within-seed CV of completed births",
+    "within_seed_var": "within-seed variance of completed {noun}",
+    "within_seed_cv": "within-seed CV of completed {noun}",
     "timing_spread": "within-seed timing spread (days)",
-    "quantum": "completed births per woman",
+    "count": "completed {noun} per person",
 }
+
+
+def _label(key: str, event_label: str) -> str:
+    """A y-axis label for ``key``, with the counted event's name filled in where one belongs."""
+    return _LABELS.get(key, key).format(noun=event_label)
 
 _AXIS_LABELS = {
     "cohort": "birth cohort",
@@ -44,8 +54,12 @@ def plot_within_seed_variance(
     facet_by: str | None = None,
     title: str | None = None,
     min_cell: int = MIN_CELL,
+    event_label: str = DEFAULT_EVENT_LABEL,
 ) -> Figure:
     """Distribution of a per-person within-seed dispersion column, one column per ``x`` group.
+
+    ``event_label`` names what is being counted (``"births"``, ``"marriages"``) and appears in the
+    y-axis label; the dispersion itself is over a count of whichever event the run configured.
 
     ``dist`` is :func:`~seqeval.metrics.dispersion.dispersion_distribution` output, grouped by ``x``
     (and ``facet_by`` when given). Each column is one group's distribution: the dispersion runs up
@@ -76,7 +90,7 @@ def plot_within_seed_variance(
         )
         ax.set_ylim(*_occupied_range(sub))
         ax.grid(True, alpha=0.3, linewidth=0.5)
-        ax.set_ylabel(_LABELS.get(value, value), fontsize=8)
+        ax.set_ylabel(_label(value, event_label), fontsize=8)
         if fv is not None:
             ax.set_title(_fmt(facet_by, fv), fontsize=9, loc="left")
     if x in ("age_start", "age_stop"):
@@ -89,14 +103,15 @@ def plot_within_seed_variance(
     return fig
 
 
-def plot_quantum_quantile_fan(
+def plot_within_seed_quantile_fan(
     summary: pd.DataFrame,
     *,
     x: str = "age_stop",
     facet_by: str | None = None,
     title: str | None = None,
+    event_label: str = DEFAULT_EVENT_LABEL,
 ) -> Figure:
-    """Group-mean five-number summary of completed births as a fan, one point per ``x`` group.
+    """Group-mean five-number summary of a completed count as a fan, one point per ``x`` group.
 
     ``summary`` is :func:`~seqeval.metrics.dispersion.quantile_summary` output. The line is
     ``mean_q50``, the dark band ``mean_q25``–``mean_q75`` and the light band
@@ -136,7 +151,7 @@ def plot_quantum_quantile_fan(
         )
         ax.set_xticklabels(labels, fontsize=8)
         ax.grid(True, alpha=0.3, linewidth=0.5)
-        ax.set_ylabel(_LABELS["quantum"], fontsize=8)
+        ax.set_ylabel(_label("count", event_label), fontsize=8)
         ax.set_ylim(bottom=0)
         if fv is not None:
             ax.set_title(_fmt(facet_by, fv), fontsize=9, loc="left")

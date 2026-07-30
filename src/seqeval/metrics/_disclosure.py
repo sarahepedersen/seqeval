@@ -243,7 +243,7 @@ POLICIES: dict[str, Policy] = {
     "timing_error": Policy(trip=("n_persons", "n_pred_bin", "n_trajectories", "n_excluded")),
     # -- dispersion -------------------------------------------------------------------------
     "within_seed_variance_distribution": Policy(trip=("n_persons", "n_group")),
-    "quantum_quantile_summary": Policy(
+    "within_seed_quantile_summary": Policy(
         trip=("n_persons",),
         also_null=("mean_k", "mean_q0", "mean_q25", "mean_q50", "mean_q75", "mean_q100"),
     ),
@@ -252,9 +252,13 @@ POLICIES: dict[str, Policy] = {
 POLICIES["timing_error_by_seed"] = POLICIES["timing_error"]
 
 #: Stems that are parameterised at write time, longest first so the exact entries above win.
+#:
+#: This is why a `replicate_variance` block's name is appended rather than infixed: the
+#: parameterised part of a stem has to sit at the *end* for a prefix to still find its policy.
 _PREFIXES: tuple[tuple[str, str], ...] = (
     ("within_seed_variance_distribution", "within_seed_variance_distribution"),
-    ("quantum_quantile_summary", "quantum_quantile_summary"),
+    ("within_seed_quantile_summary", "within_seed_quantile_summary"),
+    ("replicate_variance_aggregate", "replicate_variance_aggregate"),
     ("km_", "km_by_seed"),
 )
 

@@ -335,10 +335,11 @@ _FIGURE_SOURCES = (
     ("ppr_overlay_", "ppr_pooled"),
     ("asfr_overlay_", "asfr_pooled"),
     ("km_overlay_", "km_pooled"),
+)
+
+_FIGURE_SOURCE_REWRITES = (
     ("within_seed_variance", "within_seed_variance_distribution"),
-    ("within_seed_variance_by_cohort", "within_seed_variance_distribution_by_cohort"),
-    ("quantum_quantile_fan", "quantum_quantile_summary"),
-    ("quantum_quantile_fan_by_cohort", "quantum_quantile_summary_by_cohort"),
+    ("within_seed_quantile_fan", "within_seed_quantile_summary"),
 )
 
 
@@ -354,6 +355,11 @@ def _figure_source(fig: Path) -> Path | None:
     same_stem = fig.with_suffix(".parquet")
     if same_stem.exists():
         return same_stem
+    for prefix, replacement in _FIGURE_SOURCE_REWRITES:
+        if fig.stem.startswith(prefix):
+            rewritten = fig.parent / f"{replacement}{fig.stem[len(prefix):]}.parquet"
+            if rewritten.exists():
+                return rewritten
     matches = [name for prefix, name in _FIGURE_SOURCES if fig.stem.startswith(prefix)]
     for name in sorted(matches, key=len, reverse=True):
         candidate = fig.parent / f"{name}.parquet"
@@ -937,16 +943,19 @@ _GENERATED_GROUPS = (
         "within_seed_variance*.png",
         "generated.dispersion",
         _bullets(
-            "How much variance there is in quantum fertility across one individual's trajectories, equal to the " \
-            "inference uncertainty that the <code>within_var</code> term below is built from."
+            "How much the count of the configured event varies across one individual's "
+            "trajectories (<code>forecasting.replicate_variance.event</code>; births on a "
+            "fertility run), equal to the inference uncertainty that the <code>within_var</code> "
+            "term below is built from."
         ),
     ),
     (
-        "Within-seed spread of completed births",
-        "quantum_quantile_fan*.png",
+        "Within-seed spread of the completed count",
+        "within_seed_quantile_fan*.png",
         "generated.dispersion",
         _bullets(
-            "The distribution behind the within_seed_variance. We compute summaries of individual's completed quantum fertility across "
+            "The distribution behind the within_seed_variance. We compute summaries of each "
+            "individual's completed event count across "
             "replicates — min, quartiles, max. The plot shows "
             "the average of each of those quantities over all individuals: the line is the typical "
             "person's median outcome, the dark band their interquartile spread, the light band "
@@ -1023,16 +1032,14 @@ def _generated_section(arm_dir: Path) -> str:
         parts.append(figures)
     # per-person tables → sample 5 individuals; aggregate tables → full. Ages/times shown in years.
     for name, basis_key, note, n_seeds in _GENERATED_PERSON_TABLES:
-        p = arm_dir / f"{name}.parquet"
-        if p.exists():
+        for p in sorted(arm_dir.glob(f"{name}*.parquet")):
             parts.append(
                 _sample_persons_html(
                     p, to_years=True, note=note, basis_key=basis_key, n_seeds=n_seeds
                 )
             )
     for name, basis_key, note in _GENERATED_AGGREGATE_TABLES:
-        p = arm_dir / f"{name}.parquet"
-        if p.exists():
+        for p in sorted(arm_dir.glob(f"{name}*.parquet")):
             parts.append(_table_html(p, to_years=True, note=note, basis_key=basis_key))
     return "\n".join(parts) if len(parts) > 1 else ""
 

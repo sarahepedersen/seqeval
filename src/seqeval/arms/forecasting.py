@@ -79,9 +79,11 @@ def run(
         )
     if cfg.illegal_moves:
         _run_illegal_moves(observed, generated, rules, out)
-    if cfg.replicate_variance is not None:
+    # One analysis per configured block, each about its own event and each writing stems suffixed
+    # with the block's name, so several can coexist in one results directory.
+    for block in cfg.replicate_variance:
         _run_replicate_variance(
-            bundle, cfg, generated, windows, outcomes, replicate_spec, out, cohort_width
+            bundle, block, cfg, generated, windows, outcomes, replicate_spec, out, cohort_width
         )
 
 
@@ -225,31 +227,42 @@ def _run_illegal_moves(observed, generated, rules, out) -> None:
 # 3. replicate variance (per-individual dispersion + upstream-metric roll-up)
 # =================================================================================================
 def _run_replicate_variance(
-    bundle, cfg, generated, windows, outcomes, spec, out, cohort_width
+    bundle, scfg, cfg, generated, windows, outcomes, spec, out, cohort_width
 ) -> None:
-    scfg = cfg.replicate_variance
+    """One ``replicate_variance`` block: per-person dispersion of its event, plus the roll-up.
+
+    ``scfg.name`` (resolved at config parse) suffixes every stem this writes, so two blocks — births
+    and marriages, say — land side by side instead of overwriting each other.
+    """
     target_name = cfg.lexis.outcome if cfg.lexis is not None else next(iter(outcomes))
     tte_spec = outcomes[target_name]
     birth_token = tte_spec.target
+    # The within-seed spread is a dispersion of *some* event count, configurable independently
+    # of the CCF roll-up below — that one is births by definition.
+    spread_token = bundle.token(scfg.event) if scfg.event else birth_token
+    spread_label = _plural(bundle.label(spread_token))
+    suffix = f"_{scfg.name}"
     horizon = _fertile_upper_days()
 
     if scfg.individual:
         subgroups = _person_subgroups(bundle.persons, scfg.subgroup_by, cohort_width)
-        ind = _replicate_variance_individual(generated, birth_token, subgroups)
-        out.frame("replicate_variance_individual", ind, individual=True)
+        ind = _replicate_variance_individual(generated, spread_token, subgroups)
+        out.frame(f"replicate_variance_individual{suffix}", ind, individual=True)
         out.frame(
-            "replicate_occurrence",
+            f"replicate_occurrence{suffix}",
             _replicate_occurrence(generated, tte_spec, target_name, horizon, spec),
             individual=True,
         )
-        _emit_dispersion_ridges(ind, scfg.subgroup_by, out)
+        _emit_dispersion_ridges(
+            ind, scfg.subgroup_by, out, event_label=spread_label, suffix=suffix
+        )
 
     if scfg.aggregate:
         agg = _replicate_variance_aggregate(
             bundle, generated, windows, scfg.aggregate, birth_token, spec, cohort_width
         )
         if agg is not None:
-            out.frame("replicate_variance_aggregate", agg)
+            out.frame(f"replicate_variance_aggregate{suffix}", agg)
 
 
 def _replicate_occurrence(generated, tte_spec, outcome_name, horizon, spec) -> pd.DataFrame:
@@ -282,32 +295,39 @@ def _replicate_occurrence(generated, tte_spec, outcome_name, horizon, spec) -> p
     return out[cols].sort_values(_RUN_KEYS).reset_index(drop=True)
 
 
-def _emit_dispersion_ridges(ind: pd.DataFrame, subgroup_by, out) -> None:
+def _emit_dispersion_ridges(
+    ind: pd.DataFrame, subgroup_by, out, *, event_label: str, suffix: str = ""
+) -> None:
     """Within-seed dispersion as binned distributions and quantile summaries, plus their figures.
 
     Two aggregate views of the same individual-level frame, neither carrying a person. The ridges
     stack one binned ``within_seed_var`` distribution per jump-off; the fan draws the group-mean
-    five-number summary of the underlying completed-birth counts, so the variance ridge can be read
+    five-number summary of the underlying completed counts, so the variance ridge can be read
     against the outcome spread it summarises. Each requested subgroup adds a figure whose groups are
     that subgroup's values, one panel per jump-off — so a cohort can be read against the other
     cohorts at a jump-off, and against itself as the jump-off moves later.
+
+    ``event_label`` is the counted event's name, used in the figure titles and axis labels — the
+    quantity is a count of whichever event the block configured, not of births specifically.
+    ``suffix`` names the block, and goes on the end of every stem so the disclosure registry's
+    prefix matching still resolves them.
     """
     pop = md.dispersion_distribution(ind, by=["age_stop"], min_cell=out.min_cell)
-    out.frame("within_seed_variance_distribution", pop)
+    out.frame(f"within_seed_variance_distribution{suffix}", pop)
     out.figure(
-        "within_seed_variance",
+        f"within_seed_variance{suffix}",
         viz_dispersion.plot_within_seed_variance(
-            pop, x="age_stop", min_cell=out.min_cell,
-            title="Within-person replicate variance by jump-off",
+            pop, x="age_stop", min_cell=out.min_cell, event_label=event_label,
+            title=f"Within-person replicate variance of {event_label} by jump-off",
         ),
     )
     pop_q = md.quantile_summary(ind, by=["age_stop"], min_cell=out.min_cell)
-    out.frame("quantum_quantile_summary", pop_q)
+    out.frame(f"within_seed_quantile_summary{suffix}", pop_q)
     out.figure(
-        "quantum_quantile_fan",
-        viz_dispersion.plot_quantum_quantile_fan(
-            pop_q, x="age_stop",
-            title="Within-person spread of completed births by jump-off",
+        f"within_seed_quantile_fan{suffix}",
+        viz_dispersion.plot_within_seed_quantile_fan(
+            pop_q, x="age_stop", event_label=event_label,
+            title=f"Within-person spread of completed {event_label} by jump-off",
         ),
     )
 
@@ -315,39 +335,57 @@ def _emit_dispersion_ridges(ind: pd.DataFrame, subgroup_by, out) -> None:
         if col not in ind.columns:
             continue
         dist = md.dispersion_distribution(ind, by=[col, "age_stop"], min_cell=out.min_cell)
-        out.frame(f"within_seed_variance_distribution_by_{col}", dist)
+        out.frame(f"within_seed_variance_distribution{suffix}_by_{col}", dist)
         out.figure(
-            f"within_seed_variance_by_{col}",
+            f"within_seed_variance{suffix}_by_{col}",
             viz_dispersion.plot_within_seed_variance(
-                dist, x=col, facet_by="age_stop", min_cell=out.min_cell,
-                title=f"Within-person replicate variance by {col}, per jump-off",
+                dist, x=col, facet_by="age_stop", min_cell=out.min_cell, event_label=event_label,
+                title=f"Within-person replicate variance of {event_label} by {col}, per jump-off",
             ),
         )
 
         summary = md.quantile_summary(ind, by=[col, "age_stop"], min_cell=out.min_cell)
-        out.frame(f"quantum_quantile_summary_by_{col}", summary)
+        out.frame(f"within_seed_quantile_summary{suffix}_by_{col}", summary)
         out.figure(
-            f"quantum_quantile_fan_by_{col}",
-            viz_dispersion.plot_quantum_quantile_fan(
-                summary, x=col, facet_by="age_stop",
-                title=f"Within-person spread of completed births by {col}, per jump-off",
+            f"within_seed_quantile_fan{suffix}_by_{col}",
+            viz_dispersion.plot_within_seed_quantile_fan(
+                summary, x=col, facet_by="age_stop", event_label=event_label,
+                title=f"Within-person spread of completed {event_label} by {col}, per jump-off",
             ),
         )
 
 
-def _replicate_variance_individual(generated, birth_token, subgroups=None) -> pd.DataFrame:
-    """Per-(person, jump-off) replicate dispersion of the completed ``birth_token`` count.
+def _plural(label: str) -> str:
+    """A crude plural for a figure caption: ``birth`` -> ``births``, ``marriage`` -> ``marriages``.
+
+    Event labels come from ``events.csv`` and are written in the singular ("live birth"). Only the
+    caption needs the plural, so an ``-s``/``-es`` rule is enough; a label already ending in ``s``
+    is left alone.
+    """
+    low = label.lower()
+    if low.endswith("s"):
+        return label
+    if low.endswith(("ch", "sh", "x", "z")):
+        return f"{label}es"
+    return f"{label}s"
+
+
+def _replicate_variance_individual(generated, event_token, subgroups=None) -> pd.DataFrame:
+    """Per-(person, jump-off) replicate dispersion of the completed ``event_token`` count.
 
     ``within_seed_var`` / ``within_seed_cv`` are the variance and coefficient of variation across a
-    person's replicates for quantum completed fertility. ``q0``–``q100`` are the five-number summary
-    of the same counts (:func:`~seqeval.core.replicates.count_quantiles`) — the shape the single
-    variance number compresses — and ``k`` the replicates behind both.
+    person's replicates of how many times the event happens; ``expected_count`` is its mean.
+    ``q0``–``q100`` are the five-number summary of the same counts
+    (:func:`~seqeval.core.replicates.count_quantiles`) — the shape the single variance number
+    compresses — and ``k`` the replicates behind both. Which event is counted is the run's choice
+    (``forecasting.replicate_variance.event``); on a fertility run it is births, and
+    ``expected_count`` is then completed quantum fertility.
     """
-    ind_counts = _counts_per_run(generated, birth_token)
+    ind_counts = _counts_per_run(generated, event_token)
     ind_cm = rep.count_moments(ind_counts, run_keys=_RUN_KEYS, seed_col="seed").rename(
-        columns={"mean": "expected_quantum", "var": "within_seed_var"}
+        columns={"mean": "expected_count", "var": "within_seed_var"}
     )
-    mu = ind_cm["expected_quantum"].to_numpy()
+    mu = ind_cm["expected_count"].to_numpy()
     with np.errstate(divide="ignore", invalid="ignore"):
         cv = np.sqrt(ind_cm["within_seed_var"].to_numpy()) / mu
     ind_cm["within_seed_cv"] = np.where(mu > 0, cv, np.nan)
@@ -358,7 +396,7 @@ def _replicate_variance_individual(generated, birth_token, subgroups=None) -> pd
     out = ind_cm[
         [
             *_RUN_KEYS,
-            "expected_quantum",
+            "expected_count",
             "within_seed_var",
             "within_seed_cv",
             *md.QUANTILE_COLS,

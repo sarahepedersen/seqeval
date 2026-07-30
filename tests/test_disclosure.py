@@ -128,7 +128,7 @@ def test_parameterised_stems_resolve_to_a_policy():
     assert policy_for("km_first_birth") is POLICIES["km_by_seed"]
     assert policy_for("km_pooled") is POLICIES["km_pooled"]  # exact wins over the `km_` prefix
     assert policy_for("within_seed_variance_distribution_by_cohort") is not None
-    assert policy_for("quantum_quantile_summary_by_cohort") is not None
+    assert policy_for("within_seed_quantile_summary_by_cohort") is not None
     assert policy_for("violations") is None  # per-person, governed by `individual_level`
 
 

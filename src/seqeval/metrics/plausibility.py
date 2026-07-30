@@ -24,14 +24,18 @@ def check_rules(df: pd.DataFrame, keys: list[str], rules: list[Rule]) -> pd.Data
 
     Each field set on a :class:`Rule` is interpreted independently (all in integer days):
     ``min_age``/``max_age`` bound the event's age; ``min_spacing`` flags consecutive occurrences
-    closer than the gap; ``not_after`` flags the event occurring strictly after another event's
-    first occurrence in the same group; ``not_before`` flags it occurring strictly *before* another
-    event's first occurrence (or with that event absent entirely); ``max_count`` flags occurrences
-    beyond the cap.
+    closer than the gap; ``not_after`` flags the subject occurring strictly after the anchor
+    occurrence; ``not_before`` flags it occurring strictly *before* the anchor occurrence (or with
+    that occurrence absent entirely); ``max_count`` flags occurrences beyond the cap.
 
     ``not_after`` and ``not_before`` are not mirror images: ``not_after`` only constrains groups
-    where the other event exists, while ``not_before`` treats a missing anchor as a violation (a
-    divorce is illegal both before the first marriage and with no marriage at all).
+    where the anchor exists, while ``not_before`` treats a missing anchor as a violation (a divorce
+    is illegal both before the first marriage and with no marriage at all).
+
+    ``Rule.occurrence`` narrows the subject to one ordinal occurrence, and
+    ``not_*_occurrence`` picks which occurrence of the anchor to measure against — which is how an
+    outcome-keyed rule ("the second birth may not precede the first marriage") differs from a
+    token-keyed one ("no birth may precede any marriage").
     """
     _check_keys(df, keys)
     parts = [_check_one(df, keys, rule) for rule in rules]
@@ -41,9 +45,30 @@ def check_rules(df: pd.DataFrame, keys: list[str], rules: list[Rule]) -> pd.Data
     return pd.concat(parts, ignore_index=True).sort_values([*keys, "age"]).reset_index(drop=True)
 
 
+def _occurrences(
+    df: pd.DataFrame, keys: list[str], token, occurrence: int | None
+) -> pd.DataFrame:
+    """Rows of ``token``, narrowed to its ``occurrence``-th per group when one is named.
+
+    ``occurrence=None`` returns every occurrence — the token-keyed reading, where a rule constrains
+    the whole stream. Ordering is by age within the group, so occurrence 2 is the second-earliest.
+    """
+    ev = df[df["event"] == token]
+    if occurrence is None or not len(ev):
+        return ev
+    ordered = ev.sort_values([*keys, "age"], kind="stable")
+    order = ordered.groupby(keys, observed=True).cumcount() + 1
+    return ordered[order == occurrence]
+
+
+def _anchor_age(df: pd.DataFrame, keys: list[str], token, occurrence: int) -> pd.Series:
+    """Age of the ``occurrence``-th ``token`` per group; groups never reaching it are absent."""
+    return _occurrences(df, keys, token, occurrence).groupby(keys, observed=True)["age"].min()
+
+
 def _check_one(df: pd.DataFrame, keys: list[str], rule: Rule) -> pd.DataFrame:
     """Rows of ``df`` violating a single rule (found by original index), as a violations frame."""
-    ev = df[df["event"] == rule.event]
+    ev = _occurrences(df, keys, rule.event, rule.occurrence)
     hits: list[np.ndarray] = []
 
     if rule.min_age is not None:
@@ -55,17 +80,17 @@ def _check_one(df: pd.DataFrame, keys: list[str], rule: Rule) -> pd.DataFrame:
         gap = ordered["age"] - ordered.groupby(keys, observed=True)["age"].shift(1)
         hits.append(ordered.index[gap.notna() & (gap < rule.min_spacing)].to_numpy())
     if rule.not_after is not None and len(ev):
-        first_after = df[df["event"] == rule.not_after].groupby(keys, observed=True)["age"].min()
+        anchor = _anchor_age(df, keys, rule.not_after, rule.not_after_occurrence)
         # carry the original df index through the join so we flag the right rows
         merged = ev.reset_index(names="_idx").merge(
-            first_after.rename("_after").reset_index(), on=keys, how="inner"
+            anchor.rename("_after").reset_index(), on=keys, how="inner"
         )
         hits.append(merged.loc[merged["age"] > merged["_after"], "_idx"].to_numpy())
     if rule.not_before is not None and len(ev):
-        first_before = df[df["event"] == rule.not_before].groupby(keys, observed=True)["age"].min()
+        anchor = _anchor_age(df, keys, rule.not_before, rule.not_before_occurrence)
         # left join: an absent anchor leaves _before NaN, which is itself a violation
         merged = ev.reset_index(names="_idx").merge(
-            first_before.rename("_before").reset_index(), on=keys, how="left"
+            anchor.rename("_before").reset_index(), on=keys, how="left"
         )
         early = merged["_before"].isna() | (merged["age"] < merged["_before"])
         hits.append(merged.loc[early, "_idx"].to_numpy())

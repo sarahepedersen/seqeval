@@ -161,10 +161,11 @@ def test_resolve_rules_not_before_maps_to_raw_token():
     assert rule.not_after is None
 
 
-def test_unknown_not_before_alias_rejected():
+def test_unknown_not_before_reference_rejected():
+    """An anchor may be an alias or an outcome, so the error enumerates both."""
     d = _ref_dict()
     d["arms"]["forecasting"]["illegal_moves"].append({"event": "birth", "not_before": "wedding"})
-    with pytest.raises(ValidationError, match="unknown event alias"):
+    with pytest.raises(ValidationError, match="unknown reference"):
         C.Config.model_validate(d)
 
 
@@ -355,3 +356,72 @@ def test_fertility_grid_falls_back_when_descriptives_says_nothing():
     d["arms"]["descriptives"]["fertility"] = {"ccf": True, "asfr": ["cohort"]}
     grid = C.resolve_fertility_grid(C.Config.model_validate(d))
     assert grid.max_parity == C.FertilityGrid().max_parity
+
+
+# =================================================================================================
+# illegal moves keyed on outcomes
+# =================================================================================================
+def _rule_named(cfg, name):
+    return next(r for r in C.resolve_rules(cfg) if r.name == name)
+
+
+def test_an_outcome_keyed_rule_pins_the_occurrence():
+    d = _ref_dict()
+    d["arms"]["forecasting"]["illegal_moves"].append(
+        {"outcome": "second_birth", "not_before": "first_birth", "name": "out_of_order"}
+    )
+    rule = _rule_named(C.Config.model_validate(d), "out_of_order")
+    assert rule.occurrence == 2  # the subject is the 2nd birth, not every birth
+    assert rule.not_before_occurrence == 1  # anchored on the 1st
+
+
+def test_an_event_keyed_rule_still_means_every_occurrence():
+    """The existing form is unchanged: no occurrence, and an alias anchor means the first one."""
+    d = _ref_dict()
+    d["arms"]["forecasting"]["illegal_moves"].append(
+        {"event": "birth", "not_before": "birth", "name": "token_form"}
+    )
+    rule = _rule_named(C.Config.model_validate(d), "token_form")
+    assert rule.occurrence is None
+    assert rule.not_before_occurrence == 1
+
+
+def test_an_outcome_anchor_carries_its_own_ordinal():
+    d = _ref_dict()
+    d["arms"]["forecasting"]["illegal_moves"].append(
+        {"event": "birth", "not_before": "second_birth", "name": "anchored_on_second"}
+    )
+    rule = _rule_named(C.Config.model_validate(d), "anchored_on_second")
+    assert rule.not_before_occurrence == 2
+
+
+def test_a_rule_needs_exactly_one_subject():
+    d = _ref_dict()
+    d["arms"]["forecasting"]["illegal_moves"].append({"max_age": 45})
+    with pytest.raises(ValidationError, match="exactly one of"):
+        C.Config.model_validate(d)
+
+    d = _ref_dict()
+    d["arms"]["forecasting"]["illegal_moves"].append(
+        {"event": "birth", "outcome": "first_birth", "max_age": 45}
+    )
+    with pytest.raises(ValidationError, match="exactly one of"):
+        C.Config.model_validate(d)
+
+
+def test_stream_wide_fields_need_an_event_not_an_outcome():
+    """`min_spacing`/`max_count` count across occurrences, so pinning one makes them meaningless."""
+    for field, value in (("min_spacing", 0.6), ("max_count", 3)):
+        d = _ref_dict()
+        d["arms"]["forecasting"]["illegal_moves"].append(
+            {"outcome": "first_birth", field: value}
+        )
+        with pytest.raises(ValidationError, match="needs `event`"):
+            C.Config.model_validate(d)
+
+
+def test_unknown_outcome_subject_rejected():
+    d = _ref_dict()
+    d["arms"]["forecasting"]["illegal_moves"].append({"outcome": "first_divorce"})
+    with pytest.raises(ValidationError, match="unknown outcome"):
+        C.Config.model_validate(d)

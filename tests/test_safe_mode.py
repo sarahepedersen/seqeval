@@ -18,8 +18,8 @@ from seqeval import cli
 
 _PER_PERSON_TABLES = [
     "backtesting/probabilities.parquet",
-    "forecasting/replicate_variance_individual.parquet",
-    "forecasting/replicate_occurrence.parquet",
+    "forecasting/replicate_variance_individual_first_birth.parquet",
+    "forecasting/replicate_occurrence_first_birth.parquet",
     "forecasting/violations.parquet",
 ]
 
@@ -29,8 +29,8 @@ _AGGREGATE_SUBSTITUTES = [
     "backtesting/calibration.parquet",
     "backtesting/coverage.parquet",
     "backtesting/scores.parquet",
-    "forecasting/replicate_variance_aggregate.parquet",
-    "forecasting/within_seed_variance_distribution.parquet",
+    "forecasting/replicate_variance_aggregate_first_birth.parquet",
+    "forecasting/within_seed_variance_distribution_first_birth.parquet",
     "forecasting/violation_rates.parquet",
 ]
 
@@ -84,7 +84,11 @@ def test_manifest_names_what_was_withheld(restricted_run):
     manifest = json.loads((restricted_run / "manifest.json").read_text())
     assert manifest["config_resolved"]["output"]["individual_level"] is False
     withheld = {n for arm in manifest["arms"].values() for n in arm["withheld"]}
-    assert {"probabilities", "replicate_variance_individual", "violations"} <= withheld
+    assert {
+        "probabilities",
+        "replicate_variance_individual_first_birth",
+        "violations",
+    } <= withheld
 
 
 def test_report_states_the_policy_and_still_renders_every_arm(restricted_run):

@@ -119,3 +119,65 @@ def test_violation_rates_by_seed():
     rates = P.violation_rates(v, df, ["person_id", "seed"], by=("seed",)).set_index("seed")
     assert rates.loc[0, "n_violations"] == 2  # both persons' seed-0 births at age 11
     assert rates.loc[1, "n_violations"] == 0  # seed-1 births at age 30 are clean
+
+
+# =================================================================================================
+# occurrence-scoped rules: the difference between a token and an outcome
+# =================================================================================================
+def test_occurrence_narrows_the_subject_to_one_ordinal():
+    """`event: birth` constrains every birth; `outcome: second_birth` constrains only the second."""
+    df = _frame([(1, "birth", 20), (1, "birth", 22), (1, "birth", 24)])
+    every = P.check_rules(df, KEYS, [Rule("all", "birth", min_age=yd(23))])
+    assert sorted(every["age"]) == [yd(20), yd(22)]
+
+    second = P.check_rules(df, KEYS, [Rule("second", "birth", occurrence=2, min_age=yd(23))])
+    assert list(second["age"]) == [yd(22)]  # the first birth at 20 is not this rule's business
+
+
+def test_a_divorce_before_the_first_marriage_is_flagged():
+    """The motivating case, keyed on outcomes rather than raw tokens."""
+    df = _frame(
+        [
+            (1, "marriage", 25), (1, "divorce", 30),   # fine
+            (2, "divorce", 24), (2, "marriage", 28),   # divorced before marrying
+            (3, "divorce", 31),                        # divorced, never married
+        ]
+    )
+    rule = Rule("divorce_before_marriage", "divorce", occurrence=1, not_before="marriage")
+    v = P.check_rules(df, KEYS, [rule])
+    assert sorted(v["person_id"]) == [2, 3]
+
+
+def test_the_anchor_occurrence_moves_the_line():
+    """Second marriage as the anchor: a divorce between the two marriages is now early."""
+    df = _frame([(1, "marriage", 25), (1, "divorce", 30), (1, "marriage", 35)])
+
+    first_anchor = Rule("vs_first", "divorce", occurrence=1, not_before="marriage")
+    assert P.check_rules(df, KEYS, [first_anchor]).empty  # 30 is after the first marriage at 25
+
+    second_anchor = Rule(
+        "vs_second", "divorce", occurrence=1, not_before="marriage", not_before_occurrence=2
+    )
+    assert list(P.check_rules(df, KEYS, [second_anchor])["person_id"]) == [1]
+
+
+def test_a_missing_anchor_occurrence_is_itself_a_violation():
+    """`not_before` treats an anchor that never happens as early — including a missing 2nd one."""
+    df = _frame([(1, "marriage", 25), (1, "divorce", 30)])
+    rule = Rule(
+        "needs_two", "divorce", occurrence=1, not_before="marriage", not_before_occurrence=2
+    )
+    assert list(P.check_rules(df, KEYS, [rule])["person_id"]) == [1]
+
+
+def test_not_after_leaves_groups_without_the_anchor_alone():
+    """The asymmetry survives occurrence scoping: no anchor, no `not_after` violation."""
+    df = _frame([(1, "birth", 30), (2, "death", 28), (2, "birth", 30)])
+    rule = Rule("birth_after_death", "birth", occurrence=1, not_after="death")
+    assert list(P.check_rules(df, KEYS, [rule])["person_id"]) == [2]
+
+
+def test_occurrence_ordering_is_by_age_not_row_order():
+    df = _frame([(1, "birth", 24), (1, "birth", 20)])  # rows out of order on purpose
+    rule = Rule("second", "birth", occurrence=2, min_age=yd(23))
+    assert P.check_rules(df, KEYS, [rule]).empty  # the 2nd birth is the one at 24

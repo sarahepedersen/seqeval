@@ -26,7 +26,7 @@ from typing import Literal
 
 import pandas as pd
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from seqeval.core.specs import (
     Condition,
@@ -289,9 +289,24 @@ class BacktestingConfig(_Strict):
 
 
 class RuleConfig(_Strict):
-    """An ``illegal_moves:`` entry (years) — a declarative illegal/implausible pattern."""
+    """An ``illegal_moves:`` entry (years) — a declarative illegal/implausible pattern.
 
-    event: str
+    The subject is either an ``event`` alias — every occurrence of that token — or an ``outcome``
+    name from the top-level registry, which pins one ordinal occurrence. Exactly one of the two.
+    ``not_after``/``not_before`` take either kind: an alias anchors on the token's *first*
+    occurrence, an outcome name on the occurrence that outcome names. So::
+
+        - {event: birth, max_age: 45}                          # no birth after 45, ever
+        - {outcome: first_divorce, not_before: first_marriage}  # and not with no marriage at all
+        - {outcome: second_birth, not_before: first_marriage}   # the first birth is left alone
+
+    An outcome's ``origin`` is ignored here: a rule is about the absolute ordering of occurrences,
+    not about a duration measured from something else. ``min_spacing`` and ``max_count`` describe
+    the whole stream, so they need ``event``, not ``outcome``.
+    """
+
+    event: str | None = None
+    outcome: str | None = None
     name: str | None = None
     min_age: float | None = None
     max_age: float | None = None
@@ -300,6 +315,19 @@ class RuleConfig(_Strict):
     not_before: str | None = None
     max_count: int | None = None
     severity: Literal["illegal", "warn"] = "illegal"
+
+    @model_validator(mode="after")
+    def _exactly_one_subject(self) -> RuleConfig:
+        if (self.event is None) == (self.outcome is None):
+            raise ValueError("set exactly one of `event` or `outcome`")
+        if self.outcome is not None:
+            for field in ("min_spacing", "max_count"):
+                if getattr(self, field) is not None:
+                    raise ValueError(
+                        f"`{field}` counts across every occurrence, so it needs `event`, "
+                        f"not `outcome`"
+                    )
+        return self
 
 
 class LexisConfig(_Strict):
@@ -312,11 +340,24 @@ class LexisConfig(_Strict):
 
 
 class ReplicateVarianceConfig(_Strict):
-    """``forecasting.replicate_variance`` block."""
+    """One ``forecasting.replicate_variance`` block.
+
+    ``event`` is the event alias the *within-seed spread* counts — how much one person's replicates
+    disagree about how many times it happens. It defaults to the target event of the `lexis` outcome
+    (births, in a fertility run), and set it to any other alias to ask the same question of that
+    event. ``aggregate`` is unaffected: the CCF roll-up is about births by definition, so a
+    non-birth block should leave it empty.
+
+    ``name`` distinguishes this block's outputs on disk — every stem it writes ends in
+    ``_<name>``. Left unset it falls back to ``event``, then to the `lexis` outcome, so a
+    single-block config needs nothing. Two blocks must resolve to different names.
+    """
 
     individual: bool = False
     aggregate: list[str] = []
     subgroup_by: list[str] = []
+    event: str | None = None
+    name: str | None = None
 
 
 class ForecastingConfig(_Strict):
@@ -325,7 +366,39 @@ class ForecastingConfig(_Strict):
     windows: Literal["all"] | list[WindowConfig] = "all"
     lexis: LexisConfig | None = None
     illegal_moves: list[RuleConfig] = []
-    replicate_variance: ReplicateVarianceConfig | None = None
+    replicate_variance: list[ReplicateVarianceConfig] = []
+
+    @field_validator("replicate_variance", mode="before")
+    @classmethod
+    def _accept_a_single_block(cls, v):
+        """Wrap a lone mapping into a one-element list; ``None`` means the feature is off."""
+        if v is None:
+            return []
+        return [v] if isinstance(v, dict | ReplicateVarianceConfig) else v
+
+    @model_validator(mode="after")
+    def _name_the_replicate_variance_blocks(self) -> ForecastingConfig:
+        """Fill in each block's output name and require the names to be distinct.
+
+        Resolved here rather than in the arm because uniqueness is a config error, and the fallback
+        chain reaches the sibling ``lexis`` block — both of which only the parent can see.
+        """
+        for block in self.replicate_variance:
+            if block.name is None:
+                block.name = block.event or (self.lexis.outcome if self.lexis else None)
+            if block.name is None:
+                raise ValueError(
+                    "arms.forecasting.replicate_variance: cannot name this block's outputs — "
+                    "set `name`, or `event`, or configure a `lexis` block to inherit from"
+                )
+        names = [b.name for b in self.replicate_variance]
+        duplicates = {n for n in names if names.count(n) > 1}
+        if duplicates:
+            raise ValueError(
+                "arms.forecasting.replicate_variance: blocks would overwrite each other's output; "
+                f"set a distinct `name` for {sorted(duplicates)}"
+            )
+        return self
 
 
 class ArmsConfig(_Strict):
@@ -488,12 +561,34 @@ class Config(_Strict):
         fc = self.arms.forecasting
         if fc is None:
             return
+
+        def _check_ref(ref: str, where: str, *, allow_outcome: bool = True) -> None:
+            """A rule reference is an event alias or (where allowed) an outcome-registry name."""
+            if allow_outcome and ref in self.outcomes:
+                return
+            if ref in self.events:
+                return
+            known = ", ".join(sorted(self.events.keys())) or "(none)"
+            outcomes = ", ".join(outcome_names) or "(none)"
+            raise ValueError(
+                f"{where}: unknown reference {ref!r}; declared event aliases are: {known}"
+                + (f"; declared outcomes are: {outcomes}" if allow_outcome else "")
+            )
+
         for i, rule in enumerate(fc.illegal_moves):
-            _check_alias(rule.event, f"arms.forecasting.illegal_moves[{i}].event")
+            at = f"arms.forecasting.illegal_moves[{i}]"
+            if rule.outcome is not None:
+                if rule.outcome not in self.outcomes:
+                    raise ValueError(
+                        f"{at}.outcome: unknown outcome {rule.outcome!r}; declared outcomes "
+                        f"are: {', '.join(outcome_names) or '(none)'}"
+                    )
+            else:
+                _check_alias(rule.event, f"{at}.event")
             if rule.not_after is not None:
-                _check_alias(rule.not_after, f"arms.forecasting.illegal_moves[{i}].not_after")
+                _check_ref(rule.not_after, f"{at}.not_after")
             if rule.not_before is not None:
-                _check_alias(rule.not_before, f"arms.forecasting.illegal_moves[{i}].not_before")
+                _check_ref(rule.not_before, f"{at}.not_before")
         if fc.lexis is not None:
             if fc.lexis.outcome not in self.outcomes:
                 raise ValueError(
@@ -501,14 +596,13 @@ class Config(_Strict):
                     f"declared outcomes are: {', '.join(outcome_names) or '(none)'}"
                 )
             self._check_stratifiers(fc.lexis.subgroup_by, "arms.forecasting.lexis.subgroup_by")
-        if fc.replicate_variance is not None:
-            for i, tgt in enumerate(fc.replicate_variance.aggregate):
-                self._check_aggregate_target(
-                    tgt, outcome_names, f"arms.forecasting.replicate_variance.aggregate[{i}]"
-                )
-            self._check_stratifiers(
-                fc.replicate_variance.subgroup_by, "arms.forecasting.replicate_variance.subgroup_by"
-            )
+        for i, rv in enumerate(fc.replicate_variance):
+            at = f"arms.forecasting.replicate_variance[{i}]"
+            if rv.event is not None:
+                _check_alias(rv.event, f"{at}.event")
+            for j, tgt in enumerate(rv.aggregate):
+                self._check_aggregate_target(tgt, outcome_names, f"{at}.aggregate[{j}]")
+            self._check_stratifiers(rv.subgroup_by, f"{at}.subgroup_by")
         # descriptives stratifiers (validated here too, after covariates are known).
         if self.arms.descriptives is not None:
             self._check_stratifiers(
@@ -635,21 +729,38 @@ def _fmt_years(y: float) -> str:
 
 
 def resolve_rules(cfg: Config) -> list[Rule]:
-    """Resolve ``arms.forecasting.illegal_moves`` to day-valued :class:`Rule` objects."""
+    """Resolve ``arms.forecasting.illegal_moves`` to day-valued, raw-token :class:`Rule` objects.
+    """
     fc = cfg.arms.forecasting
     if fc is None:
         return []
+
+    def token_and_occurrence(ref: str) -> tuple[object, int | None]:
+        """``(token, occurrence)`` for an outcome name; ``(token, None)`` for an event alias."""
+        if ref in cfg.outcomes:
+            oc = cfg.outcomes[ref]
+            return cfg.events[oc.event], oc.n
+        return cfg.events[ref], None
+
     rules: list[Rule] = []
     for i, rc in enumerate(fc.illegal_moves):
+        subject_ref = rc.outcome if rc.outcome is not None else rc.event
+        event, occurrence = token_and_occurrence(subject_ref)
+        after = token_and_occurrence(rc.not_after) if rc.not_after is not None else None
+        before = token_and_occurrence(rc.not_before) if rc.not_before is not None else None
         rules.append(
             Rule(
-                name=rc.name or f"{rc.event}_rule_{i}",
-                event=cfg.events[rc.event],
+                name=rc.name or f"{subject_ref}_rule_{i}",
+                event=event,
+                occurrence=occurrence,
                 min_age=years_to_days(rc.min_age) if rc.min_age is not None else None,
                 max_age=years_to_days(rc.max_age) if rc.max_age is not None else None,
                 min_spacing=years_to_days(rc.min_spacing) if rc.min_spacing is not None else None,
-                not_after=cfg.events[rc.not_after] if rc.not_after is not None else None,
-                not_before=cfg.events[rc.not_before] if rc.not_before is not None else None,
+                not_after=after[0] if after is not None else None,
+                not_before=before[0] if before is not None else None,
+                # An alias anchor has no ordinal of its own, so it means the first occurrence.
+                not_after_occurrence=(after[1] or 1) if after is not None else 1,
+                not_before_occurrence=(before[1] or 1) if before is not None else 1,
                 max_count=rc.max_count,
                 severity=rc.severity,
             )
