@@ -105,6 +105,17 @@ interval, which is a closed form in the same Greenwood sum as the variance. Poin
 so curves keep their shape; withheld cells are hatched in figures rather than drawn as zero, and
 every governed table carries a `suppressed` column. `min_cell: 0` disables suppression.
 
+### Tables without figures
+
+```yaml
+output:
+  figures: false   # default true — write the parquets only, no figure files
+```
+
+A tables-only run still writes `manifest.json` and `report.html`; the report is then tables alone,
+since it embeds the figures it finds on disk. Nothing is lost — `seqeval report --redraw <dir>`
+rebuilds every figure from the parquets and writes the report again.
+
 Other example scripts:
 
 ```bash

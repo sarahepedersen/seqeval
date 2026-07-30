@@ -125,5 +125,33 @@ def test_report_subcommand_rebuilds(demo_config, tmp_path):
     assert (results / report.REPORT_NAME).exists()
 
 
+def test_figures_false_writes_tables_only(demo_config, tmp_path):
+    """``output.figures: false`` writes every parquet and no figure; --redraw restores them."""
+    cfg = yaml.safe_load(demo_config.read_text())
+    cfg["output"]["figures"] = False
+    demo_config.write_text(yaml.safe_dump(cfg))
+
+    results = tmp_path / "results"
+    assert cli.main(["run", str(demo_config), "--out", str(results)]) == 0
+
+    assert not list(results.rglob("*.png"))
+    for arm, meta in _manifest(results)["arms"].items():
+        assert meta["status"] == "ok", arm
+        outputs = meta["outputs"]
+        assert outputs, f"{arm} wrote nothing"
+        assert all(rel.endswith(".parquet") for rel in outputs), outputs
+    assert (results / report.REPORT_NAME).exists()
+
+    # the parquets are the source of truth: the figures come back from them
+    assert cli.main(["report", str(results), "--redraw"]) == 0
+    assert list(results.rglob("*.png"))
+
+
+def test_figures_default_on(demo_config, tmp_path):
+    results = tmp_path / "results"
+    assert cli.main(["run", str(demo_config), "--out", str(results)]) == 0
+    assert list(results.rglob("*.png"))
+
+
 def test_report_subcommand_rejects_non_dir(tmp_path):
     assert cli.main(["report", str(tmp_path / "missing")]) == 2

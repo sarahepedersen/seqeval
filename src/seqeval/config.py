@@ -417,6 +417,10 @@ class OutputConfig(_Strict):
     so they are opt-in. Setting it true writes them (``probabilities``, ``violations``,
     ``replicate_variance_individual``, ``replicate_occurrence``) alongside the aggregates.
 
+    ``figures`` defaults to true. Setting it false makes the run write parquets only — no figure
+    files at all — which is the fast path when the tables are what you want. It costs nothing
+    permanent: ``seqeval report --redraw`` rebuilds the figures from those parquets later.
+
     ``min_cell`` is the largest cell size still withheld: a cell resting on ``1..min_cell`` people
     *or events* is suppressed, a true zero is published. It guards counts of both kinds, plus the
     columns that invert to a count — raw variances and count-derived rates — per
@@ -425,6 +429,7 @@ class OutputConfig(_Strict):
 
     dir: str = "results/"
     figure_format: str = "png"
+    figures: bool = True
     individual_level: bool = False
     min_cell: int = Field(default=MIN_CELL, ge=0)
 

@@ -73,7 +73,9 @@ def main() -> None:
         if getattr(cfg.arms, name) is None:
             log.info("arm %s not configured — skipped", name)
             return
-        writer = OutputWriter(base_dir=out_dir, arm=name, model=model, figure_format=fmt)
+        writer = OutputWriter(
+            base_dir=out_dir, arm=name, model=model, figure_format=fmt, figures=cfg.output.figures
+        )
         try:
             fn(writer)
             written.extend(writer.written)

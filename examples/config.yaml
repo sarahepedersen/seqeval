@@ -96,6 +96,8 @@ arms:
 output:
   dir: results/
   figure_format: png
+  figures: true                  # false writes the parquets only, no figure files;
+                                 # `seqeval report --redraw` rebuilds them from those parquets
   individual_level: false        # remove individual-level output
   min_cell: 3                    # minimum number of observations in a cell required to report
                                  # min_cell: 0 disables suppression.

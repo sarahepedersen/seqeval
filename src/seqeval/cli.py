@@ -199,6 +199,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 arm=name,
                 model=cfg.model.name,
                 figure_format=cfg.output.figure_format,
+                figures=cfg.output.figures,
                 individual_level=cfg.output.individual_level,
                 min_cell=cfg.output.min_cell,
             )

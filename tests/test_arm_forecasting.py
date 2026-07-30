@@ -452,10 +452,10 @@ def test_ordering_rules_see_what_already_happened(tmp_path):
     fine. Screened on the generated rows alone, `not_before` finds no marriage and, since an absent
     anchor is itself a violation, condemns every trajectory.
     """
+    from seqeval.arms._common import combine_prefix
     from seqeval.core.specs import Rule
     from seqeval.io.schema import GEN_KEYS
     from seqeval.metrics import plausibility as pl
-    from seqeval.arms._common import combine_prefix
 
     rng = np.random.default_rng(0)
     n, seeds, t2 = 60, 3, yd(30)
@@ -485,10 +485,10 @@ def test_ordering_rules_see_what_already_happened(tmp_path):
 
 def test_a_violation_in_the_prefix_is_not_reported_as_the_model_s(tmp_path):
     """It belongs to the observed data, and would otherwise be repeated once per seed."""
+    from seqeval.arms._common import combine_prefix
     from seqeval.core.specs import Rule
     from seqeval.io.schema import GEN_KEYS
     from seqeval.metrics import plausibility as pl
-    from seqeval.arms._common import combine_prefix
 
     t2 = yd(30)
     observed = pd.DataFrame({"person_id": [1], "event": ["birth"], "age": [yd(12)]})  # too young

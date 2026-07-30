@@ -80,6 +80,7 @@ def redraw(results_dir: str | Path, *, event_definitions: str | Path | None = No
             arm=arm,
             model=cfg.model.name,
             figure_format=cfg.output.figure_format,
+            figures=True,  # drawing is the point here, whatever the run's output.figures was
             individual_level=True,  # nothing drawn here is per-person
             min_cell=cfg.output.min_cell,
         )

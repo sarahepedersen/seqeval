@@ -89,6 +89,8 @@ class OutputWriter:
     arm: str
     model: str
     figure_format: str = "png"
+    # `figures=False` writes tables only: `figure()` closes what it is handed and saves nothing.
+    figures: bool = True
     # Both default to the restrictive setting, matching `OutputConfig`: a writer built without an
     # explicit policy withholds per-person output and suppresses thin cells.
     individual_level: bool = False
@@ -124,9 +126,18 @@ class OutputWriter:
         return path
 
     def figure(self, name: str, fig: Figure, *, individual: bool = False) -> Path | None:
-        """Save a matplotlib ``fig`` as ``<name>.<figure_format>``; close it; record and return."""
+        """Save a matplotlib ``fig`` as ``<name>.<figure_format>``; close it; record and return.
+
+        Returns ``None`` and saves nothing on a tables-only run (``figures=False``); the figure is
+        still closed. Such a run stays redrawable — ``seqeval report --redraw`` rebuilds every
+        figure from the parquets.
+        """
         if self._withheld(name, individual):
             plt.close(fig)  # the figure was built before we knew; do not leak it
+            return None
+        if not self.figures:
+            plt.close(fig)  # ditto: built before we get here, so close it rather than leak it
+            logger.debug("%s: %s not saved — output.figures is false", self.arm, name)
             return None
         path = self.dir / f"{name}.{self.figure_format}"
         fig.savefig(path, bbox_inches="tight")
