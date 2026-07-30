@@ -173,7 +173,9 @@ def _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width, lev
         f"{prefix}_combined", _combine_surfaces(obs_surface, fc_pooled, dim, subgroup)
     )
 
-    out.frame(f"{prefix}_observed", obs_surface)
+    # `_observed` is not written on its own: its cells reach the reader inside `_combined`, tagged
+    # `source == "observed"`, and that is the surface the figure draws. It is still computed — and
+    # still suppressed above — because `_combine_surfaces` is built from it.
     out.frame(f"{prefix}_forecast", fc_by_seed)
     out.frame(f"{prefix}_pooled", fc_pooled)
     out.frame(f"{prefix}_combined", combined)

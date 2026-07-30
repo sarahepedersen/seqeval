@@ -52,11 +52,11 @@ def ccf(births, spans, persons, *, by_cohort=True, extra_by=()) -> pd.DataFrame
     # spans end before fertile_ages upper bound (so callers can distinguish true CCF from
     # truncated means — important when the same function runs on censored/backtest data).
 
-def asfr(births, spans, persons, *, mode: Literal["period", "cohort"], bins: AgeBins,
-         extra_by=()) -> pd.DataFrame
+def asfr(births, spans, persons, *, bins: AgeBins, extra_by=()) -> pd.DataFrame
     # births in cell / person-years in cell (person_days / DAYS_PER_YEAR at the rate step).
-    # period: cells are (calendar_year, age_bin); cohort: (birth_cohort, age_bin).
-    # Uses core.outcomes.exposure(by_year=mode=="period").
+    # Cells are (birth_cohort, age_bin). Cohort only: a (calendar_year, age_bin) cell straddles
+    # the jump-off, part observed and part forecast, so nothing can be read against it. The
+    # calendar-time view that handles the split explicitly is lexis_surface (05).
 
 def ppr(births, spans, *, max_parity: int, extra_by=(),
         min_exposure_after_k: int | None = None) -> pd.DataFrame
@@ -65,10 +65,6 @@ def ppr(births, spans, *, max_parity: int, extra_by=(),
     # min_exposure_after_k is in DAYS (resolved from a year-valued config knob if exposed);
     # document the default choice in the docstring.
     # Returns [*extra_by, parity_from, parity_to, n_at_risk, n_progressed, ppr]
-
-def tfr(asfr_period: pd.DataFrame) -> pd.DataFrame
-    # period total fertility rate = sum of period ASFRs over age bins; cheap and useful for
-    # eyeballing against Human Fertility Database values.
 ```
 
 `extra_by` is how 04/05 reuse these with `seed`/window keys — verify each function works when
@@ -90,8 +86,8 @@ descriptives:
   kaplan_meier: [first_birth, second_birth]
   fertility:
     ccf: true
-    asfr: [period, cohort]        # age_bin_width: 1 (years) by default
-    ppr: {max_parity: 4}
+    asfr: [cohort]                # age_bin_width: 1 (years) by default
+    ppr: {max_parity: 4}          # the parity grid; shared with the backtesting PPR target
   life_table: {max_parity: 4}
   stratify_by: [cohort]           # cohort | sex | declared covariates (validated in 01)
 ```

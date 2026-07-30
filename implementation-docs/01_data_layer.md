@@ -139,7 +139,7 @@ Parse-time cross-reference validation (pydantic model validators):
 - every event alias used anywhere (`outcomes`, `conditions`, count queries, `illegal_moves`)
   exists in `events`.
 - every `outcome:` reference and `km:<name>` aggregate target names a declared registry entry;
-  `aggregate_targets` validated against `{ccf, asfr_period, asfr_cohort, ppr}` ∪ `km:*`.
+  `aggregate_targets` validated against `{ccf, asfr_cohort, ppr}` ∪ `km:*`.
 - every `given:` names a declared condition; condition names unique.
 - `within_origin` only on framed references whose registry outcome declares an `origin`.
 - `stratify_by`/`subgroup_by` ⊆ `{cohort, sex}` ∪ `persons.covariates`.

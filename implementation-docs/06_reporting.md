@@ -103,6 +103,31 @@ Two conventions hold throughout the body:
   analytically from those per-individual variances) or `"trajectories"` (individual trajectories
   across seeds, no within-individual bottom-up averaging).
 
+## 3a. Every written parquet backs something in the report
+
+An arm writes a parquet only if the report shows it, one of four ways:
+
+1. **Figure source** — `_figure_source` resolves the figure's own stem, else `_FIGURE_SOURCES`. The
+   parquet is linked under the figure with a peek at its first rows.
+2. **Inline table** — `scores` and `coverage` are pivoted into the backtest-metrics table, so they
+   carry no file link but every number in them is on the page.
+3. **Prose reference** — a caption names the table a panel was built from: `p_hat_distribution`
+   (the reliability histogram), `lexis_cohort_pooled` and `lexis_cohort_forecast`.
+4. **Per-seed companion** — `*_by_seed` and `lexis_cohort_forecast` are the K separate seed surfaces
+   behind a pooled estimate that *is* drawn. Kept deliberately: the pooled interval is optimistic
+   (see `pooling.py`), and the per-seed frames are what a reader needs to correct it.
+
+Two consequences worth keeping:
+
+- A figure stem in `_GENERATED_AGGREGATE_TABLES` / `_GENERATED_PERSON_TABLES` must match what the arm
+  actually writes. `p.exists()` fails silently, so a typo removes a table and its caption with no
+  error — this is exactly how the illegal-moves table went missing (looked up as `illegal_moves`,
+  written as `violation_rates`).
+- `ccf_uncertainty` and `uncertainty_ccf_*` draw two panels from two tables (`ccf` /
+  `replicate_variance_aggregate` on the left, `parity_distribution` on the right) but
+  `_figure_source` returns one path, so the peek shows only the right-hand panel's table. The left
+  table is still published; it just is not linked under the figure.
+
 ## 3b. Cross-model comparison (stub — spec only, do not build in v1)
 
 Because every result table carries `model` and shares tidy schemas, a future

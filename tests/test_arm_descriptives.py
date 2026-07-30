@@ -41,7 +41,7 @@ def _bundle(with_persons=True):
 def _full_cfg():
     return DescriptivesConfig(
         kaplan_meier=["first_birth", "second_birth"],
-        fertility=FertilityConfig(ccf=True, asfr=["period", "cohort"], ppr=PprConfig(max_parity=4)),
+        fertility=FertilityConfig(ccf=True, asfr=["cohort"], ppr=PprConfig(max_parity=4)),
         stratify_by=["cohort"],
     )
 
@@ -55,18 +55,16 @@ def test_arm_writes_all_files(tmp_path):
         "km_first_birth.parquet",
         "km_second_birth.parquet",
         "ccf.parquet",
-        "asfr_period.parquet",
         "asfr_cohort.parquet",
-        "ppr.parquet",
     }
     assert expected <= names
     assert {"asfr_cohort.png", "km_first_birth.png", "ccf_uncertainty.png"} <= names
-    # The plain CCF-by-cohort and PPR curves are dropped: ccf_uncertainty.png carries the same
-    # estimate, and both tables are still written.
-    assert not {"ccf.png", "ppr.png"} & names
-    # Period fertility is written but never drawn: a calendar-year cell is part observed and part
-    # forecast, so neither the year x age surface nor its TFR summary is reported.
-    assert not {"asfr_period.png", "tfr.png", "tfr.parquet"} & names
+    # The plain CCF-by-cohort curve is dropped: ccf_uncertainty.png carries the same estimate.
+    assert "ccf.png" not in names
+    # Nothing the report cannot draw is written: no observed PPR table (the backtesting overlay
+    # computes its own observed curve), and no period ASFR or TFR at all — a calendar-year cell is
+    # part observed and part forecast, so no other arm can be read against it.
+    assert not {"ppr.parquet", "asfr_period.parquet", "tfr.parquet"} & names
     for path in out.written:
         assert path.exists() and path.stat().st_size > 0
 
@@ -104,10 +102,10 @@ def test_missing_persons_skips_cohort_metrics(tmp_path, caplog):
 
     names = {p.name for p in out.written}
     # Age-only metrics still run...
-    assert {"km_first_birth.parquet", "ppr.parquet"} <= names
-    # ...cohort/period metrics are skipped.
+    assert "km_first_birth.parquet" in names
+    # ...cohort metrics are skipped.
     assert "ccf.parquet" not in names
-    assert "asfr_period.parquet" not in names
+    assert "asfr_cohort.parquet" not in names
     assert any("skipping CCF/ASFR" in r.message for r in caplog.records)
 
 
@@ -118,7 +116,7 @@ def _run_with(tmp_path, cfg, bundle=None):
 
 
 def test_max_cohort_year_excludes_later_births_everywhere(tmp_path):
-    """The people are dropped, not just their rows: period metrics shrink with the cohort ones."""
+    """The people are dropped, not just their rows: exposure shrinks with the cohort membership."""
     import pandas as pd
 
     cfg = _full_cfg()
@@ -133,9 +131,9 @@ def test_max_cohort_year_excludes_later_births_everywhere(tmp_path):
     assert ccf_full["cohort"].max() > 1970
     assert ccf_cut["n_persons"].sum() < ccf_full["n_persons"].sum()
 
-    # the period surface is computed on the same restricted population, not the full one
-    asfr_full = pd.read_parquet(full.dir / "asfr_period.parquet")
-    asfr_cut = pd.read_parquet(cut.dir / "asfr_period.parquet")
+    # the age surface is computed on the same restricted population, not the full one
+    asfr_full = pd.read_parquet(full.dir / "asfr_cohort.parquet")
+    asfr_cut = pd.read_parquet(cut.dir / "asfr_cohort.parquet")
     assert asfr_cut["person_years"].sum() < asfr_full["person_years"].sum()
 
 

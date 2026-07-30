@@ -66,7 +66,6 @@ def test_arm_writes_all_tables_and_figures(tmp_path):
     out = _run(tmp_path)
     names = {p.name for p in out.written}
     assert {
-        "lexis_cohort_observed.parquet",
         "lexis_cohort_forecast.parquet",
         "lexis_cohort_pooled.parquet",
         "lexis_cohort_combined.parquet",

@@ -36,7 +36,7 @@ outcomes:
 arms:
   descriptives:
     kaplan_meier: [first_birth, second_birth]
-    fertility: {ccf: true, asfr: [period, cohort], ppr: {max_parity: 6}}
+    fertility: {ccf: true, asfr: [cohort], ppr: {max_parity: 6}}
     stratify_by: [cohort]
   backtesting:
     windows: all

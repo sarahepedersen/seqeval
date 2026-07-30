@@ -546,7 +546,7 @@ def _score_aggregate_target(
         )
         bins = AgeBins.from_years(*_FERTILE, fertility_grid.age_bin_width)
         pooled = fe.asfr(
-            pooled_births, pooled_spans, persons_pooled, mode="cohort", bins=bins,
+            pooled_births, pooled_spans, persons_pooled, bins=bins,
             extra_by=_POOLED_BY, cohort_width=cohort_width,
         )
         pooled = pooling.attach_pooled_ci(
@@ -719,20 +719,16 @@ def _aggregate_tables(
         obs = fe.ccf(obs_births, spans_obs, persons, by_cohort=True, cohort_width=cohort_width)
         return gen, obs, "ccf", ["cohort"]
     if target == "asfr_cohort":
-        # Cohort only: the jump-off is an age, so a (cohort, age) cell is wholly forecast or wholly
-        # replayed. A (year, age) cell is neither — the generated side has no calendar years before
-        # the earliest cohort reaches the jump-off, so the two sides cannot be aligned.
         gen = fe.asfr(
             gen_births,
             gen_spans,
             persons,
-            mode="cohort",
             bins=bins,
             extra_by=_EXTRA_BY,
             cohort_width=cohort_width,
         )
         obs = fe.asfr(
-            obs_births, spans_obs, persons, mode="cohort", bins=bins, cohort_width=cohort_width
+            obs_births, spans_obs, persons, bins=bins, cohort_width=cohort_width
         )
         return gen, obs, "asfr", ["cohort", "age_bin"]
     if target == "ppr":

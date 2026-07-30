@@ -275,7 +275,7 @@ arms:
     kaplan_meier: [first_birth, second_birth]
     fertility:
       ccf: true
-      asfr: [period, cohort]             # age_bin_width: 1 (years) by default
+      asfr: [cohort]                     # age_bin_width: 1 (years) by default
       ppr: {max_parity: 6}
     life_table: {max_parity: 6}
     stratify_by: [cohort]

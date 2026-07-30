@@ -153,13 +153,11 @@ def _run_fertility(bundle: Bundle, cfg, out, births, spans, cohort_width: int) -
     fcfg = cfg.fertility
     persons = bundle.persons
 
-    if fcfg.ppr is not None:
-        out.frame("ppr", fe.ppr(births, spans, max_parity=fcfg.ppr.max_parity))
 
     if persons is None and (fcfg.ccf or fcfg.asfr):
         logger.warning(
             "descriptives: skipping CCF/ASFR — no persons file (birth_year needed for "
-            "cohort/period metrics)"
+            "cohort metrics)"
         )
         return
 
@@ -193,15 +191,13 @@ def _run_fertility(bundle: Bundle, cfg, out, births, spans, cohort_width: int) -
             ),
         )
 
-    bins = AgeBins.from_years(_FERTILE_LO_YEARS, _FERTILE_HI_YEARS, fcfg.age_bin_width)
-    for mode in fcfg.asfr:
+    if fcfg.asfr:
+        bins = AgeBins.from_years(_FERTILE_LO_YEARS, _FERTILE_HI_YEARS, fcfg.age_bin_width)
         asfr = out.suppress(
-            f"asfr_{mode}",
-            fe.asfr(births, spans, persons, mode=mode, bins=bins, cohort_width=cohort_width),
+            "asfr_cohort", fe.asfr(births, spans, persons, bins=bins, cohort_width=cohort_width)
         )
-        out.frame(f"asfr_{mode}", asfr)
-        if mode != "period":
-            # Cohort ASFR has few groups; one age-profile line per cohort stays legible.
-            out.figure("asfr_cohort", viz_fertility.plot_asfr(asfr, dim="cohort"))
+        out.frame("asfr_cohort", asfr)
+        # Cohort ASFR has few groups; one age-profile line per cohort stays legible.
+        out.figure("asfr_cohort", viz_fertility.plot_asfr(asfr, dim="cohort"))
 
 

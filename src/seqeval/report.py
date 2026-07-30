@@ -1000,7 +1000,7 @@ _GENERATED_AGGREGATE_TABLES = (
         ),
     ),
     (
-        "illegal_moves",
+        "violation_rates",
         "generated.violation_rates",
         _bullets(
             "<code>rate_per_event</code> is the share of the events that "

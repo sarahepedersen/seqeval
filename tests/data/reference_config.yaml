@@ -28,7 +28,7 @@ arms:
     kaplan_meier: [first_birth, second_birth]
     fertility:
       ccf: true
-      asfr: [period, cohort]
+      asfr: [cohort]
       ppr: {max_parity: 6}
     stratify_by: [cohort]
 

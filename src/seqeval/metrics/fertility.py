@@ -1,4 +1,4 @@
-"""Fertility metrics: CCF, ASFR (period & cohort), PPR, TFR (03).
+"""Fertility metrics: CCF, cohort ASFR, PPR, the Lexis surface (03).
 
 All operate on the day-valued births/spans tables from :mod:`seqeval.core.outcomes` plus ``persons``
 where cohort/period is involved. Every function accepts ``extra_by`` — the mechanism by which 04/05
@@ -26,7 +26,6 @@ __all__ = [
     "parity_distribution",
     "asfr",
     "ppr",
-    "tfr",
     "lexis_surface",
     "FERTILE_UPPER_YEARS",
 ]
@@ -242,16 +241,14 @@ def asfr(
     spans: pd.DataFrame,
     persons: pd.DataFrame,
     *,
-    mode: Literal["period", "cohort"],
     bins: AgeBins,
     extra_by: tuple[str, ...] = (),
     cohort_width: int = 1,
 ) -> pd.DataFrame:
-    """Age-specific fertility rate: births in a cell / person-years in the cell.
+    """Cohort age-specific fertility rate: births in a cell / person-years in the cell.
 
-    ``period`` cells are ``(year, age_bin)`` (calendar time from :func:`exposure` with
-    ``by_year=True``); ``cohort`` cells are ``(cohort, age_bin)`` with ``cohort_width``-year bands.
-    Returns ``[*extra_by, year|cohort, age_bin, births, person_years, asfr, asfr_var, n_persons]``;
+    Cells are ``(cohort, age_bin)`` with ``cohort_width``-year bands. Returns
+    ``[*extra_by, cohort, age_bin, births, person_years, asfr, asfr_var, n_persons]``;
     ``n_persons`` is the distinct people exposed in the cell.
 
     ``asfr_var`` is the sampling variance of that one cell's rate under a Poisson count of births on
@@ -261,14 +258,12 @@ def asfr(
     reported interval (see :mod:`seqeval.metrics.pooling`).
     """
     extra_by = list(extra_by)
-    dim = "year" if mode == "period" else "cohort"
+    dim = "cohort"
 
     # Exposure denominator.
-    exp = exposure(spans, bins=bins, persons=persons, by_year=(mode == "period"))
-    if mode == "cohort":
-        exp = exp.merge(
-            cohort_bins(persons, width=cohort_width).reset_index(), on="person_id", how="left"
-        )
+    exp = exposure(spans, bins=bins, persons=persons).merge(
+        cohort_bins(persons, width=cohort_width).reset_index(), on="person_id", how="left"
+    )
     person_days = (
         exp.groupby([*extra_by, dim, "age_bin"], observed=True)
         .agg(person_days=("person_days", "sum"), n_persons=("person_id", "nunique"))
@@ -278,12 +273,9 @@ def asfr(
     # Birth numerator, tagged with the same cell dimension.
     b = births.merge(persons[["person_id", "birth_year"]], on="person_id", how="left")
     b["age_bin"] = bin_ages(b["age"], bins)
-    if mode == "period":
-        b[dim] = calendar_year(b)
-    else:
-        b = b.merge(
-            cohort_bins(persons, width=cohort_width).reset_index(), on="person_id", how="left"
-        )
+    b = b.merge(
+        cohort_bins(persons, width=cohort_width).reset_index(), on="person_id", how="left"
+    )
     birth_counts = (
         b.dropna(subset=["age_bin"])
         .groupby([*extra_by, dim, "age_bin"], observed=True)
@@ -455,15 +447,3 @@ def lexis_surface(
     return out[cols].sort_values([*extra_by, dim, "age_bin"]).reset_index(drop=True)
 
 
-def tfr(asfr_period: pd.DataFrame, *, extra_by: tuple[str, ...] = ()) -> pd.DataFrame:
-    """Period total fertility rate: sum of period ASFRs over age bins (times the bin width).
-
-    Returns ``[*extra_by, year, tfr]``. The bin width (years) is inferred from the spacing of
-    ``age_bin`` labels so the sum is a proper integral of the age-specific rate; with the default
-    one-year bins this is simply the sum of the rates.
-    """
-    extra_by = list(extra_by)
-    labels = np.sort(asfr_period["age_bin"].dropna().unique())
-    width = float(np.median(np.diff(labels))) if len(labels) > 1 else 1.0
-    grouped = asfr_period.groupby([*extra_by, "year"], observed=True)["asfr"].sum() * width
-    return grouped.rename("tfr").reset_index()

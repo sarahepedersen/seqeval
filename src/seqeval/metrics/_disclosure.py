@@ -181,7 +181,6 @@ POLICIES: dict[str, Policy] = {
         also_null=("within_var", "between_var", "total_var"),
     ),
     "asfr_cohort": _ASFR,
-    "asfr_period": _ASFR,
     "asfr_by_seed": _ASFR,
     "asfr_pooled": Policy(
         trip=("births", "n_source_persons"),

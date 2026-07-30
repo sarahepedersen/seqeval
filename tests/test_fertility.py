@@ -51,7 +51,7 @@ def test_cohort_asfr_sums_to_ccf():
     obs, pers = S.simulate_cohort(5000, (1965, 1970), h, None, rng, no_event_fraction=1.0)
     births, spans = _tables(obs)
     bins = AgeBins.from_years(15, 50, 1)
-    af = FE.asfr(births, spans, pers, mode="cohort", bins=bins)
+    af = FE.asfr(births, spans, pers, bins=bins)
     ccf = FE.ccf(births, spans, pers, by_cohort=True).set_index("cohort")["ccf"]
     asfr_sum = af.groupby("cohort")["asfr"].sum()
     for cohort, s in asfr_sum.items():
@@ -76,17 +76,6 @@ def test_censoring_sets_incomplete_and_shrinks_ppr():
     assert ppr_cens.loc[2] < ppr_full.loc[2]
 
 
-def test_tfr_is_sum_of_period_asfr():
-    rng = np.random.default_rng(3)
-    obs, pers = S.simulate_cohort(2000, (1960, 1970), S.default_hazards(), None, rng)
-    births, spans = _tables(obs)
-    bins = AgeBins.from_years(15, 50, 1)
-    ap = FE.asfr(births, spans, pers, mode="period", bins=bins)
-    tfr = FE.tfr(ap).set_index("year")["tfr"]
-    manual = ap.groupby("year")["asfr"].sum()
-    assert np.allclose(tfr.to_numpy(), manual.reindex(tfr.index).to_numpy())
-
-
 def test_fertility_key_agnostic_on_generated():
     rng = np.random.default_rng(4)
     h = S.default_hazards()
@@ -100,7 +89,7 @@ def test_fertility_key_agnostic_on_generated():
     ppr = FE.ppr(gb, gs, max_parity=3, extra_by=extra)
     assert ppr.groupby(list(extra)).ngroups == 6
     bins = AgeBins.from_years(15, 50, 1)
-    af = FE.asfr(gb, gs, pers, mode="cohort", bins=bins, extra_by=extra)
+    af = FE.asfr(gb, gs, pers, bins=bins, extra_by=extra)
     assert {"seed", "age_start", "age_stop", "cohort", "age_bin"} <= set(af.columns)
 
 
@@ -268,7 +257,7 @@ def test_asfr_var_is_the_poisson_variance_of_its_own_cell():
     h = S.default_hazards()
     obs, pers = S.simulate_cohort(300, (1965, 1970), h, None, rng, no_event_fraction=1.0)
     births, spans = _tables(obs)
-    af = FE.asfr(births, spans, pers, mode="cohort", bins=AgeBins.from_years(15, 50, 1))
+    af = FE.asfr(births, spans, pers, bins=AgeBins.from_years(15, 50, 1))
     exposed = af[af["person_years"] > 0]
     np.testing.assert_allclose(
         exposed["asfr_var"], exposed["births"] / exposed["person_years"] ** 2

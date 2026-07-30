@@ -324,6 +324,17 @@ def test_period_asfr_is_not_a_backtest_target():
     assert C.Config.model_validate(d).arms.backtesting.aggregate_targets == ["asfr_cohort"]
 
 
+def test_period_asfr_is_not_a_descriptive_either():
+    """The same reason removes it from `fertility.asfr`: nothing in the report can draw it."""
+    d = _ref_dict()
+    d["arms"]["descriptives"]["fertility"]["asfr"] = ["period"]
+    with pytest.raises(ValidationError):
+        C.Config.model_validate(d)
+
+    d["arms"]["descriptives"]["fertility"]["asfr"] = ["cohort"]
+    assert C.Config.model_validate(d).arms.descriptives.fertility.asfr == ["cohort"]
+
+
 def test_fertility_grid_follows_the_descriptives_settings():
     """Backtesting bins fertility the way descriptives does, so the two figures are comparable."""
     d = _ref_dict()

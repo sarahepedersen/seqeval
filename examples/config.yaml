@@ -40,7 +40,7 @@ arms:
     kaplan_meier: [first_birth, second_birth] # define based on time-specific outcomes 
     fertility:
       ccf: true                      # completed cohort fertility (aggregated from generated sequences)
-      asfr: [period, cohort]         # age-specific fertility rates 
+      asfr: [cohort]                 # cohort age-specific fertility rates
       ppr: {max_parity: 6}           # parity progression ratios
     stratify_by: [cohort]
     # max_cohort_year: 2005          # drop people born after this from every descriptive metric —

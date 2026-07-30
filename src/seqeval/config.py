@@ -250,7 +250,7 @@ class FertilityConfig(_Strict):
     """``descriptives.fertility`` block."""
 
     ccf: bool = False
-    asfr: list[Literal["period", "cohort"]] = []
+    asfr: list[Literal["cohort"]] = []
     ppr: PprConfig | None = None
     age_bin_width: float = 1.0  # years; ASFR/exposure age-bin width
 
