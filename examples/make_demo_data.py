@@ -78,7 +78,7 @@ arms:
     lexis:
       outcome: first_birth
       ages: [15, 45]
-      years: [1960, 2035]
+      years: [1960, 2050]
       subgroup_by: []
     illegal_moves:
       - {event: birth, max_age: 45}
@@ -101,6 +101,13 @@ def main() -> None:
     parser.add_argument("--n", type=int, default=500, help="number of persons")
     parser.add_argument("--seeds", type=int, default=5, help="replicates per (person, window)")
     parser.add_argument("--rng", type=int, default=0, help="RNG seed")
+    parser.add_argument(
+        "--observation-year",
+        type=int,
+        default=2025,
+        help="calendar year the observed data stop; younger cohorts are left unfinished so the "
+        "forecasting arm predicts a real future (pass 0 for fully observed cohorts)",
+    )
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -108,9 +115,24 @@ def main() -> None:
     rng = np.random.default_rng(args.rng)
 
     hazards = S.default_hazards()
-    observed, persons = S.simulate_cohort(args.n, (1960, 1995), hazards, None, rng)
+    obs_year = args.observation_year or None
+    # Birth years stop at 1990 so that at observation_year=2025 even the youngest cohort has reached
+    # the last jump-off (35): every cohort is present in every window, which the backtesting arm
+    # requires to align generated and observed aggregate cells. Cohorts born after ~1975 are
+    # nonetheless unfinished — their post-2025 fertile years are forecast, not observed.
+    observed, persons = S.simulate_cohort(
+        args.n, (1960, 1990), hazards, None, rng, observation_year=obs_year
+    )
+    # Only jump-offs a person's observed history actually reaches: a woman censored at 30 gets runs
+    # from 25 and 30, not 35, so her post-30 trajectories forecast the future rather than replay it.
     generated = S.simulate_generated(
-        observed, persons, hazards, [(0.0, 25.0), (0.0, 30.0), (0.0, 35.0)], args.seeds, rng
+        observed,
+        persons,
+        hazards,
+        [(0.0, 25.0), (0.0, 30.0), (0.0, 35.0)],
+        args.seeds,
+        rng,
+        require_observed_prefix=obs_year is not None,
     )
     event_defs = pd.DataFrame(
         {"model_representation": [S.BIRTH_TOKEN], "event_definition": ["live birth"]}
@@ -122,7 +144,15 @@ def main() -> None:
     event_defs.to_csv(out / "events.csv", index=False)
     (out / "config.yaml").write_text(CONFIG_TEMPLATE)
 
-    print(f"wrote demo dataset ({args.n} persons, {args.seeds} seeds) + config.yaml to {out}/")
+    n_unfinished = (
+        0
+        if obs_year is None
+        else int((persons["birth_year"] > obs_year - hazards.fertile_ages[1]).sum())
+    )
+    print(
+        f"wrote demo dataset ({args.n} persons, {args.seeds} seeds, "
+        f"{n_unfinished} unfinished sequences) + config.yaml to {out}/"
+    )
 
 
 if __name__ == "__main__":

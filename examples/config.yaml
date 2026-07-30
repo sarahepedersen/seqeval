@@ -9,7 +9,7 @@
 #   seqeval run examples/config.yaml                        # -> results/report.html
 
 model:
-  name: demo_perfect_model          # stamped as a `model` column into every result table, so
+  name: demo_model                  # stamped as a `model` column into every result table, so
                                     # cross-model comparison is a pd.concat over tidy tables
 
 data:
@@ -66,7 +66,8 @@ arms:
     lexis:
       outcome: first_birth
       ages: [15, 45]
-      years: [1960, 2035]
+      years: [1960, 2050]         # runs past the observation year: unfinished cohorts are
+                                  # forecast to the end of their fertile range
       subgroup_by: []
     illegal_moves:                   # assessment of demographic plausibility (either disallowed or should be predicted infrequently)
       - {event: birth, max_age: 45, name: birth_after_45}

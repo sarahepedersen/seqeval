@@ -60,6 +60,8 @@ The config file is the experiment specification: an arm runs if its block is pre
 Example quickstart with synthetic data: 
 ```bash
 # 1. Write a demo dataset (observed/generated/persons/events) next to the reference config.
+#    Observation stops in --observation-year (default 2025), so the younger cohorts have
+#    unfinished sequences and the forecasting arm predicts a genuine future.
 python examples/make_demo_data.py --n 10000 --seeds 10 --out examples/data
 
 # 2. Sanity-check config + artifacts WITHOUT computing anything: prints the population,

@@ -245,7 +245,7 @@ _BASIS_TEXT = {
         "values are computed using every generated trajectory; in other words, a synthetic population is created by pooling the `n` replicates from each individual. CIs come from the spread of all trajectories. The same metrics are saved for each of the K per-seed populations."
     ),
     "observed": (
-        "observed sequences only, so no within-individual variation exists. CIs reflect sample variance.")
+        "observed sequences only, so no within-individual variation exists. CIs reflect inference uncertainty from the sample.")
 }
 
 
@@ -649,9 +649,9 @@ def _backtest_metrics_table(arm_dir: Path) -> str:
         "predicted probabilities and actual outcomes among binned p̂ values. We use quantile "
         "binning for ECE and the reliability diagrams (see below).",
         ci_note,
-        "<code>n_evaluable</code> persons actually contribute a score; "
-        "<code>n_settled</code> were already determined in the observed prefix and "
-        "<code>n_uncovered</code> ran out of observation before the frame closed.",
+        "<code>n_evaluable</code> persons are included in the analysis; "
+        "<code>n_settled</code> already had the outcome in the observed prefix (before jump-off) and "
+        "<code>n_uncovered</code> had a sequence that stopped before the outcome period finished.",
     )
     return (
         f"{p_hat}"
@@ -686,8 +686,7 @@ def _calibration_subsections(arm_dir: Path) -> str:
         "The x-axis is the mean <code>p̂</code> for the bin, and the y-axis is the proportion of "
         "observed individuals for which that outcome was actually reached after the jump-off age. "
         "A diagonal line is perfect calibration.",
-        "Below the reliability curve we show the distribution of the <code>p̂</code>. This is the "
-        "true distribution over the <code>k/n</code> grid — one bar per attainable value, from "
+        "The histogram shows the distribution of <code>p̂</code> values from "
         "<code>p_hat_distribution.parquet</code>.",
     )
     parts = [
@@ -721,15 +720,16 @@ _OVERLAY_GROUPS = (
             "generated sequences. The model begins generating from each jumpoff year, so the "
             "observed history is known up to t_2 (i.e., for jumpoff 35, the shape of the generated "
             "curve deviates from the observed based on births predicted after the age of 35).",
-            "The shown generated curve is one Kaplan-Meier fit over every trajectory — all replicates "
-            "pooled into a single synthetic population, with no within-individual averaging. The results are also broken down into K separate seed populations in <code>km_by_seed.parquet</code>, the "
-            "plotted curve in <code>km_pooled.parquet</code>.",
-            "The band is the fully-pooled curve's between-person uncertainty. It starts from Greenwood's "
-            "variance within one seed's population and is narrowed by however much the seeds "
-            "actually disagree: seeds that produce identical curves keep the full one-population "
-            "width, seeds that behave like independent samples shrink it toward 1/K of it. The "
-            "three terms are on the table as <code>mean_var</code>, <code>between_var</code> and "
-            "<code>pooled_var</code>.",
+            "The generated curve is fit over every trajectory sequence — AKA all replicates "
+            "pooled into a single synthetic population. The results are broken down into K separate" \
+            " seed populations in <code>km_by_seed.parquet</code>, the full synthetic population is in"
+            "<code>km_pooled.parquet</code>.",
+            # "The band is the fully-pooled curve's sampling uncertainty. It starts from Greenwood's "
+            # "variance within one seed's population and is narrowed by however much the seeds "
+            # "actually disagree: seeds that produce identical curves keep the full one-population "
+            # "width, seeds that behave like independent samples shrink it toward 1/K of it. The "
+            # "three terms are on the table as <code>mean_var</code>, <code>between_var</code> and "
+            # "<code>pooled_var</code>.",
         ),
     ),
     (
@@ -739,17 +739,16 @@ _OVERLAY_GROUPS = (
         _bullets(
             "PPR is the proportion of individuals at parity X who ultimately move to the next "
             "parity. The generated sequences are grouped by jump-off; for example, if an "
-            "individual is at parity 1 before the jumpoff, the model can predict her into parity "
-            "2 or not. Only individuals eligible for the transition are included (smaller sample "
-            "for 5->6 transition, for example, so the CIs will be wider to account for sample "
-            "variance).",
+            "individual is at parity 1 before the jumpoff, the model can predict the transition into parity "
+            "2 or not. Only individuals at the given parity are included (i.e., smaller sample "
+            "for 5->6 transition).",
             "Each ratio is computed over all replicates pooled into one synthetic population "
             "(<code>ppr_pooled.parquet</code>); the K separate seed populations are in "
             "<code>ppr_by_seed.parquet</code>.",
-            "The bars are the binomial between-person variance of the transition within one seed's "
-            "population, narrowed by how much the seeds actually disagree — the same "
-            "<code>mean_var</code> / <code>between_var</code> / <code>pooled_var</code> columns as "
-            "the KM curves.",
+            # "The bars are the binomial variance of the transition within one seed's "
+            # "population, narrowed by how much the seeds actually disagree — the same "
+            # "<code>mean_var</code> / <code>between_var</code> / <code>pooled_var</code> columns as "
+            # "the KM curves.",
         ),
     ),
     (
@@ -763,10 +762,6 @@ _OVERLAY_GROUPS = (
             "Each rate pools every replicate's trajectories into one synthetic population "
             "(<code>asfr_pooled.parquet</code>); the K separate seed populations are in "
             "<code>asfr_by_seed.parquet</code>.",
-            "This cross-jump-off panel is drawn without bands — one shaded interval per jump-off "
-            "per cohort would bury the profiles. The interval is on the single-jump-off figures "
-            "(<code>asfr_overlay_w&lt;age&gt;.png</code>) and in <code>ci_lo</code>/"
-            "<code>ci_hi</code> on the pooled table.",
         ),
     ),
     (
@@ -840,10 +835,8 @@ def _timing_error_section(arm_dir: Path) -> str:
             "One observation is one generated trajectory, not one person: a woman's seeds each "
             "carry their own predicted time and each contribute their own error, with no median "
             "taken across her replicates first.",
-            "Only trajectories where the model actually produced the outcome are counted. Each figure states how many trajectories did not show the outcome (for individuals for whom at least one did), and the counts are on "
-            "every row of the table as <code>n_excluded</code> of <code>n_trajectories</code>. "
-            "Read the shape as the timing of the events the model did predict; it says nothing "
-            "about the ones it missed.",
+            "Only trajectories where the model actually produced the outcome are counted. Each figure states how many trajectories did not show the outcome (for individuals where at least one did); the counts are on "
+            "every row of the table as <code>n_excluded</code> of <code>n_trajectories</code>. ",
             "The counts are in <code>timing_error.parquet</code>, and per seed population in "
             "<code>timing_error_by_seed.parquet</code>.",
             ),
@@ -929,10 +922,10 @@ _GENERATED_GROUPS = (
         "lexis_*.png",
         "generated.lexis",
         _bullets(
-            "Outcome heat map over cohort and age. The red line marks where the observed data "
+            "Outcome heat map over cohort and age. The blue line marks where the observed data "
             "ends and the rate is computed solely from model forecasts.",
             "Each forecast cell pools every replicate's trajectories into one synthetic population "
-            "(<code>lexis_cohort_pooled.parquet</code>) rather than summarising the individuals or seeds separately. The K separate seed surfaces are in "
+            "(<code>lexis_cohort_pooled.parquet</code>). The K separate seed surfaces are in "
             "<code>lexis_cohort_forecast.parquet</code>. In the parquet, each pooled cell carries its own "
             "<code>ci_lo</code>/<code>ci_hi</code> (uncertainty not shown in the surface).",
         ),
@@ -942,8 +935,8 @@ _GENERATED_GROUPS = (
         "within_seed_variance*.png",
         "generated.dispersion",
         _bullets(
-            "How much a single person's replicates disagree with each other — the inference "
-            "uncertainty that the <code>within_var</code> term below is built from."
+            "How much variance there is in quantum fertility across one individual's trajectories, equal to the " \
+            "inference uncertainty that the <code>within_var</code> term below is built from."
         ),
     ),
 )
@@ -978,7 +971,7 @@ _GENERATED_AGGREGATE_TABLES = (
             "and between-person.",
             "<code>within_var</code> is within-individual replicate variance — "
             "rerunning inference on the same person to get a different trajectory;",
-            "<code>between_var</code> is how much individuals differ, divided by "
+            "<code>between_var</code> is how much individuals differ (due to sampling), divided by "
             "<code>n</code>.",
             "Both terms are inference error in the mean rather than the "
             "spread of individual outcomes (see the backtesting "
@@ -992,7 +985,7 @@ _GENERATED_AGGREGATE_TABLES = (
         ),
     ),
     (
-        "violation_rates",
+        "illegal_moves",
         "generated.violation_rates",
         _bullets(
             "<code>rate_per_event</code> is the share of the events that "

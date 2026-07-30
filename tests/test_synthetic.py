@@ -72,6 +72,49 @@ def test_perturb_scales_rates():
         assert doubled.rates[k] == pytest.approx(2.0 * v)
 
 
+def _unfinished_cohort(seed=0, n=1500, observation_year=2025):
+    rng = np.random.default_rng(seed)
+    hazards = S.default_hazards()
+    observed, persons = S.simulate_cohort(
+        n, (1960, 2000), hazards, None, rng, observation_year=observation_year
+    )
+    return hazards, observed, persons, rng
+
+
+def test_observation_year_censors_young_cohorts():
+    """Each person's sequence stops at age = observation_year - birth_year (capped at fertile end)."""
+    hazards, observed, persons, _ = _unfinished_cohort()
+    validate(observed, OBSERVED_SCHEMA, "observed")
+    last = observed.groupby("person_id")["age"].max()
+    end_yr = days_to_years(last.reindex(persons["person_id"]).to_numpy())
+    expected = np.minimum(2025 - persons["birth_year"].to_numpy(), hazards.fertile_ages[1])
+    tol = 1.0 / 365.25  # ages are rounded to whole days
+    assert (end_yr <= expected + tol).all()
+    # Young cohorts end mid-life-course; the oldest run to the top of the fertile range.
+    young = persons["birth_year"].to_numpy() >= 1995
+    assert end_yr[young].max() <= 30 + tol
+    assert end_yr[~young].max() == pytest.approx(hazards.fertile_ages[1], abs=0.01)
+
+
+def test_unfinished_sequences_are_forecast_not_replayed():
+    """With ``require_observed_prefix`` a run only exists at jump-offs the person's data reaches."""
+    hazards, observed, persons, rng = _unfinished_cohort()
+    gen = S.simulate_generated(
+        observed, persons, hazards, [(0.0, 25.0), (0.0, 30.0), (0.0, 35.0)], 3, rng,
+        require_observed_prefix=True,
+    )
+    validate(gen, GENERATED_SCHEMA, "generated")
+
+    obs_end = persons.set_index("person_id")["observed_through"]
+    runs = gen[["person_id", "age_stop"]].drop_duplicates()
+    assert (obs_end.reindex(runs["person_id"]).to_numpy() >= runs["age_stop"].to_numpy()).all()
+
+    # Someone censored before the latest jump-off is absent from that window but present earlier.
+    stops = gen.groupby("person_id")["age_stop"].max()
+    young = persons.loc[persons["birth_year"] >= 1998, "person_id"]
+    assert stops.reindex(young).max() < gen["age_stop"].max()
+
+
 def test_generated_futures_strictly_after_jumpoff():
     hazards, observed, persons, rng = _cohort()
     generated = S.simulate_generated(observed, persons, hazards, [(0.0, 25.0), (0.0, 30.0)], 3, rng)
