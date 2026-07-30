@@ -31,7 +31,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless: the CLI never opens a display
 
-from seqeval import report
+from seqeval import redraw, report
 from seqeval.arms import backtesting as backtesting_arm
 from seqeval.arms import descriptives as descriptives_arm
 from seqeval.arms import forecasting as forecasting_arm
@@ -239,11 +239,23 @@ def cmd_run(args: argparse.Namespace) -> int:
 # report — rebuild the HTML from an existing results dir
 # =================================================================================================
 def cmd_report(args: argparse.Namespace) -> int:
-    """``seqeval report`` — (re)build ``report.html`` from an existing results directory."""
+    """``seqeval report`` — (re)build ``report.html`` from an existing results directory.
+
+    ``--redraw`` rebuilds the figures from the parquets first. The report embeds the PNGs it finds
+    on disk rather than drawing them, so a results directory exported without its figures needs
+    this to produce anything but tables.
+    """
     results_dir = Path(args.results)
     if not results_dir.is_dir():
         logger.error("not a directory: %s", results_dir)
         return 2
+    if args.redraw:
+        try:
+            figures = redraw.redraw(results_dir, event_definitions=args.events)
+        except FileNotFoundError as exc:
+            logger.error("%s", exc)
+            return 2
+        logger.info("redraw: %d figure(s) rebuilt from the parquets", len(figures))
     path = report.build_report(results_dir)
     print(f"wrote {path}")
     return 0
@@ -278,6 +290,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_report = sub.add_parser("report", help="(re)build report.html from a results dir")
     p_report.add_argument("results", help="path to an existing results directory")
+    p_report.add_argument(
+        "--redraw",
+        action="store_true",
+        help="rebuild every figure from the parquets before assembling the report — needed when "
+        "the results dir was exported without its PNGs",
+    )
+    p_report.add_argument(
+        "--events",
+        default=None,
+        help="path to the events.csv used for the run; only affects figure titles, which fall "
+        "back to raw event tokens without it",
+    )
     p_report.set_defaults(func=cmd_report)
     return parser
 

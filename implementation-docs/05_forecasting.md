@@ -161,7 +161,48 @@ forecasting:
   replicate_variance:
     - {individual: true, aggregate: [ccf], subgroup_by: [cohort]}
     - {individual: true, event: marriage, aggregate: []}   # `event` is what the spread counts
+  sequence_descriptives: true   # generic descriptives of every alias in the top-level `events:`
 ```
+
+### 4b. Sequence descriptives
+
+Generic description of the generated sequences, for **every** event alias the config declares
+rather than one configured outcome. Three tables, each stacking one row block per
+`(source, window)` cell, with `source ∈ {generated, observed}` as `violation_rates` already does:
+
+| table | one row per | figure |
+|---|---|---|
+| `event_age_distribution` | `(source, window, alias, age_bin)` | `event_age_distribution_<alias>.png` |
+| `token_frequency` | `(window, cohort, alias)` — **generated only** | none — rendered inline |
+
+`token_frequency` carries no `source`: "how many of the model's sequences contain this token" is a
+question about the model's sequences, and a share of trajectories has no observed counterpart —
+a person has one history, not K of them. It publishes two denominators that disagree.
+`share_with_any` pools every trajectory (of all N×K sequences, the fraction carrying the token);
+`mean_person_share` gives each person one vote (their own fraction of their K trajectories,
+averaged over people). With uneven seed counts the pooled share is dominated by the
+best-replicated people and the per-person mean is not. It is broken down by birth cohort, with
+`cohort` null on the all-cohorts row (the `replicate_variance_aggregate` convention); a cohort's
+block restricts the population as well as the events, so the blocks partition the total.
+
+Two properties are load-bearing, and each was measured on the demo data rather than assumed:
+
+- **Both sides are restricted to the same support.** Generated rows exist only after the jump-off,
+  while observed ones span a whole life — in the demo, generated births start at exactly the
+  jump-off age while 25% of observed births happen below 25. Each cell therefore takes the window's
+  own people and only what happens after its jump-off, so a difference the reader sees is the model
+  rather than the truncation. This is also what makes `age_first_event` and `event_span_years` mean
+  the same thing on both sides.
+- **The comparison is a rate, not a share.** Observed records stop at the observation year (demo
+  median last record: age 40) while generated trajectories run to the end of the fertile range
+  (median 50), so the two carry different exposure at older ages. `rate = n_events / person_years`
+  via `core.outcomes.exposure` puts that in the denominator, exactly as `asfr` and `lexis_surface`
+  do. `share` is published for the shape of a single profile and is *not* comparable across
+  sources.
+Undeclared tokens are excluded, so `token_frequency` carries `n_rows_all_tokens`,
+`n_rows_declared` and `n_undeclared_tokens` — a token count, never a name. One undeclared token
+appearing once per trajectory is an end-of-sequence marker; a dozen is a vocabulary the config has
+not caught up with, and a row count alone cannot tell them apart.
 
 Behavior: uses ALL generated windows by default (forecasting wants the longest futures; document
 that users typically point this arm at conditions-at-birth or late-jump-off runs via a

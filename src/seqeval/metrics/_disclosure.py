@@ -180,6 +180,12 @@ POLICIES: dict[str, Policy] = {
         trip=("n_persons",),
         also_null=("within_var", "between_var", "total_var"),
     ),
+    # The generated CCF-by-cohort curve the backtesting overlays draw: same decomposition, same
+    # inversion (`total_var = var_i(mu_i)/n`), so the same policy. `ccf` and `complete` survive.
+    "ccf_variance": Policy(
+        trip=("n_persons",),
+        also_null=("within_var", "between_var", "total_var"),
+    ),
     "asfr_cohort": _ASFR,
     "asfr_by_seed": _ASFR,
     "asfr_pooled": Policy(
@@ -209,6 +215,22 @@ POLICIES: dict[str, Policy] = {
     "lexis_cohort_combined": Policy(
         trip=("n_events", "n_persons", "n_source_persons"),
         also_null=("person_years", "rate_var", *_POOLED_EXTRA),
+    ),
+    # -- sequence descriptives ---------------------------------------------------------------
+    # Age bins partition the token's own `n_events_total`, which this table publishes, so a lone
+    # withheld bin is recoverable by subtraction.
+    "event_age_distribution": Policy(
+        trip=("n_events", "n_source_persons", "n_events_total"),
+        also_null=("n_units", "person_years", "rate", "share"),
+        # `cohort` is in the key: the all-cohorts row and a cohort's rows are different
+        # populations, and the complement rule must not group them together.
+        by=("source", "age_start", "age_stop", "cohort", "alias"),
+        complement=True,
+    ),
+    # Declared tokens partition nothing published here, so no complement.
+    "token_frequency": Policy(
+        trip=("n_events", "n_units_with_any", "n_persons_with_any", "n_source_persons"),
+        also_null=("n_units", "share_with_any", "mean_person_share"),
     ),
     "violation_rates": Policy(
         trip=("n_violations", "n_events", "n_persons"),

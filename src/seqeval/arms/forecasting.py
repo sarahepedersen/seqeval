@@ -30,8 +30,10 @@ from seqeval.metrics import dispersion as md
 from seqeval.metrics import fertility as fe
 from seqeval.metrics import plausibility as pl
 from seqeval.metrics import pooling
+from seqeval.metrics import sequences as sq
 from seqeval.viz import dispersion as viz_dispersion
 from seqeval.viz import lexis as viz_lexis
+from seqeval.viz import sequences as viz_sequences
 
 logger = logging.getLogger("seqeval")
 
@@ -85,6 +87,8 @@ def run(
         _run_replicate_variance(
             bundle, block, cfg, generated, windows, outcomes, replicate_spec, out, cohort_width
         )
+    if cfg.sequence_descriptives:
+        _run_sequence_descriptives(bundle, generated, windows, out, cohort_width)
 
 
 # =================================================================================================
@@ -527,3 +531,195 @@ def _fertile_upper_days() -> int:
     from seqeval.units import years_to_days
 
     return years_to_days(fe.FERTILE_UPPER_YEARS)
+
+
+# =================================================================================================
+# 4. sequence descriptives
+# =================================================================================================
+def _run_sequence_descriptives(
+    bundle: Bundle, generated, windows, out: OutputWriter, cohort_width: int
+) -> None:
+    """Age profile, frequency and shape of every declared event, generated against observed.
+
+    Three tables, each stacking one row block per (source, window) cell. Both sources are restricted
+    to the *same* support — the window's people, after its jump-off — because generated rows only
+    exist after the jump-off while observed ones span a whole life. Without that restriction the
+    two sides would not be describing the same thing, and the difference the reader saw would be
+    the censoring rather than the model.
+
+    `token_frequency` is the exception: it describes the generated sequences alone, broken down by
+    jump-off. A share of trajectories carrying a token has no observed counterpart — a person has
+    one observed history, not K of them.
+
+    Only `event_age_distribution` is drawn. `token_frequency` and `sequence_shape` are summaries a
+    table states better than a figure, and the report renders them inline.
+    """
+    tokens = {alias: bundle.token(alias) for alias in bundle.events.keys()}
+    if not tokens:
+        logger.warning(
+            "forecasting: skipping sequence descriptives — no `events:` aliases declared"
+        )
+        return
+    observed = bundle.observed
+    # One grid over both sources and every window, so every cell's bins line up and the figure can
+    # put them on one axis.
+    bins = sq.age_bins_for([generated, observed])
+    # `person_id -> cohort` for the frequency breakdown; absent without a persons file, and the
+    # table then carries the all-cohorts row alone.
+    cohorts = _person_subgroups(bundle.persons, ["cohort"], cohort_width)
+    if cohorts is None:
+        logger.warning(
+            "forecasting: sequence descriptives without a cohort breakdown — no persons file"
+        )
+
+    dist, freq = [], []
+    for t1, t2 in windows:
+        gen_w = generated[(generated["age_start"] == t1) & (generated["age_stop"] == t2)]
+        if gen_w.empty:
+            continue
+        cells = {
+            "generated": _pooled_cell(gen_w, t2),
+            "observed": _observed_cell(observed, gen_w, t2),
+        }
+        for source, (frame, units, spans) in cells.items():
+            if units.empty:
+                continue
+            window = {"age_start": int(t1), "age_stop": int(t2)}
+            for cohort, c_frame, c_units, c_spans in _cohort_blocks(frame, units, spans, cohorts):
+                label = {"source": source, **window, "cohort": cohort}
+                dist.append(
+                    _stamp_cell(
+                        sq.event_age_distribution(
+                            c_frame, c_spans, tokens=tokens, unit_keys=_UNIT_KEYS, bins=bins,
+                            min_cell=out.min_cell,
+                        ),
+                        label,
+                    )
+                )
+                if source == "generated":
+                    # Generated only: "how many of the model's sequences contain this token" is a
+                    # question about the model's sequences, and there is no observed counterpart to
+                    # a per-person share over replicates.
+                    freq.append(
+                        _stamp_cell(
+                            sq.token_frequency(
+                                c_frame, c_units, tokens=tokens, unit_keys=_UNIT_KEYS,
+                                min_cell=out.min_cell,
+                            ),
+                            {**window, "cohort": cohort},
+                        )
+                    )
+
+    if not dist:
+        logger.warning("forecasting: sequence descriptives produced nothing — no usable windows")
+        return
+
+    # Suppressed once on the assembled frames, then written and drawn from the same object: the
+    # writer's policy groups the complement rule across the whole table, which a per-block call
+    # cannot see, and a figure drawn before that would show what the parquet withholds.
+    distribution = out.suppress("event_age_distribution", pd.concat(dist, ignore_index=True))
+    frequency = out.suppress("token_frequency", pd.concat(freq, ignore_index=True))
+    out.frame("event_age_distribution", distribution)
+    out.frame("token_frequency", frequency)
+
+    for alias, token in tokens.items():
+        label = bundle.label(token)
+        # The age profile draws the all-cohorts rows: cohort x jump-off x source would be a panel
+        # grid nobody can read. The per-cohort rows are in the parquet.
+        rows = distribution[
+            (distribution["alias"] == alias) & (distribution["cohort"].isna())
+        ]
+        if not rows.empty:
+            out.figure(
+                f"event_age_distribution_{alias}",
+                viz_sequences.plot_event_age_distribution(
+                    rows, label=label, title="Age profile of predicted events"
+                ),
+            )
+        bars = frequency[frequency["alias"] == alias]
+        if not bars.empty:
+            out.figure(
+                f"token_frequency_{alias}",
+                viz_sequences.plot_token_frequency(
+                    bars, label=label, title="Predicted events by cohort"
+                ),
+            )
+
+
+#: A cell's population is keyed by one column: the trajectory after pooling, the person otherwise.
+_UNIT_KEYS = ["person_id"]
+
+
+def _cohort_blocks(frame, units, spans, cohorts):
+    """``(cohort, frame, units, spans)`` for the whole cell, then once per birth cohort.
+
+    The whole-cell block carries ``cohort = NA`` — the convention
+    :func:`_replicate_variance_aggregate` already uses — so a total and its breakdown live in one
+    table and a reader cannot mistake a cohort for everybody.
+
+    A cohort's block restricts the *population* as well as the events: units, spans and therefore
+    exposure all shrink with it. Restricting only the events would measure a cohort's rate against
+    everybody's person-years.
+    """
+    blocks = [(pd.NA, frame, units, spans)]
+    if cohorts is None:
+        return blocks
+
+    key = "source_person_id" if "source_person_id" in units.columns else "person_id"
+    tagged = units.merge(
+        cohorts.rename(columns={"person_id": key}) if key != "person_id" else cohorts,
+        on=key,
+        how="left",
+    )
+    for cohort, grp in tagged.dropna(subset=["cohort"]).groupby("cohort", observed=True):
+        ids = set(grp["person_id"])
+        blocks.append(
+            (
+                cohort,
+                frame[frame["person_id"].isin(ids)],
+                grp,
+                spans[spans["person_id"].isin(ids)],
+            )
+        )
+    return blocks
+
+
+def _stamp_cell(frame: pd.DataFrame, label: dict) -> pd.DataFrame:
+    """Prefix a builder's output with the cell it describes."""
+    out = frame.copy()
+    for i, (col, value) in enumerate(label.items()):
+        out.insert(i, col, value)
+    return out
+
+
+def _pooled_cell(gen_w: pd.DataFrame, t2: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """``(events, units, spans)`` for the generated side: every trajectory as its own unit.
+
+    Exposure runs from the jump-off to the trajectory's last record — which includes any
+    end-of-sequence padding, correctly: the trajectory *was* carried to that age, whether or not
+    anything happened.
+    """
+    pooled, _ = pool_seeds(gen_w)
+    units = pooled[["person_id", "source_person_id"]].drop_duplicates()
+    spans = pooled.groupby("person_id", observed=True)["age"].max().reset_index(name="end_age")
+    spans["start_age"] = np.int32(t2)
+    return pooled, units, spans[["person_id", "start_age", "end_age"]]
+
+
+def _observed_cell(
+    observed: pd.DataFrame, gen_w: pd.DataFrame, t2: int
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """``(events, units, spans)`` for the observed side, on the generated cell's own terms.
+
+    Restricted twice over: to the people the window actually generated for, and to what happened
+    after its jump-off. A person whose record ends at or before the jump-off contributes no
+    exposure and is dropped — they are not a zero, they are absent.
+    """
+    people = set(gen_w["person_id"].unique())
+    mine = observed[observed["person_id"].isin(people)]
+    spans = mine.groupby("person_id", observed=True)["age"].max().reset_index(name="end_age")
+    spans = spans[spans["end_age"] > t2].copy()
+    spans["start_age"] = np.int32(t2)
+    units = spans[["person_id"]].copy()
+    events = mine[mine["person_id"].isin(set(units["person_id"])) & (mine["age"] > t2)]
+    return events, units, spans[["person_id", "start_age", "end_age"]]

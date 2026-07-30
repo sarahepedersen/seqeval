@@ -331,3 +331,112 @@ def test_a_block_with_nothing_to_name_it_by_is_rejected():
     raw["arms"]["forecasting"]["replicate_variance"] = [{"individual": True}]
     with pytest.raises(ValidationError, match="cannot name this block"):
         Config.model_validate(raw)
+
+
+# =================================================================================================
+# sequence descriptives
+# =================================================================================================
+_SEQ_CFG = _CFG.replace(
+    "    replicate_variance: {individual: true, aggregate: [ccf], subgroup_by: [cohort]}",
+    "    replicate_variance: {individual: true, aggregate: [ccf], subgroup_by: [cohort]}\n"
+    "    sequence_descriptives: true",
+)
+
+
+def _seq_run(tmp_path):
+    cfg = Config.model_validate(yaml.safe_load(_SEQ_CFG))
+    rng = np.random.default_rng(0)
+    h = S.default_hazards()
+    obs, pers = S.simulate_cohort(600, (1960, 1985), h, None, rng, no_event_fraction=1.0)
+    gen = S.simulate_generated(obs, pers, h, [(0.0, 25.0), (0.0, 30.0)], 6, rng)
+    bundle = Bundle(
+        observed=obs, generated=gen, persons=pers, event_defs=None,
+        events=EventConfig(birth="birth"),
+    )
+    out = OutputWriter(base_dir=tmp_path, arm="forecasting", model="perfect")
+    FC.run(
+        bundle, cfg.arms.forecasting, out,
+        outcomes=resolve_outcomes(cfg),
+        rules=resolve_rules(cfg),
+        replicate_spec=resolve_replicates(cfg),
+    )
+    return out
+
+
+def test_sequence_descriptives_write_three_tables_and_a_figure_per_alias(tmp_path):
+    out = _seq_run(tmp_path)
+    names = {p.name for p in out.written}
+    assert {
+        "event_age_distribution.parquet",
+        "token_frequency.parquet",
+        "event_age_distribution_birth.png",
+        "token_frequency_birth.png",
+    } <= names
+
+
+def test_both_sources_are_restricted_to_the_same_window(tmp_path):
+    """The load-bearing decision: generated exists only after the jump-off, so observed is cut too.
+
+    Without it the observed curve would carry a whole life of events against a post-jump-off
+    generated one, and the difference a reader saw would be the truncation.
+    """
+    out = _seq_run(tmp_path)
+    d = pd.read_parquet(out.dir / "event_age_distribution.parquet")
+    assert set(d["source"]) == {"generated", "observed"}
+    occupied = d[d["n_events"] > 0]
+    for age_stop, grp in occupied.groupby("age_stop"):
+        jumpoff = age_stop / 365.25
+        # both sides start at the jump-off, and neither reaches below it
+        assert grp["age_bin"].min() >= np.floor(jumpoff)
+        assert set(grp["source"]) == {"generated", "observed"}
+
+
+def test_the_two_sources_share_one_age_grid(tmp_path):
+    """One grid over everything, so a figure can put the two on the same axis."""
+    out = _seq_run(tmp_path)
+    d = pd.read_parquet(out.dir / "event_age_distribution.parquet")
+    grids = d.groupby(["source", "age_stop"])["age_bin"].apply(lambda s: tuple(sorted(s.unique())))
+    assert grids.nunique() == 1
+
+
+def test_token_frequency_breaks_down_by_cohort_and_the_blocks_sum(tmp_path):
+    """Per-cohort rows beside an all-cohorts row (`cohort` NA), the `replicate_variance_aggregate`
+    convention. A cohort's denominators shrink with it, so the blocks partition the total."""
+    out = _seq_run(tmp_path)
+    t = pd.read_parquet(out.dir / "token_frequency.parquet")
+    assert t["cohort"].isna().any() and t["cohort"].notna().any()
+    for age_stop, grp in t.groupby("age_stop"):
+        total = grp[grp["cohort"].isna()].iloc[0]
+        blocks = grp[grp["cohort"].notna()]
+        assert blocks["n_units"].sum() == total["n_units"]
+        assert blocks["n_events"].sum() == total["n_events"]
+        # a cohort's share is measured against its own population, not everybody's
+        assert (blocks["n_units"] < total["n_units"]).all()
+
+
+def test_token_frequency_is_generated_only_and_broken_down_by_jumpoff(tmp_path):
+    """A share of trajectories has no observed counterpart — a person has one history, not K."""
+    out = _seq_run(tmp_path)
+    t = pd.read_parquet(out.dir / "token_frequency.parquet")
+    assert "source" not in t.columns
+    assert sorted(t["age_stop"].unique()) == sorted(
+        pd.read_parquet(out.dir / "event_age_distribution.parquet")["age_stop"].unique()
+    )
+    row = t.iloc[0]
+    # 6 seeds, so the pooled population is 6x the head count behind it
+    assert row["n_units"] > row["n_source_persons"]
+    # both shares are published, and at equal seed counts they agree
+    assert np.isclose(row["share_with_any"], row["mean_person_share"], atol=0.02)
+
+
+def test_only_the_declared_aliases_get_rows(tmp_path):
+    """`no_event` is undeclared, so it is simply not this table's subject."""
+    out = _seq_run(tmp_path)
+    t = pd.read_parquet(out.dir / "token_frequency.parquet")
+    assert set(t["alias"]) == {"birth"}
+
+
+def test_sequence_descriptives_are_off_unless_asked(tmp_path):
+    out = _run(tmp_path)  # the base config leaves the flag unset
+    names = {p.name for p in out.written}
+    assert "event_age_distribution.parquet" not in names

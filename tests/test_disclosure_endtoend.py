@@ -31,6 +31,9 @@ _NOT_HEAD_COUNTS = frozenset(
         "n_seed_median",
         "n_seed_max",
         "n_bins",
+        # How many distinct tokens the config does not declare — a size of vocabulary, not of
+        # population, and it names none of them.
+        "n_undeclared_tokens",
         "k_seeds",
         "n_units",  # N x K trajectories; the real head count is `n_source_persons`
     }

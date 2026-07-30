@@ -224,6 +224,8 @@ REPLICATE_BASIS: dict[str, str | None] = {
     "generated.violations": None,
     "generated.replicate_variance_aggregate": "averaged",
     "generated.violation_rates": None,
+    "generated.event_age_distribution": "trajectories",
+    "generated.token_frequency": "trajectories",
     # Observed and Generated Comparison
     "comparison.metrics": "averaged",
     "comparison.km": "trajectories",
@@ -330,6 +332,9 @@ _FIGURE_SOURCES = (
     ("uncertainty_ccf_", "parity_distribution"),
     ("ccf_uncertainty", "parity_distribution"),
     ("ccf_overlay_", "aggregate_error"),
+    # One figure per event alias, all drawn from the same table.
+    ("event_age_distribution_", "event_age_distribution"),
+    ("token_frequency_", "token_frequency"),
     # These three draw the pooled estimate and its interval, so the peek under each figure should
     # be the table it was drawn from rather than the per-seed error summary.
     ("ppr_overlay_", "ppr_pooled"),
@@ -925,6 +930,30 @@ def _sample_persons_html(
 
 #: Generated-only figure groups, in display order: ``(label, glob, basis key, note)``.
 _GENERATED_GROUPS = (
+    (
+        "Age profile of predicted events",
+        "event_age_distribution_*.png",
+        "generated.event_age_distribution",
+        _bullets(
+            "For each declared event, how often it is predicted at each "
+            "age — observed history in black under the model's output.",
+            "The y axis is a <em>rate</em>, not a share: observed records stop at the observation "
+            "year while generated ones run to the end of the fertile range, so the two carry "
+            "different exposure at older ages. Dividing by each side's own person-years puts that "
+            "in the denominator. <code>share</code> is in the parquet for the shape of a single "
+            "profile.",
+            "A withheld bin breaks the line rather than dropping to zero.",
+        ),
+    ),
+    (
+        "Predicted events by cohort",
+        "token_frequency_*.png",
+        "generated.token_frequency",
+        _bullets(
+            "How many times each declared event is predicted in each birth cohort, counted over "
+            "every trajectory.",
+        ),
+    ),
     (
         "Lexis surface",
         "lexis_*.png",

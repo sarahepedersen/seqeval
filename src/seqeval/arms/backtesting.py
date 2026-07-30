@@ -126,6 +126,11 @@ def run(
             # is the single estimate over every trajectory at once (05b) — what the figures draw.
             "km_by_seed",
             "km_pooled",
+            # The observed curve every KM overlay is drawn against — one set of rows per outcome,
+            # window-independent, and the only published home of its event-time grid.
+            "km_observed",
+            # The generated side of both CCF figures: curve, variance split, completeness.
+            "ccf_variance",
             "ppr_by_seed",
             "ppr_pooled",
             "asfr_by_seed",
@@ -497,6 +502,19 @@ def _score_aggregate_target(
         )
     elif target == "ccf":
         var_m = fe.ccf_variance(gen_births, gen_spans, persons, cohort_width=cohort_width)
+        # The generated CCF-by-cohort curve, its variance decomposition, and whether each cohort
+        # runs to the end of the fertile window in most seeds — everything both CCF figures draw on
+        # the generated side. Written because it is otherwise unrecoverable from the published
+        # tables: `aggregate_error` keeps the comparison, not the decomposition.
+        var_m = var_m.merge(
+            viz_backtest.majority_complete(gen_m).rename("complete").reset_index(),
+            on="cohort",
+            how="left",
+        )
+        var_m["complete"] = var_m["complete"].fillna(True).astype(bool)
+        # Suppressed before the figure, since the band *is* `total_var` (see the PPR branch).
+        var_m = out.suppress("ccf_variance", var_m)
+        acc["ccf_variance"].append(_stamp(var_m, _cell_label(t1, t2, "ccf", None)))
         # This window's own CCF view is the inference-vs-outcome figure below; the overlay survives
         # only as the cross-jump-off panel, which compares windows on one axes.
         _stash_panel(panels, "ccf", obs_m, gen_m, t2, variance=var_m)
@@ -510,7 +528,7 @@ def _score_aggregate_target(
             f"uncertainty_ccf_w{jumpoff_y}",
             viz_fertility.plot_ccf_inference_vs_outcome(
                 var_m, par_m, observed=obs_m,
-                complete=viz_backtest.majority_complete(gen_m),
+                complete=var_m.set_index("cohort")["complete"],
                 level=replicate_spec.level,
                 title=f"Inference vs outcome uncertainty — jump-off {jumpoff_y}y",
                 min_cell=out.min_cell,
@@ -530,6 +548,10 @@ def _score_aggregate_target(
             level=replicate_spec.level, clip=(0.0, 1.0),
         )
         label = _cell_label(t1, t2, target, None)
+        # Suppressed before the overlay is drawn, not just before the write: the band is the
+        # cell's own variance, so drawing it from an unsuppressed frame publishes in the PNG what
+        # the parquet withholds — and leaves the figure unreproducible from the export.
+        pooled = out.suppress("ppr_pooled", pooled)
         acc["ppr_by_seed"].append(_stamp(gen_m, label))
         acc["ppr_pooled"].append(_stamp(pooled, label))
         _stash_panel(panels, "ppr", obs_m, pooled, t2)
@@ -555,6 +577,7 @@ def _score_aggregate_target(
             level=replicate_spec.level, clip=(0.0, None),
         )
         label = _cell_label(t1, t2, target, None)
+        pooled = out.suppress("asfr_pooled", pooled)  # see the PPR branch above
         acc["asfr_by_seed"].append(_stamp(gen_m, label))
         acc["asfr_pooled"].append(_stamp(pooled, label))
         _stash_panel(panels, "asfr_cohort", obs_m, pooled, t2)
@@ -616,8 +639,18 @@ def _emit_km_overlay(name, combined, observed, outcomes, t2, out, level, panels,
     )
 
     label = _cell_label(t1, t2, f"km:{name}", None)
+    # The log-log band inverts to the counts (see `_disclosure._KM_INVERTS`), so it has to go before
+    # the curve is drawn rather than only before the write.
+    pooled = out.suppress("km_pooled", pooled)
+    obs_km = out.suppress("km_observed", obs_km)
     acc["km_by_seed"].append(_stamp(by_seed, label))
     acc["km_pooled"].append(_stamp(pooled, label))
+    # The observed curve under every overlay. It does not depend on the window — the whole observed
+    # population, unstratified — so it is written once per outcome rather than once per cell, and it
+    # is the only published home of that event-time grid: `aggregate_error` carries the observed
+    # survival only on the coarser grid the comparison uses.
+    if f"km:{name}" not in {o for f in acc["km_observed"] for o in f["outcome"].unique()}:
+        acc["km_observed"].append(obs_km.assign(outcome=f"km:{name}"))
 
     jumpoff_y = round(days_to_years(t2))
     out.figure(

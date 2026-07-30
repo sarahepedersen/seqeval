@@ -55,6 +55,7 @@ arms:
       - {event: birth, max_age: 45}
       - {event: birth, min_spacing: 0.6, severity: warn}
     replicate_variance: {individual: true, aggregate: [ccf]}
+    sequence_descriptives: true
 output:
   dir: results/
   figure_format: png

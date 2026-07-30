@@ -73,6 +73,11 @@ seqeval run examples/config.yaml
 
 # Re-build the HTML report from an existing results dir.
 seqeval report results/
+
+# Re-build it from the PARQUETS ALONE — needed when a results dir was exported without its
+# figures, since `report` embeds existing PNGs rather than drawing them. --events only
+# affects figure titles (event names live in events.csv, which is an input, not a result).
+seqeval report results/ --redraw --events data/events.csv
 ```
 
 `seqeval run` validates implicitly, executes present arms in order (descriptives → backtesting →

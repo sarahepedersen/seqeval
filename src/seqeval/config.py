@@ -367,6 +367,7 @@ class ForecastingConfig(_Strict):
     lexis: LexisConfig | None = None
     illegal_moves: list[RuleConfig] = []
     replicate_variance: list[ReplicateVarianceConfig] = []
+    sequence_descriptives: bool = False
 
     @field_validator("replicate_variance", mode="before")
     @classmethod

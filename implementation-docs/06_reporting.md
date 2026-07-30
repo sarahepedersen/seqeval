@@ -128,6 +128,41 @@ Two consequences worth keeping:
   `_figure_source` returns one path, so the peek shows only the right-hand panel's table. The left
   table is still published; it just is not linked under the figure.
 
+## 3c. Redrawing the figures from the parquets (`redraw.py`)
+
+`build_report` embeds the PNGs it finds on disk; it never draws. So a results directory exported as
+tables only — the usual shape when parquets are moved and figures are not — renders a report with the
+inline tables and **no figures at all**. `seqeval report <dir> --redraw` closes that: it reads the
+parquets plus the resolved config out of `manifest.json`, redraws every figure under the stem the arm
+used, and then assembles the HTML.
+
+The invariant that keeps this honest is **pixel equality**: `tests/test_redraw.py` runs the pipeline,
+strips the PNGs, redraws, and compares SHA-256 per figure. A figure drawn from anything the export
+does not carry fails that test. Two tables exist only because of it:
+
+- **`km_observed`** — the observed KM curve every `km_overlay_*` is drawn against, on its own
+  event-time grid. `aggregate_error.obs` is the same curve sampled onto the coarser comparison grid,
+  which is close but not the same step function.
+- **`ccf_variance`** — the generated CCF-by-cohort curve, its within/between/total variance split,
+  and per-cohort `complete`. `aggregate_error` keeps the comparison, not the decomposition, so the
+  band and the hollow markers on both CCF figures were otherwise unreproducible.
+
+Both are written once per outcome/window rather than per cell, and both are covered by the disclosure
+registry (`km_` prefix; a `ccf_variance` entry mirroring `ccf`).
+
+Redrawing off the *published* tables also forced two fixes in the drawing path, each one a figure
+that showed more than its parquet did:
+
+- The backtesting overlays (`km_pooled`, `ppr_pooled`, `asfr_pooled`, `ccf_variance`) were drawn
+  before suppression ran, so a withheld interval still appeared as a band. They are suppressed
+  first now, matching what the descriptives figures already did.
+- `viz/backtest.py::_ccf_band` fell back to a replicate-only width when `total_var` was missing.
+  For a cohort whose variance was *withheld* that redrew the withheld quantity; the fallback now
+  applies only to cohorts absent from the variance frame altogether.
+
+Only figure **titles** degrade without `events.csv`: event names come from `Bundle.label`, and that
+file is an input rather than part of a results export. `--events <path>` restores them.
+
 ## 3b. Cross-model comparison (stub — spec only, do not build in v1)
 
 Because every result table carries `model` and shares tidy schemas, a future

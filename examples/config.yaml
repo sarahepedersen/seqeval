@@ -89,6 +89,10 @@ arms:
       # A second analysis of the same run, asking the same question of a different event:
       # - {individual: true, event: marriage, name: marriage, aggregate: [], subgroup_by: [cohort]}
 
+    # Generic descriptives of the generated sequences: for every alias in the top-level `events:`
+    # map
+    sequence_descriptives: true
+
 output:
   dir: results/
   figure_format: png

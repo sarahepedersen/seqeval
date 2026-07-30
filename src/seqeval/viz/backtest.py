@@ -77,8 +77,12 @@ def _ccf_band(gen_ccf: pd.DataFrame, level: float, variance: pd.DataFrame | None
     Without ``variance`` the half-width is the replicate-only ``z·sd/√K`` across seed curves. With
     it, the half-width is ``z·sqrt(total_var)``: replicate noise *plus* the sampling error of a
     finite cohort, which is the uncertainty in the CCF being estimated rather than in the average of
-    these particular seeds. Cohorts absent from ``variance`` (or too small for a sample variance)
-    keep the replicate-only width rather than losing their band.
+    these particular seeds. Cohorts *absent* from ``variance`` keep the replicate-only width rather
+    than losing their band.
+
+    A cohort **present** in ``variance`` but carrying no ``total_var`` had it withheld by small-cell
+    suppression, and gets no band at all: falling back to the replicate-only width there would
+    redraw the very quantity the table withheld, and would make the figure unreproducible from it.
     """
     stats = (
         gen_ccf.groupby("cohort", observed=True)["ccf"]
@@ -88,8 +92,10 @@ def _ccf_band(gen_ccf: pd.DataFrame, level: float, variance: pd.DataFrame | None
     z = norm.ppf(1 - (1 - level) / 2)
     half = z * stats["sd"] / np.sqrt(stats["k"])
     if variance is not None:
-        total = variance.set_index("cohort")["total_var"].reindex(stats.index)
-        half = (z * np.sqrt(total)).fillna(half)
+        indexed = variance.set_index("cohort")
+        total = indexed["total_var"].reindex(stats.index)
+        described = stats.index.isin(indexed.index)
+        half = (z * np.sqrt(total)).where(described, half)
     complete = majority_complete(gen_ccf).reindex(stats.index, fill_value=True).to_numpy()
     return stats.index.to_numpy(), stats["mean"].to_numpy(), half.to_numpy(), complete
 
