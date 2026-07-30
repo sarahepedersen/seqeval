@@ -1,9 +1,10 @@
-"""Dispersion distributions: binning a per-person spread into publishable counts."""
+"""Dispersion aggregates: binning a per-person spread, and averaging per-person quantiles."""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from seqeval.metrics import dispersion as MD
 
@@ -48,6 +49,68 @@ def test_thin_cells_are_withheld():
     dist = MD.dispersion_distribution(ind, by=["age_stop"], n_bins=10)
     assert dist["suppressed"].any()
     assert dist.loc[dist["suppressed"], "n_persons"].isna().all()
+
+
+def _quantiles(rows, col="age_stop"):
+    """Individual-table shaped: one person per (q0, q25, q50, q75, q100, k, group)."""
+    return pd.DataFrame(
+        [
+            {
+                "person_id": i,
+                **dict(zip(MD.QUANTILE_COLS, q, strict=True)),
+                "k": k,
+                col: g,
+            }
+            for i, (q, k, g) in enumerate(rows)
+        ]
+    )
+
+
+def test_quantile_summary_averages_each_quantile_within_the_group():
+    ind = _quantiles(
+        [
+            ([0, 1, 1, 2, 3], 5, 30),
+            ([0, 1, 2, 3, 4], 5, 30),
+            ([1, 1, 1, 1, 1], 5, 40),
+        ]
+    )
+    out = MD.quantile_summary(ind, by=["age_stop"], min_cell=0).set_index("age_stop")
+    assert out.loc[30, "mean_q0"] == pytest.approx(0.0)
+    assert out.loc[30, "mean_q50"] == pytest.approx(1.5)
+    assert out.loc[30, "mean_q100"] == pytest.approx(3.5)
+    assert out.loc[30, "n_persons"] == 2
+    assert out.loc[30, "mean_k"] == pytest.approx(5.0)
+    assert (out.loc[40, ["mean_q0", "mean_q50", "mean_q100"]] == 1.0).all()
+
+
+def test_quantile_summary_withholds_a_thin_group():
+    """Under the threshold the means are NA — the row survives so the gap is visible."""
+    ind = _quantiles([([0, 1, 1, 2, 3], 5, 30)] * 8 + [([0, 0, 1, 1, 2], 5, 40)] * 2)
+    out = MD.quantile_summary(ind, by=["age_stop"], min_cell=5).set_index("age_stop")
+    assert not out.loc[30, "suppressed"] and out.loc[30, "mean_q50"] == pytest.approx(1.0)
+    assert out.loc[40, "suppressed"]
+    assert pd.isna(out.loc[40, "mean_q50"]) and pd.isna(out.loc[40, "n_persons"])
+
+
+def test_quantile_summary_drops_persons_with_a_non_finite_quantile():
+    ind = _quantiles([([0, 1, 1, 2, 3], 5, 30), ([np.nan, 1, 1, 2, 3], 5, 30)])
+    out = MD.quantile_summary(ind, by=["age_stop"], min_cell=0)
+    assert out["n_persons"].iloc[0] == 1
+
+
+def test_quantile_summary_names_nobody_and_keeps_its_column_order():
+    ind = _quantiles([([0, 1, 1, 2, 3], 5, 30)] * 6)
+    out = MD.quantile_summary(ind, by=["age_stop"], min_cell=0)
+    assert list(out.columns) == [
+        "age_stop", "n_persons", "mean_k",
+        "mean_q0", "mean_q25", "mean_q50", "mean_q75", "mean_q100", "suppressed",
+    ]
+
+
+def test_quantile_summary_without_the_quantile_columns_is_empty_not_an_error():
+    """A run whose individual table predates the five-number summary emits an empty frame."""
+    out = MD.quantile_summary(_ind([0.1, 0.2], [30, 30]), by=["age_stop"], min_cell=0)
+    assert out.empty and "mean_q50" in out.columns
 
 
 def test_grouping_by_two_columns_gives_a_row_per_pair():

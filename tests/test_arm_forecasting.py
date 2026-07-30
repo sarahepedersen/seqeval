@@ -100,11 +100,11 @@ def test_lexis_forecast_cells_are_pooled_over_every_trajectory(tmp_path):
     assert {"n_units", "n_source_persons"} <= set(pooled.columns)
     assert (pooled["n_source_persons"] < pooled["n_units"].max()).all()
 
-    # the interval sits between its two limits, exactly as the backtest families do
-    rows = pooled.dropna(subset=["mean_var", "pooled_var"])
+    # the interval is the cell's own Poisson variance, exactly as the backtest families do
+    rows = pooled.dropna(subset=["rate_var"])
     assert len(rows)
-    assert (rows["pooled_var"] <= rows["mean_var"] + 1e-12).all()
-    assert (rows["pooled_var"] >= rows["mean_var"] / rows["k_seeds"] - 1e-12).all()
+    np.testing.assert_allclose(rows["pooled_var"], rows["rate_var"])
+    assert {"k_seeds", "mean_var", "between_var"} <= set(pooled.columns)
 
     # every forecast cell in the combined surface is its pooled cell, taken verbatim. A fixture
     # whose observed surface already covers every cell has none, and then there is nothing to check

@@ -258,36 +258,43 @@ Two tables per family are written (from the backtesting arm, except Lexis, which
 The pooled frames report `n_units` (trajectories in the cell) and `n_source_persons` (the people
 they were generated for) rather than a single ambiguous `n_persons`.
 
-**The interval on the pooled estimate.** The N×K rows are not N×K independent people:
-`combine_prefix` replays the *same* observed prefix under every seed, so below the jump-off a
-person's K trajectories are exact duplicates, while above it they diverge. Running the sampling
-formula on the pooled table would be up to `√K` too narrow. `design_effect_var` measures the
-duplication off the per-seed values instead of assuming it:
+**The interval on the pooled estimate.** It is the metric's textbook sampling variance evaluated on
+exactly the units that produced the estimate — no combination across seeds, no correction:
 
 ```
+pooled_var = greenwood_var                      # KM,   over the pooled product-limit table
+           | p(1−p)/n_units                     # PPR,  over the pooled progression denominator
+           | births/person_years²               # ASFR & Lexis, over the pooled person-years
+```
+
+For KM that means `attach_km_pooled_ci` **keeps** the product-limit table's own complementary
+log-log `ci_lo`/`ci_hi` — the traditional Greenwood interval — and `kaplan_meier(..., level=)`
+carries the run's `replicates.level` into it. PPR, ASFR and Lexis get a symmetric `estimate ± z·se`
+clipped to the metric's natural range.
+
+**These intervals are deliberately optimistic, by roughly a factor of `√K` at the worst.** The N×K
+rows are not N×K independent people: `combine_prefix` replays the *same* observed prefix under every
+seed, so below the jump-off a person's K trajectories are exact duplicates, while above it they
+diverge. Correcting for that is a modelling choice made downstream, not in the metric.
+
+So that the correction *can* be made downstream, every pooled table still records the two quantities
+it needs, measured from the K per-seed curves:
+
+```
+k_seeds     = seeds behind the cell
 mean_var    = mean_s(var_s)              # per-seed sampling variance, averaged
 between_var = var_s(estimate_s, ddof=1)  # spread of the K per-seed estimates
-
-pooled_var  = clip(mean_var − (K−1)/K · between_var,  mean_var/K,  mean_var)
 ```
 
-Seeds that agree exactly give `mean_var` — one population's worth, N people. Seeds that behave like
-independent samples give `mean_var/K` — the naive N·K answer. Everything real lands between, and the
-clip keeps it there. A single seed keeps `mean_var`. All five quantities (`k_seeds`, `mean_var`,
-`between_var`, `pooled_var`, `se`) sit on the pooled table beside `ci_lo`/`ci_hi`, so a figure's band
-can be checked against the parquet it links to.
+`pooling.design_effect_var` is that correction, kept in the codebase and wired into nothing:
+`clip(mean_var − (K−1)/K · between_var, mean_var/K, mean_var)`, which interpolates between one
+population's worth of people (seeds identical) and the naive N·K answer (seeds independent). Applying
+it is post-processing over the emitted columns. Note `between_var` is a sample variance over K
+numbers, so at the handful of seeds a typical run has, it carries real noise.
 
-`between_var` is a sample variance over K numbers, so at the handful of seeds a typical run has it
-carries real noise — near the independent limit its own error exceeds the quantity it estimates, and
-cells scatter toward whichever bound the noise pushed them to. The clip bounds that in both
-directions; more seeds tighten it. On the demo run (K=5) the KM curves sit at a median
-`pooled_var/mean_var` of 0.84 — the observed prefix is shared, so the seeds really are near
-duplicates — while PPR and ASFR sit near 0.30, with ~40% of cells clipped to the `mean_var/K` floor.
-
-KM needs one extra step (`attach_km_pooled_ci`): seeds do not share event times, so each curve's
+KM needs one extra step for the diagnostics: seeds do not share event times, so each curve's
 `survival` and `greenwood_var` are step-sampled onto the pooled curve's grid (`survival.step_sample`)
-before the components are formed. The product-limit table's own log-log `ci_lo`/`ci_hi` are dropped —
-they are exactly the interval this correction exists to replace.
+before `mean_var` and `between_var` are formed.
 
 CCF is **not** in this set. It is a scalar per cohort, and keeps its `within_var`/`between_var`/
 `total_var` decomposition (§2).

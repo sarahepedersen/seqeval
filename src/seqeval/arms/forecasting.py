@@ -74,7 +74,9 @@ def run(
     observed = bundle.observed
 
     if cfg.lexis is not None:
-        _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width)
+        _run_lexis(
+            bundle, cfg, generated, windows, out, outcomes, cohort_width, replicate_spec.level
+        )
     if cfg.illegal_moves:
         _run_illegal_moves(observed, generated, rules, out)
     if cfg.replicate_variance is not None:
@@ -86,7 +88,7 @@ def run(
 # =================================================================================================
 # 1. Lexis
 # =================================================================================================
-def _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width) -> None:
+def _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width, level) -> None:
     if bundle.persons is None:
         logger.warning("forecasting: skipping Lexis — no persons file (birth_year needed)")
         return
@@ -159,6 +161,7 @@ def _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width) -> 
         value="rate",
         var="rate_var",
         on=[dim, "age_bin", *subgroup],
+        level=level,
         clip=(0.0, None),
     )
     combined = _combine_surfaces(obs_surface, fc_pooled, dim, subgroup)
@@ -271,11 +274,14 @@ def _replicate_occurrence(generated, tte_spec, outcome_name, horizon, spec) -> p
 
 
 def _emit_dispersion_ridges(ind: pd.DataFrame, subgroup_by, out) -> None:
-    """Within-seed dispersion as binned distributions, plus one ridge figure per split.
+    """Within-seed dispersion as binned distributions and quantile summaries, plus their figures.
 
-    The population figure stacks one ridge per jump-off; each requested subgroup adds a figure whose
-    ridges are that subgroup's values, one panel per jump-off — so a cohort's dispersion can be read
-    against the other cohorts at a jump-off, and against itself as the jump-off moves later.
+    Two aggregate views of the same individual-level frame, neither carrying a person. The ridges
+    stack one binned ``within_seed_var`` distribution per jump-off; the fan draws the group-mean
+    five-number summary of the underlying completed-birth counts, so the variance ridge can be read
+    against the outcome spread it summarises. Each requested subgroup adds a figure whose groups are
+    that subgroup's values, one panel per jump-off — so a cohort can be read against the other
+    cohorts at a jump-off, and against itself as the jump-off moves later.
     """
     pop = md.dispersion_distribution(ind, by=["age_stop"], min_cell=out.min_cell)
     out.frame("within_seed_variance_distribution", pop)
@@ -286,6 +292,16 @@ def _emit_dispersion_ridges(ind: pd.DataFrame, subgroup_by, out) -> None:
             title="Within-person replicate variance by jump-off",
         ),
     )
+    pop_q = md.quantile_summary(ind, by=["age_stop"], min_cell=out.min_cell)
+    out.frame("quantum_quantile_summary", pop_q)
+    out.figure(
+        "quantum_quantile_fan",
+        viz_dispersion.plot_quantum_quantile_fan(
+            pop_q, x="age_stop",
+            title="Within-person spread of completed births by jump-off",
+        ),
+    )
+
     for col in subgroup_by:
         if col not in ind.columns:
             continue
@@ -299,12 +315,24 @@ def _emit_dispersion_ridges(ind: pd.DataFrame, subgroup_by, out) -> None:
             ),
         )
 
+        summary = md.quantile_summary(ind, by=[col, "age_stop"], min_cell=out.min_cell)
+        out.frame(f"quantum_quantile_summary_by_{col}", summary)
+        out.figure(
+            f"quantum_quantile_fan_by_{col}",
+            viz_dispersion.plot_quantum_quantile_fan(
+                summary, x=col, facet_by="age_stop",
+                title=f"Within-person spread of completed births by {col}, per jump-off",
+            ),
+        )
+
 
 def _replicate_variance_individual(generated, birth_token, subgroups=None) -> pd.DataFrame:
     """Per-(person, jump-off) replicate dispersion of the completed ``birth_token`` count.
 
     ``within_seed_var`` / ``within_seed_cv`` are the variance and coefficient of variation across a
-    person's replicates for quantum completed fertility.
+    person's replicates for quantum completed fertility. ``q0``–``q100`` are the five-number summary
+    of the same counts (:func:`~seqeval.core.replicates.count_quantiles`) — the shape the single
+    variance number compresses — and ``k`` the replicates behind both.
     """
     ind_counts = _counts_per_run(generated, birth_token)
     ind_cm = rep.count_moments(ind_counts, run_keys=_RUN_KEYS, seed_col="seed").rename(
@@ -315,7 +343,19 @@ def _replicate_variance_individual(generated, birth_token, subgroups=None) -> pd
         cv = np.sqrt(ind_cm["within_seed_var"].to_numpy()) / mu
     ind_cm["within_seed_cv"] = np.where(mu > 0, cv, np.nan)
 
-    out = ind_cm[[*_RUN_KEYS, "expected_quantum", "within_seed_var", "within_seed_cv"]]
+    quant = rep.count_quantiles(ind_counts, run_keys=_RUN_KEYS, seed_col="seed")
+    ind_cm = ind_cm.drop(columns=["k"]).merge(quant, on=_RUN_KEYS, how="left")
+
+    out = ind_cm[
+        [
+            *_RUN_KEYS,
+            "expected_quantum",
+            "within_seed_var",
+            "within_seed_cv",
+            *md.QUANTILE_COLS,
+            "k",
+        ]
+    ]
     out = _restrict_to_common_windows(out)
     if subgroups is not None:
         out = out.merge(subgroups, on="person_id", how="left")

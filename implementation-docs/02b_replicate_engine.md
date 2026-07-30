@@ -123,6 +123,10 @@ Generic machinery that turns per-individual moments into an aggregate's uncertai
 def count_moments(count_table, *, run_keys, seed_col) -> pd.DataFrame
     # per individual: predictive mean, replicate variance (ddof=0), replicate count k.
 
+def count_quantiles(count_table, *, run_keys, seed_col) -> pd.DataFrame
+    # per individual: five-number summary q0/q25/q50/q75/q100 of the count, plus k.
+    # The shape count_moments compresses to one number. q0/q100 widen with k, so k rides along.
+
 def mean_variance_components(mu, s2, k) -> dict
     # variance of mean_i(mu_i), split by source and stated in variance units of that mean:
     #   within_var = sum_i s2_i/k_i / n**2      seeds
@@ -139,8 +143,8 @@ from per-person means* — CCF and the forecasting arm's `replicate_variance_agg
 deliberately **not** used by the time-dependent backtest families (KM, PPR, cohort ASFR, timing
 error). Those treat each seed as its own synthetic population and pool every trajectory for the
 estimate, so no per-person mean exists to decompose and no within-individual term enters their
-intervals; their width comes from `metrics/pooling.design_effect_var` instead (see
-`metrics_reference.md` §4.1). `timing_distribution` above is still used, but only by
+intervals; their width is the plain sampling variance of the pooled trajectories, with the seed
+spread recorded alongside for a downstream correction (see `metrics_reference.md` §4.1). `timing_distribution` above is still used, but only by
 `timing_coverage` — the timing-error ridge works off per-trajectory durations directly.
 
 ## 5. Relationship to consumers

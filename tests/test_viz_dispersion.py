@@ -109,3 +109,77 @@ def test_figure_needs_only_the_binned_table():
     dist = _dist([1960], {1960: [4, 20, 8, 2]})
     assert "person_id" not in dist.columns
     assert D.plot_within_seed_variance(dist).axes
+
+
+# --- the quantile fan ---------------------------------------------------------------------------
+def _summary(rows, col="age_stop", extra=None):
+    """A quantile_summary-shaped frame: one row per group."""
+    return pd.DataFrame(
+        [
+            {
+                col: g,
+                "n_persons": n,
+                "mean_k": 5.0,
+                "mean_q0": q[0], "mean_q25": q[1], "mean_q50": q[2],
+                "mean_q75": q[3], "mean_q100": q[4],
+                "suppressed": n is None or pd.isna(n),
+                **(extra or {}),
+            }
+            for g, n, q in rows
+        ]
+    )
+
+
+def test_fan_draws_a_median_line_and_two_nested_bands():
+    summary = _summary(
+        [(yd(25), 500, [0, 1, 2, 3, 4]), (yd(30), 500, [0, 1, 2, 2, 3])]
+    )
+    ax = D.plot_quantum_quantile_fan(summary).axes[0]
+    (line,) = ax.get_lines()
+    np.testing.assert_allclose(line.get_ydata(), [2, 2])  # mean_q50 at each jump-off
+    assert len(ax.collections) == 2  # the IQR band and the min-max band
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["25", "30"]
+    assert ax.get_xlabel() == "jump-off (years)"
+
+
+def test_fan_orders_groups_by_x_not_by_row_order():
+    summary = _summary(
+        [(yd(30), 500, [0, 1, 3, 4, 5]), (yd(25), 500, [0, 1, 2, 3, 4])]
+    )
+    (line,) = D.plot_quantum_quantile_fan(summary).axes[0].get_lines()
+    np.testing.assert_allclose(line.get_ydata(), [2, 3])  # 25y first, then 30y
+
+
+def test_fan_breaks_the_line_at_a_withheld_group():
+    """A suppressed group carries NA means, so the line gaps rather than interpolating over it."""
+    summary = _summary(
+        [
+            (yd(25), 500, [0, 1, 2, 3, 4]),
+            (yd(30), None, [np.nan] * 5),
+            (yd(35), 500, [0, 1, 2, 3, 4]),
+        ]
+    )
+    (line,) = D.plot_quantum_quantile_fan(summary).axes[0].get_lines()
+    assert np.isnan(line.get_ydata()[1])
+
+
+def test_fan_facets_one_panel_per_jump_off():
+    summary = pd.concat(
+        [
+            _summary(
+                [(1960, 500, [0, 1, 2, 3, 4]), (1965, 500, [0, 1, 2, 3, 5])],
+                col="cohort", extra={"age_stop": t2},
+            )
+            for t2 in (yd(25), yd(30))
+        ]
+    ).reset_index(drop=True)
+    fig = D.plot_quantum_quantile_fan(summary, x="cohort", facet_by="age_stop")
+    assert len(fig.axes) == 2
+    assert fig.axes[0].get_title(loc="left") == "25y jump-off"
+
+
+def test_fan_needs_only_the_group_means():
+    """No per-person quantile reaches the figure, which is what makes it publishable."""
+    summary = _summary([(yd(25), 500, [0, 1, 2, 3, 4])])
+    assert "person_id" not in summary.columns
+    assert D.plot_quantum_quantile_fan(summary).axes

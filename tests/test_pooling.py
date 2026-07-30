@@ -1,7 +1,11 @@
-"""Pooling K synthetic populations (05b): the measured design effect and its two limits.
+"""Pooling K synthetic populations (05b): the plain sampling variance, and the recorded diagnostics.
 
-The point estimate is the metric over every trajectory at once. The question these tests pin down
-is the *width* of its interval, since the N×K pooled rows are not N×K independent people.
+The point estimate is the metric over every trajectory at once, and so is its interval: the textbook
+formula on exactly those units, with no correction for the fact that the N×K pooled rows are not N×K
+independent people. What these tests pin down is that the interval really is the pooled table's own
+variance, and that the two inputs a downstream correction would need (``mean_var``, ``between_var``)
+are still measured and emitted. ``design_effect_var`` is that correction, kept and tested here but
+wired into nothing.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ Z = norm.ppf(0.975)
 
 
 # =================================================================================================
-# design_effect_var — the formula and its limits
+# design_effect_var — the deferred correction: the formula and its limits
 # =================================================================================================
 def test_identical_seeds_keep_one_populations_width():
     """Seeds that agree exactly are K copies of one population, so K buys nothing."""
@@ -76,22 +80,37 @@ def _by_seed(values, var, cell="a"):
     )
 
 
-def test_attach_pooled_ci_centres_on_the_pooled_estimate_not_the_seed_mean():
-    """The estimate comes from the pooled pass; only the width is read off the seeds."""
+def test_the_interval_is_the_pooled_cells_own_sampling_variance():
+    """Estimate and width both come from the pooled pass; the seeds contribute neither."""
     by_seed = _by_seed([0.60, 0.66, 0.72], 0.0009)
-    pooled = pd.DataFrame({"cell": ["a"], "value": [0.70]})  # deliberately not the seed mean 0.66
+    # deliberately neither the seed mean (0.66) nor the seed variance
+    pooled = pd.DataFrame({"cell": ["a"], "value": [0.70], "var": [0.00012]})
     out = pooling.attach_pooled_ci(
         pooled, by_seed, value="value", var="var", on=["cell"], level=0.95
     )
     assert out["value"].iloc[0] == pytest.approx(0.70)
-    expected = pooling.design_effect_var(0.0009, np.var([0.60, 0.66, 0.72], ddof=1), 3)
-    assert out["pooled_var"].iloc[0] == pytest.approx(expected)
-    assert out["ci_hi"].iloc[0] - out["value"].iloc[0] == pytest.approx(Z * np.sqrt(expected))
+    assert out["pooled_var"].iloc[0] == pytest.approx(0.00012)
+    assert out["ci_hi"].iloc[0] - out["value"].iloc[0] == pytest.approx(Z * np.sqrt(0.00012))
+
+
+def test_the_seed_spread_is_recorded_without_touching_the_interval():
+    """mean_var/between_var/k_seeds ride along so the correction can be applied downstream."""
+    by_seed = _by_seed([0.60, 0.66, 0.72], 0.0009)
+    pooled = pd.DataFrame({"cell": ["a"], "value": [0.70], "var": [0.00012]})
+    out = pooling.attach_pooled_ci(pooled, by_seed, value="value", var="var", on=["cell"])
+    assert out["k_seeds"].iloc[0] == 3
+    assert out["mean_var"].iloc[0] == pytest.approx(0.0009)
+    assert out["between_var"].iloc[0] == pytest.approx(np.var([0.60, 0.66, 0.72], ddof=1))
+    # the correction those three feed is available, and is *not* what was reported
+    corrected = pooling.design_effect_var(
+        out["mean_var"], out["between_var"], out["k_seeds"]
+    )
+    assert corrected[0] != pytest.approx(out["pooled_var"].iloc[0])
 
 
 def test_attach_pooled_ci_clips_a_proportion_to_the_unit_interval():
     by_seed = _by_seed([0.98, 0.99, 1.00], 0.05)
-    pooled = pd.DataFrame({"cell": ["a"], "value": [0.99]})
+    pooled = pd.DataFrame({"cell": ["a"], "value": [0.99], "var": [0.05]})
     out = pooling.attach_pooled_ci(
         pooled, by_seed, value="value", var="var", on=["cell"], clip=(0.0, 1.0)
     )
@@ -99,14 +118,15 @@ def test_attach_pooled_ci_clips_a_proportion_to_the_unit_interval():
     assert out["ci_lo"].iloc[0] >= 0.0
 
 
-def test_a_pooled_cell_with_no_seed_rows_gets_no_interval():
-    """Better a missing band than one borrowed from a different cell."""
-    pooled = pd.DataFrame({"cell": ["a", "b"], "value": [0.5, 0.6]})
+def test_a_pooled_cell_with_no_seed_rows_keeps_its_interval_but_loses_its_diagnostics():
+    """The band never depended on the seeds; only the correction inputs go missing."""
+    pooled = pd.DataFrame({"cell": ["a", "b"], "value": [0.5, 0.6], "var": [0.01, 0.02]})
     out = pooling.attach_pooled_ci(
         pooled, _by_seed([0.5, 0.5], 0.01), value="value", var="var", on=["cell"]
     )
-    assert out.loc[out["cell"] == "b", "ci_lo"].isna().all()
-    assert out.loc[out["cell"] == "a", "ci_lo"].notna().all()
+    assert out["ci_lo"].notna().all()
+    assert out.loc[out["cell"] == "b", "mean_var"].isna().all()
+    assert out.loc[out["cell"] == "a", "mean_var"].notna().all()
 
 
 # =================================================================================================
@@ -131,7 +151,7 @@ def test_km_seeds_are_sampled_onto_the_pooled_grid():
         ignore_index=True,
     )
     pooled = _km([10, 20, 30], [0.9, 0.85, 0.45], [0.001, 0.002, 0.003])
-    out = pooling.attach_km_pooled_ci(pooled, by_seed, level=0.95)
+    out = pooling.attach_km_pooled_ci(pooled, by_seed)
 
     # at t=10 seed 1 has not reached its first event, so it contributes survival 1 / greenwood 0
     assert out["k_seeds"].iloc[0] == 2
@@ -141,24 +161,20 @@ def test_km_seeds_are_sampled_onto_the_pooled_grid():
     )
 
 
-def test_km_interval_replaces_the_product_limit_one():
-    """The table's own log-log CI treats the pooled trajectories as independent people."""
+def test_km_keeps_the_product_limits_own_log_log_interval():
+    """The traditional Greenwood interval survives untouched; the seed spread only rides along."""
     by_seed = pd.concat(
         [_km([10], [0.9 - 0.05 * s], [0.01], seed=s) for s in range(3)], ignore_index=True
     )
     pooled = _km([10], [0.85], [0.0001]).assign(ci_lo=0.849, ci_hi=0.851)
-    out = pooling.attach_km_pooled_ci(pooled, by_seed, level=0.95)
-    # the narrow product-limit interval is gone, replaced by the design-effect one
-    assert out["ci_lo"].iloc[0] < 0.849
-    assert out["pooled_var"].iloc[0] > 0.0001
-
-
-def test_km_interval_stays_inside_the_unit_interval():
-    by_seed = pd.concat(
-        [_km([10], [0.99], [0.05], seed=s) for s in range(3)], ignore_index=True
-    )
-    out = pooling.attach_km_pooled_ci(_km([10], [0.99], [0.05]), by_seed, level=0.95)
-    assert 0.0 <= out["ci_lo"].iloc[0] and out["ci_hi"].iloc[0] <= 1.0
+    out = pooling.attach_km_pooled_ci(pooled, by_seed)
+    assert out["ci_lo"].iloc[0] == pytest.approx(0.849)
+    assert out["ci_hi"].iloc[0] == pytest.approx(0.851)
+    assert out["pooled_var"].iloc[0] == pytest.approx(0.0001)
+    assert out["se"].iloc[0] == pytest.approx(np.sqrt(0.0001))
+    # the seeds are measured but do not enter the band
+    assert out["k_seeds"].iloc[0] == 3
+    assert out["mean_var"].iloc[0] == pytest.approx(0.01)
 
 
 def test_step_sample_holds_each_value_until_the_next_event():

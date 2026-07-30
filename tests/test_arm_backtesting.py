@@ -223,15 +223,17 @@ def test_each_seed_population_is_kept_beside_the_pooled_one(tmp_path):
         assert "person_id" not in pooled.columns, family
 
 
-def test_pooled_interval_lies_between_its_two_limits(tmp_path):
-    """N people's worth at one end, N·K at the other; the seeds decide where it lands."""
+def test_pooled_interval_is_the_pooled_cells_own_sampling_variance(tmp_path):
+    """The band is the textbook formula on the N·K trajectories — no seed correction applied."""
     out = _run_arm_all_targets(tmp_path)
-    for family in ("km", "ppr", "asfr"):
+    for family, var in (("km", "greenwood_var"), ("ppr", "ppr_var"), ("asfr", "asfr_var")):
         pooled = pd.read_parquet(out.dir / f"{family}_pooled.parquet")
-        rows = pooled.dropna(subset=["mean_var", "pooled_var"])
+        rows = pooled.dropna(subset=[var])
         assert len(rows), family
-        assert (rows["pooled_var"] <= rows["mean_var"] + 1e-12).all(), family
-        assert (rows["pooled_var"] >= rows["mean_var"] / rows["k_seeds"] - 1e-12).all(), family
+        np.testing.assert_allclose(rows["pooled_var"], rows[var], err_msg=family)
+        # the correction's inputs are still recorded, for applying it downstream
+        assert {"k_seeds", "mean_var", "between_var"} <= set(pooled.columns), family
+        assert pooled["mean_var"].notna().any(), family
         drawn = pooled.dropna(subset=["ci_lo", "ci_hi"])
         assert (drawn["ci_lo"] <= drawn["ci_hi"]).all(), family
 

@@ -590,20 +590,23 @@ def _emit_km_overlay(name, combined, observed, outcomes, t2, out, level, panels,
 
     The per-seed curves are K separate synthetic populations, each carrying its own Greenwood
     variance; the pooled curve is one product-limit estimate over every trajectory at once, and its
-    interval is the design effect those K curves actually show
-    (:func:`seqeval.metrics.pooling.attach_km_pooled_ci`).
+    band is that curve's own Greenwood interval. The K curves' spread rides along as recorded
+    diagnostics (:func:`seqeval.metrics.pooling.attach_km_pooled_ci`).
     """
     spec = outcomes[name]
-    obs_km = sv.kaplan_meier(time_to_event(observed, OBS_KEYS, spec), by=[])
-    by_seed = sv.kaplan_meier(time_to_event(combined, GEN_KEYS, spec), by=list(_EXTRA_BY))
+    obs_km = sv.kaplan_meier(time_to_event(observed, OBS_KEYS, spec), by=[], level=level)
+    by_seed = sv.kaplan_meier(
+        time_to_event(combined, GEN_KEYS, spec), by=list(_EXTRA_BY), level=level
+    )
 
     pooled_seq, _ = pool_seeds(combined)
-    pooled = sv.kaplan_meier(time_to_event(pooled_seq, _RUN_KEYS, spec), by=list(_POOLED_BY))
+    pooled = sv.kaplan_meier(
+        time_to_event(pooled_seq, _RUN_KEYS, spec), by=list(_POOLED_BY), level=level
+    )
     pooled = pooling.attach_km_pooled_ci(
         _relabel_units(pooled, combined["person_id"].nunique()),
         by_seed,
         by=list(_POOLED_BY),
-        level=level,
     )
 
     label = _cell_label(t1, t2, f"km:{name}", None)

@@ -258,8 +258,8 @@ def asfr(
     ``asfr_var`` is the sampling variance of that one cell's rate under a Poisson count of births on
     fixed exposure — ``births / person_years²``, ``NaN`` where the cell has no exposure. It is the
     uncertainty *within* a cell, not the spread across replicates: with ``extra_by=("seed", ...)``
-    each seed's cell carries its own, and a band over seeds adds the two (see
-    :func:`~seqeval.viz.backtest._total_band`).
+    each seed's cell carries its own, and it is the pooled cell's own value that becomes the
+    reported interval (see :mod:`seqeval.metrics.pooling`).
     """
     extra_by = list(extra_by)
     dim = "year" if mode == "period" else "cohort"
@@ -319,8 +319,9 @@ def ppr(
     ``ppr_var`` is the sampling variance of that one transition's ratio under a binomial count of
     progressions among those at risk — ``p(1−p)/n_at_risk``, ``NaN`` where nobody is at risk. It is
     the uncertainty *within* a cell, not the spread across replicates: with
-    ``extra_by=("seed", ...)`` each seed's transition carries its own, and a band over seeds adds
-    the two (see :func:`~seqeval.viz.backtest._total_band`).
+    ``extra_by=("seed", ...)`` each seed's transition carries its own, and it is the pooled
+    transition's own value that becomes the reported interval (see
+    :mod:`seqeval.metrics.pooling`).
 
     ``min_exposure_after_k`` (days) drops from the denominator any group whose span ends within that
     much of reaching parity ``k`` — it was censored before a fair chance to progress. Default

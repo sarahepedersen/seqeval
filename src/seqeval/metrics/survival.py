@@ -73,19 +73,19 @@ def _km_one(dur: np.ndarray, obs: np.ndarray, z: float, n_persons: int) -> pd.Da
     )
 
 
-def kaplan_meier(tte: pd.DataFrame, *, by: list[str] = ()) -> pd.DataFrame:
+def kaplan_meier(tte: pd.DataFrame, *, by: list[str] = (), level: float = 0.95) -> pd.DataFrame:
     """Product-limit survival curve from a :func:`time_to_event` table (durations in days).
 
     Returns ``[*by, time, n_at_risk, n_events, survival, greenwood_var, ci_lo, ci_hi, n_persons]``
     with ``time`` in days. ``by`` stratifies (cohort bins, ``sex``, or ``seed``/window for generated
-    data); with no ``by`` the whole table is one curve. Confidence intervals use the Greenwood
-    variance on the complementary log-log scale (valid for ``0 < S < 1``; ``NaN`` at the
-    boundaries); ``greenwood_var`` is that variance on the survival scale, for callers combining it
-    with other variance components. ``n_persons`` is the distinct people behind the curve, which
-    ``n_at_risk`` (a per-time denominator) does not report.
+    data); with no ``by`` the whole table is one curve. Confidence intervals are two-sided at
+    ``level`` and use the Greenwood variance on the complementary log-log scale (valid for
+    ``0 < S < 1``; ``NaN`` at the boundaries); ``greenwood_var`` is that variance on the survival
+    scale, for callers combining it with other variance components. ``n_persons`` is the distinct
+    people behind the curve, which ``n_at_risk`` (a per-time denominator) does not report.
     """
     by = list(by)
-    z = norm.ppf(0.975)
+    z = norm.ppf(1 - (1 - level) / 2)
     if not by:
         return _km_one(
             tte["duration"].to_numpy(), tte["observed"].to_numpy(), z, _n_persons(tte)

@@ -242,7 +242,11 @@ _BASIS_TEXT = {
         "computed analytically the sum of per-individual variances and between individual differences (see 'Within seed variance' and 'replicate_variance_aggregate')."
     ),
     "trajectories": (
-        "values are computed using every generated trajectory; in other words, a synthetic population is created by pooling the `n` replicates from each individual. CIs come from the spread of all trajectories. The same metrics are saved for each of the K per-seed populations."
+        "values are computed using every generated trajectory; in other words, a synthetic "
+        "population is created by pooling the `n` replicates from each individual. CIs are the "
+        "metric's own sampling variance over that pooled population. The same metrics are saved for each of the K per-seed populations, and the "
+        "pooled tables carry <code>k_seeds</code>, <code>mean_var</code> and "
+        "<code>between_var</code>."
     ),
     "observed": (
         "observed sequences only, so no within-individual variation exists. CIs reflect inference uncertainty from the sample.")
@@ -333,6 +337,8 @@ _FIGURE_SOURCES = (
     ("km_overlay_", "km_pooled"),
     ("within_seed_variance", "within_seed_variance_distribution"),
     ("within_seed_variance_by_cohort", "within_seed_variance_distribution_by_cohort"),
+    ("quantum_quantile_fan", "quantum_quantile_summary"),
+    ("quantum_quantile_fan_by_cohort", "quantum_quantile_summary_by_cohort"),
 )
 
 
@@ -724,12 +730,8 @@ _OVERLAY_GROUPS = (
             "pooled into a single synthetic population. The results are broken down into K separate" \
             " seed populations in <code>km_by_seed.parquet</code>, the full synthetic population is in"
             "<code>km_pooled.parquet</code>.",
-            # "The band is the fully-pooled curve's sampling uncertainty. It starts from Greenwood's "
-            # "variance within one seed's population and is narrowed by however much the seeds "
-            # "actually disagree: seeds that produce identical curves keep the full one-population "
-            # "width, seeds that behave like independent samples shrink it toward 1/K of it. The "
-            # "three terms are on the table as <code>mean_var</code>, <code>between_var</code> and "
-            # "<code>pooled_var</code>.",
+            "The band is the traditional Greenwood interval of the pooled curve, on the "
+            "complementary log-log scale, computed as though each trajectory were its own person.",
         ),
     ),
     (
@@ -745,10 +747,8 @@ _OVERLAY_GROUPS = (
             "Each ratio is computed over all replicates pooled into one synthetic population "
             "(<code>ppr_pooled.parquet</code>); the K separate seed populations are in "
             "<code>ppr_by_seed.parquet</code>.",
-            # "The bars are the binomial variance of the transition within one seed's "
-            # "population, narrowed by how much the seeds actually disagree — the same "
-            # "<code>mean_var</code> / <code>between_var</code> / <code>pooled_var</code> columns as "
-            # "the KM curves.",
+            "The bars are the binomial variance <code>p(1-p)/n_units</code> of the pooled "
+            "population, where <code>n_units</code> counts trajectories rather than people.",
         ),
     ),
     (
@@ -762,6 +762,8 @@ _OVERLAY_GROUPS = (
             "Each rate pools every replicate's trajectories into one synthetic population "
             "(<code>asfr_pooled.parquet</code>); the K separate seed populations are in "
             "<code>asfr_by_seed.parquet</code>.",
+            "The band is the Poisson variance <code>births/person_years²</code> of the pooled "
+            "population, whose person-years are those of N×K trajectories rather than N people.",
         ),
     ),
     (
@@ -937,6 +939,19 @@ _GENERATED_GROUPS = (
         _bullets(
             "How much variance there is in quantum fertility across one individual's trajectories, equal to the " \
             "inference uncertainty that the <code>within_var</code> term below is built from."
+        ),
+    ),
+    (
+        "Within-seed spread of completed births",
+        "quantum_quantile_fan*.png",
+        "generated.dispersion",
+        _bullets(
+            "The distribution behind the within_seed_variance. We compute summaries of individual's completed quantum fertility across "
+            "replicates — min, quartiles, max. The plot shows "
+            "the average of each of those quantities over all individuals: the line is the typical "
+            "person's median outcome, the dark band their interquartile spread, the light band "
+            "their full replicate range.",
+            "It is the mean of the per-person quantiles, not the population's quantiles.",
         ),
     ),
 )

@@ -87,6 +87,7 @@ __all__ = [
     "timing_distribution",
     "count_distribution",
     "count_moments",
+    "count_quantiles",
     "brier_noise_correction",
     "null_calibration_band",
     "AUC_TIE_NOTE",
@@ -229,6 +230,24 @@ def count_moments(count_table: pd.DataFrame, *, run_keys: list[str], seed_col: s
     # ddof = 0 because this is a descriptive property of the distribution for the individual
     out = grouped.agg(mean="mean", var=lambda s: s.var(ddof=0), k="size").reset_index()
     return out.sort_values(run_keys).reset_index(drop=True)
+
+
+def count_quantiles(
+    count_table: pd.DataFrame, *, run_keys: list[str], seed_col: str
+) -> pd.DataFrame:
+    """Per-run five-number summary of ``count``: ``[*run_keys, q0, q25, q50, q75, q100, k]``.
+
+    The shape behind the single number :func:`count_moments` reports — where a run's replicates put
+    their mass, not just how far apart they are. ``q0``/``q100`` are the min and max over the run's
+    ``k`` replicates, so they widen as ``k`` grows and are only comparable at equal ``k``; ``k``
+    rides along for that reason. Quantiles use pandas' default linear interpolation, so the
+    intermediate ones are not generally integers even though the counts are.
+    """
+    grouped = count_table.groupby(run_keys, observed=True)["count"]
+    out = grouped.quantile([0.0, 0.25, 0.50, 0.75, 1.0]).unstack()
+    out.columns = ["q0", "q25", "q50", "q75", "q100"]
+    out["k"] = grouped.size()
+    return out.reset_index().sort_values(run_keys).reset_index(drop=True)
 
 
 def mean_variance_components(mu, s2, k) -> dict:

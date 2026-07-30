@@ -90,3 +90,24 @@ def test_greenwood_variance_is_exposed_and_consistent_with_the_log_log_ci():
     se_loglog = np.sqrt(row["greenwood_var"]) / (row["survival"] * abs(np.log(row["survival"])))
     expected = row["survival"] ** np.exp(1.959963985 * se_loglog)
     assert row["ci_lo"] == pytest.approx(expected, rel=1e-9)
+
+
+def test_km_interval_honours_the_requested_level():
+    """The band is what the run's replicates.level asks for, not a hardcoded 95%."""
+    rng = np.random.default_rng(5)
+    tte = pd.DataFrame(
+        {"duration": rng.integers(1, 100, 400), "observed": rng.uniform(size=400) < 0.7}
+    )
+    wide = SV.kaplan_meier(tte, level=0.99)
+    narrow = SV.kaplan_meier(tte, level=0.80)
+
+    # same curve and same variance either way; only the endpoints move
+    np.testing.assert_allclose(wide["survival"], narrow["survival"])
+    np.testing.assert_allclose(wide["greenwood_var"], narrow["greenwood_var"])
+    drawn = wide["ci_lo"].notna() & narrow["ci_lo"].notna()
+    assert drawn.any()
+    assert (wide.loc[drawn, "ci_lo"] < narrow.loc[drawn, "ci_lo"]).all()
+    assert (wide.loc[drawn, "ci_hi"] > narrow.loc[drawn, "ci_hi"]).all()
+    # the default is the conventional 95%
+    default = SV.kaplan_meier(tte)["ci_lo"]
+    np.testing.assert_allclose(default, SV.kaplan_meier(tte, level=0.95)["ci_lo"])

@@ -1,4 +1,4 @@
-"""Pooling K per-seed synthetic populations into one estimate, with a measured design effect.
+"""Pooling K per-seed synthetic populations into one estimate, with the plain sampling variance.
 
 Each seed of a generated run is its own synthetic population: the same N people, re-run. A metric
 computed per seed therefore carries an ordinary **between-person** sampling variance (Greenwood for
@@ -6,28 +6,29 @@ a survival curve, binomial for a progression ratio, Poisson for an age-specific 
 else — no within-individual term is added anywhere in this module.
 
 The estimate the report draws is the **pooled** one, computed once over all N×K trajectories at
-once, with no per-person averaging beneath it. Its interval is the open question, because the N×K
-rows are not N×K independent people: :func:`seqeval.arms._common.combine_prefix` replays the *same*
-observed prefix under every seed, so below the jump-off a person's K trajectories are exact
-duplicates, while above it they genuinely diverge. Running the sampling formula on the pooled table
-would be up to ``√K`` too narrow.
+once, with no per-person averaging beneath it. Its interval is the textbook formula applied to
+exactly the units that produced it: Greenwood over the pooled product-limit table, ``p(1-p)/n`` over
+the pooled progression denominator, ``births/PY²`` over the pooled person-years. Nothing is combined
+across seeds and nothing is corrected — a row's variance is the variance of the sample the row's
+estimate was computed from.
 
-:func:`design_effect_var` reads that duplication off the per-seed values instead of assuming it::
+**That interval is deliberately optimistic, and by a known amount.** The N×K pooled rows are not
+N×K independent people: :func:`seqeval.arms._common.combine_prefix` replays the *same* observed
+prefix under every seed, so below the jump-off a person's K trajectories are exact duplicates, while
+above it they genuinely diverge. Treating them as N·K units makes the band up to ``√K`` too narrow
+where the duplication is total. Correcting for that is a modelling choice made downstream, not here.
 
-    Var(pooled) = clip( mean_var - (K-1)/K * between_var,  mean_var/K,  mean_var )
+So that the correction *can* be made downstream, every pooled table still records the two quantities
+it needs, measured from the K per-seed curves::
 
-with ``mean_var`` the average per-seed sampling variance and ``between_var`` the spread of the K
-per-seed estimates. Seeds identical (``between_var = 0``) gives ``mean_var`` — one population's
-worth, N people. Seeds independent (``between_var = mean_var``) gives ``mean_var/K`` — the naive
-N·K answer. Everything real lands between the two, and the clip keeps it there.
+    k_seeds     = number of seeds behind the cell
+    mean_var    = mean_s(var_s)              # per-seed sampling variance, averaged
+    between_var = var_s(estimate_s, ddof=1)  # spread of the K per-seed estimates
 
-**Read the width as a per-cell estimate, not a constant.** ``between_var`` is a sample variance over
-K numbers, so at the handful of seeds a typical run has it is noisy: near the independent limit its
-own error is larger than the target it is estimating, and cells scatter toward whichever bound the
-noise pushed them to. The clip bounds the damage in both directions and more seeds tighten it. On
-the demo run the KM curves sit near ``mean_var`` — the observed prefix is shared, so the seeds
-really are near-duplicates — while PPR and ASFR cells, where the seeds diverge, land much closer to
-the floor.
+:func:`design_effect_var` is the correction those two feed, kept here and **not** wired into any
+interval: ``clip(mean_var - (K-1)/K · between_var, mean_var/K, mean_var)``, which interpolates
+between one population's worth of people (seeds identical) and the naive N·K answer (seeds
+independent). Applying it is a post-processing step over the emitted columns.
 """
 
 from __future__ import annotations
@@ -49,6 +50,10 @@ POOLED_COLUMNS = ("k_seeds", "mean_var", "between_var", "pooled_var", "se", "ci_
 
 def design_effect_var(mean_var, between_var, k) -> np.ndarray:
     """Variance of a pooled estimate, corrected by the design effect the seeds actually show.
+
+    **Not used by any interval this module attaches** — the reported variance is the plain sampling
+    variance of the pooled sample (see the module docstring). This is the correction the emitted
+    ``mean_var`` / ``between_var`` / ``k_seeds`` columns exist to make possible downstream.
 
     ``mean_var`` is the per-seed sampling variance averaged over seeds, ``between_var`` the sample
     variance (``ddof=1``) of the K per-seed estimates, ``k`` the number of seeds. All three
@@ -85,10 +90,19 @@ def _components(by_seed: pd.DataFrame, *, value: str, var: str, on: list[str]) -
 
 
 def _finish(
-    out: pd.DataFrame, *, value: str, level: float, clip: tuple[float | None, float | None]
+    out: pd.DataFrame,
+    *,
+    value: str,
+    var: str,
+    level: float,
+    clip: tuple[float | None, float | None],
 ) -> pd.DataFrame:
-    """Add ``pooled_var``/``se``/``ci_lo``/``ci_hi`` to a frame already carrying the components."""
-    out["pooled_var"] = design_effect_var(out["mean_var"], out["between_var"], out["k_seeds"])
+    """Add ``pooled_var``/``se``/``ci_lo``/``ci_hi`` to a frame already carrying the components.
+
+    ``pooled_var`` is the pooled frame's own sampling variance column ``var`` — the metric's
+    textbook formula evaluated on the pooled trajectories — not a function of the seed spread.
+    """
+    out["pooled_var"] = out[var]
     out["se"] = np.sqrt(out["pooled_var"])
     half = norm.ppf(1 - (1 - level) / 2) * out["se"]
     lo, hi = clip
@@ -107,17 +121,18 @@ def attach_pooled_ci(
     level: float = DEFAULT_LEVEL,
     clip: tuple[float | None, float | None] = (None, None),
 ) -> pd.DataFrame:
-    """Merge the design-effect interval onto a pooled metric frame, cell by cell.
+    """Merge the interval and the seed diagnostics onto a pooled metric frame, cell by cell.
 
-    ``pooled`` holds the estimate computed over all trajectories at once; ``by_seed`` holds the same
-    metric computed once per seed, carrying its own sampling variance in ``var``. Both are keyed by
-    ``on``. Cells present in ``pooled`` but not in ``by_seed`` get no interval rather than a wrong
-    one. ``clip`` bounds the endpoints for a metric with a natural range (``(0, 1)`` for a
-    proportion, ``(0, None)`` for a rate).
+    ``pooled`` holds the estimate computed over all trajectories at once, carrying its own sampling
+    variance in ``var``; that column is the interval. ``by_seed`` holds the same metric computed
+    once per seed and supplies the recorded ``k_seeds``/``mean_var``/``between_var`` only. Both are
+    keyed by ``on``; cells absent from ``by_seed`` still get an interval, just no diagnostics.
+    ``clip`` bounds the endpoints for a metric with a natural range (``(0, 1)`` for a proportion,
+    ``(0, None)`` for a rate).
     """
     on = list(on)
     out = pooled.merge(_components(by_seed, value=value, var=var, on=on), on=on, how="left")
-    return _finish(out, value=value, level=level, clip=clip)
+    return _finish(out, value=value, var=var, level=level, clip=clip)
 
 
 def attach_km_pooled_ci(
@@ -126,19 +141,21 @@ def attach_km_pooled_ci(
     *,
     by: list[str] = (),
     seed_col: str = "seed",
-    level: float = DEFAULT_LEVEL,
 ) -> pd.DataFrame:
-    """The same correction for survival curves, where the seeds do not share a time grid.
+    """The same treatment for survival curves, where the seeds do not share a time grid.
 
-    A KM curve only has rows at its own event times, so each seed's ``survival`` and
-    ``greenwood_var`` are step-sampled onto the pooled curve's times before the components are
-    formed (:func:`seqeval.metrics.survival.step_sample`). ``by`` are the grouping columns the two
-    frames share — the window keys, and the outcome when several curves ride in one table.
+    The pooled product-limit table already carries the traditional Greenwood interval on the
+    complementary log-log scale, so ``ci_lo`` and ``ci_hi`` are kept as computed and ``pooled_var``
+    is simply ``greenwood_var``. There is no ``level`` here: the endpoints were formed at the level
+    the caller passed to :func:`seqeval.metrics.survival.kaplan_meier`.
+
+    What this adds is the seed diagnostics. A KM curve only has rows at its own event times, so each
+    seed's ``survival`` and ``greenwood_var`` are step-sampled onto the pooled curve's times
+    (:func:`seqeval.metrics.survival.step_sample`) before ``mean_var`` and ``between_var`` are
+    formed. ``by`` are the grouping columns the two frames share — the window keys, and the outcome
+    when several curves ride in one table.
     """
     by = list(by)
-    # The product-limit table carries its own log-log interval, computed as though the pooled
-    # trajectories were independent people. That is the interval this correction exists to replace.
-    pooled_km = pooled_km.drop(columns=["ci_lo", "ci_hi"], errors="ignore")
     if pooled_km.empty:
         return pooled_km.assign(**{c: pd.Series(dtype="float64") for c in POOLED_COLUMNS})
 
@@ -169,4 +186,6 @@ def attach_km_pooled_ci(
         parts.append(block)
 
     out = pd.concat(parts, ignore_index=True)
-    return _finish(out, value="survival", level=level, clip=(0.0, 1.0))
+    out["pooled_var"] = out["greenwood_var"]
+    out["se"] = np.sqrt(out["pooled_var"])
+    return out

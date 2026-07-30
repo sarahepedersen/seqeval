@@ -18,6 +18,7 @@ _LABELS = {
     "within_seed_var": "within-seed variance of completed births",
     "within_seed_cv": "within-seed CV of completed births",
     "timing_spread": "within-seed timing spread (days)",
+    "quantum": "completed births per woman",
 }
 
 _AXIS_LABELS = {
@@ -81,6 +82,65 @@ def plot_within_seed_variance(
     if x in ("age_start", "age_stop"):
         ticks = axes[-1, 0].get_xticks()
         axes[-1, 0].set_xticklabels([f"{days_to_years(int(t)):.0f}" for t in ticks])
+    axes[-1, 0].set_xlabel(_AXIS_LABELS.get(x, x))
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+    return fig
+
+
+def plot_quantum_quantile_fan(
+    summary: pd.DataFrame,
+    *,
+    x: str = "age_stop",
+    facet_by: str | None = None,
+    title: str | None = None,
+) -> Figure:
+    """Group-mean five-number summary of completed births as a fan, one point per ``x`` group.
+
+    ``summary`` is :func:`~seqeval.metrics.dispersion.quantile_summary` output. The line is
+    ``mean_q50``, the dark band ``mean_q25``–``mean_q75`` and the light band
+    ``mean_q0``–``mean_q100``: the *typical person's* median, interquartile spread and full
+    replicate range, averaged over the group. It is not the population's spread — a wide fan means
+    individuals' replicates disagree, not that individuals differ from each other.
+
+    Suppressed groups carry NA means and so break the line, leaving a visible gap rather than a
+    straight segment drawn through a group that was withheld. ``mean_q0``/``mean_q100`` widen with
+    the replicate count, so the outer band is only comparable across groups at equal ``mean_k``;
+    the caption on the table carries that warning.
+    """
+    facets = sorted(summary[facet_by].dropna().unique()) if facet_by else [None]
+    fig, axes = plt.subplots(
+        len(facets), 1, figsize=(7, 3.2 * len(facets)), sharex=True, squeeze=False,
+    )
+    for ax, fv in zip(axes[:, 0], facets, strict=True):
+        sub = summary if fv is None else summary[summary[facet_by] == fv]
+        sub = sub.sort_values(x)
+        pos = range(len(sub))
+        ax.fill_between(
+            pos, sub["mean_q0"], sub["mean_q100"], alpha=0.18, color="C0", linewidth=0,
+            label="mean min–max",
+        )
+        ax.fill_between(
+            pos, sub["mean_q25"], sub["mean_q75"], alpha=0.38, color="C0", linewidth=0,
+            label="mean IQR",
+        )
+        ax.plot(pos, sub["mean_q50"], color="C0", marker="o", markersize=3, label="mean median")
+        ax.set_xticks(list(pos))
+        # the x axis is already labelled with the unit, so the ticks carry the bare value —
+        # matching the ridge figure, which the reader sees directly above this one
+        labels = (
+            [f"{days_to_years(int(v)):.0f}" for v in sub[x]]
+            if x in ("age_start", "age_stop")
+            else [str(v) for v in sub[x]]
+        )
+        ax.set_xticklabels(labels, fontsize=8)
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+        ax.set_ylabel(_LABELS["quantum"], fontsize=8)
+        ax.set_ylim(bottom=0)
+        if fv is not None:
+            ax.set_title(_fmt(facet_by, fv), fontsize=9, loc="left")
+    axes[0, 0].legend(fontsize=7, frameon=False)
     axes[-1, 0].set_xlabel(_AXIS_LABELS.get(x, x))
     if title:
         fig.suptitle(title)

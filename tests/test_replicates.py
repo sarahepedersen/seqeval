@@ -251,3 +251,33 @@ def test_count_distribution_and_moments():
     mom = R.count_moments(ct, run_keys=RK, seed_col="seed").iloc[0]
     assert mom["mean"] == pytest.approx(1.0)
     assert mom["var"] == pytest.approx(0.5)  # population variance of [0,1,1,2]
+
+
+def _counts(per_person: dict[int, list[int]]) -> pd.DataFrame:
+    """One row per (person, seed) from ``{person_id: [count per seed]}``."""
+    rows = [
+        {"person_id": pid, "age_start": 0, "age_stop": 0, "seed": s, "count": c}
+        for pid, counts in per_person.items()
+        for s, c in enumerate(counts)
+    ]
+    return pd.DataFrame(rows)
+
+
+def test_count_quantiles_is_the_five_number_summary_of_the_replicates():
+    q = R.count_quantiles(_counts({1: [0, 1, 1, 2]}), run_keys=RK, seed_col="seed").iloc[0]
+    assert (q["q0"], q["q100"]) == (0.0, 2.0)  # min and max over the replicates
+    assert q["q50"] == pytest.approx(1.0)
+    assert q["q25"] == pytest.approx(0.75)  # linear interpolation, so not an integer
+    assert q["q75"] == pytest.approx(1.25)
+    assert q["k"] == 4
+
+
+def test_count_quantiles_are_ordered_and_one_replicate_collapses_them():
+    q = R.count_quantiles(
+        _counts({1: [0, 3, 1, 1, 2], 2: [2], 3: [4, 4, 4]}), run_keys=RK, seed_col="seed"
+    ).set_index("person_id")
+    cols = ["q0", "q25", "q50", "q75", "q100"]
+    assert (np.diff(q[cols].to_numpy(), axis=1) >= 0).all()
+    # a person with one replicate has no spread to report, and neither does an unwavering one
+    assert (q.loc[2, cols] == 2.0).all() and q.loc[2, "k"] == 1
+    assert (q.loc[3, cols] == 4.0).all() and q.loc[3, "k"] == 3
