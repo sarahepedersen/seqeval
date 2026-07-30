@@ -49,7 +49,7 @@ def _run(tmp_path, seeds=12):
         event_defs=None,
         events=EventConfig(birth="birth"),
     )
-    out = OutputWriter(base_dir=tmp_path, arm="forecasting", model="perfect")
+    out = OutputWriter(base_dir=tmp_path, arm="forecasting", model="perfect", individual_level=True)
     FC.run(
         bundle,
         cfg.arms.forecasting,

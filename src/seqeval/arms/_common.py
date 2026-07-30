@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 
-from seqeval.metrics._disclosure import MIN_CELL
+from seqeval.metrics._disclosure import MIN_CELL, apply_policy, assert_publishable
 
 logger = logging.getLogger("seqeval")
 
@@ -89,7 +89,9 @@ class OutputWriter:
     arm: str
     model: str
     figure_format: str = "png"
-    individual_level: bool = True
+    # Both default to the restrictive setting, matching `OutputConfig`: a writer built without an
+    # explicit policy withholds per-person output and suppresses thin cells.
+    individual_level: bool = False
     min_cell: int = MIN_CELL
     written: list[Path] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
@@ -99,13 +101,23 @@ class OutputWriter:
         self.dir = self.base_dir / self.arm
         self.dir.mkdir(parents=True, exist_ok=True)
 
+    def suppress(self, name: str, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply ``name``'s disclosure policy — call before drawing a figure from ``df``.
+        """
+        return apply_policy(name, df, min_cell=self.min_cell)
+
     def frame(self, name: str, df: pd.DataFrame, *, individual: bool = False) -> Path | None:
-        """Save ``df`` as ``<name>.parquet`` with a leading ``model`` column; record and return."""
+        """Save ``df`` as ``<name>.parquet`` with a leading ``model`` column; record and return.
+
+        The single ``to_parquet`` in the package, and so where the disclosure policy is enforced:
+        the frame is suppressed (again, harmlessly, if the arm already did it) and then checked.
+        """
         if self._withheld(name, individual):
             return None
-        stamped = df.copy()
+        stamped = self.suppress(name, df).copy()
         if "model" not in stamped.columns:
             stamped.insert(0, "model", self.model)
+        assert_publishable(name, stamped, min_cell=self.min_cell)
         path = self.dir / f"{name}.parquet"
         stamped.to_parquet(path, engine="pyarrow", index=False)
         self.written.append(path)

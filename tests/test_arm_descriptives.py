@@ -131,7 +131,7 @@ def test_max_cohort_year_excludes_later_births_everywhere(tmp_path):
     ccf_cut = pd.read_parquet(cut.dir / "ccf.parquet")
     assert ccf_cut["cohort"].max() <= 1970
     assert ccf_full["cohort"].max() > 1970
-    assert ccf_cut["n_women"].sum() < ccf_full["n_women"].sum()
+    assert ccf_cut["n_persons"].sum() < ccf_full["n_persons"].sum()
 
     # the period surface is computed on the same restricted population, not the full one
     asfr_full = pd.read_parquet(full.dir / "asfr_period.parquet")

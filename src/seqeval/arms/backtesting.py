@@ -241,7 +241,11 @@ def _score_probability_outcome(
         out.withhold("probabilities")  # never assembled, so the writer never sees it
 
     strategy, n_bins = binning
-    cal = ml.calibration_table(joined, n_bins=n_bins, strategy=strategy)
+    # Suppressed before the reliability diagram is drawn from it: `y_rate` is observed events over
+    # `n`, so a thin bin's point on the curve is the bin's contents.
+    cal = out.suppress(
+        "calibration", ml.calibration_table(joined, n_bins=n_bins, strategy=strategy)
+    )
     acc["calibration"].append(_stamp(cal, label))
     # Where the people actually are on the p_hat grid. Distinct from the calibration bins, which
     # are chosen for equal occupancy and so say nothing about where the mass sits.
@@ -336,7 +340,8 @@ def _coverage_row(obs_eval, gen_eval, cond_persons, all_persons, settled, label)
                 "n_seed_min": int(ns.min()) if len(ns) else 0,
                 "n_seed_median": float(ns.median()) if len(ns) else 0.0,
                 "n_seed_max": int(ns.max()) if len(ns) else 0,
-                "n_persons": n_evaluable,
+                # No `n_persons` alias: `n_evaluable` *is* the head count, and it is the name the
+                # accounting identity below and the report's coverage table are written in.
             }
         ]
     )
@@ -508,6 +513,7 @@ def _score_aggregate_target(
                 complete=viz_backtest.majority_complete(gen_m),
                 level=replicate_spec.level,
                 title=f"Inference vs outcome uncertainty — jump-off {jumpoff_y}y",
+                min_cell=out.min_cell,
             ),
         )
     elif target == "ppr":

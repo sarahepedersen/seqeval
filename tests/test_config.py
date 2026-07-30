@@ -280,10 +280,11 @@ def test_resolve_windows_subset_and_missing(caplog):
     assert any("absent" in r.message for r in caplog.records)
 
 
-def test_output_publication_policy_defaults_to_current_behaviour():
+def test_output_publication_policy_defaults_to_the_safe_side():
+    """Naming a person is opt-in, and the suppression threshold applies unless asked otherwise."""
     cfg = C.Config.model_validate(_ref_dict())
-    assert cfg.output.individual_level is True
-    assert cfg.output.min_cell == 5
+    assert cfg.output.individual_level is False
+    assert cfg.output.min_cell == 3
 
 
 def test_output_publication_policy_is_configurable():
@@ -304,7 +305,7 @@ def test_publication_policy_changes_the_config_hash():
     """A restricted run is a different run, and its manifest has to say so."""
     base = C.Config.model_validate(_ref_dict()).hash()
     d = _ref_dict()
-    d["output"] = {"individual_level": False}
+    d["output"] = {"individual_level": True}
     assert C.Config.model_validate(d).hash() != base
 
 

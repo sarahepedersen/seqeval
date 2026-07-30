@@ -396,7 +396,9 @@ def test_small_cells_are_withheld_and_unrecoverable():
     hidden = out[out["suppressed"]]
     assert len(hidden) >= 2  # the lone small cell drags a second one with it
     assert hidden["n_persons"].isna().all()
-    assert out["n_persons"].sum() < out["n_pred_bin"].iloc[0]
+    # `n_pred_bin` is masked on the withheld rows too, so read it off one that survived
+    bin_total = out["n_pred_bin"].dropna().iloc[0]
+    assert out["n_persons"].sum() < bin_total
 
 
 def test_output_carries_no_person_identifier():

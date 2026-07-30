@@ -47,7 +47,8 @@ def ccf(
 ) -> pd.DataFrame:
     """Completed cohort fertility: mean births per woman, by birth cohort.
 
-    Returns ``[*extra_by, (cohort,) n_women, ccf, complete, n_persons]``. ``complete`` is ``False``
+    Returns ``[*extra_by, (cohort,) ccf, complete, n_persons]``, where ``n_persons`` is the
+    cohort's distinct women — the denominator of the mean. ``complete`` is ``False``
     when the cohort's observation does not reach the fertile upper bound (its members' spans all
     end before :data:`FERTILE_UPPER_YEARS`), so callers can tell a true CCF from a truncated mean —
     important
@@ -68,25 +69,24 @@ def ccf(
         bt = births.merge(ch, on="person_id", how="left")
 
     if group:
-        n_women = pop.groupby(group, observed=True)["person_id"].nunique().rename("n_women")
+        n_persons = pop.groupby(group, observed=True)["person_id"].nunique().rename("n_persons")
         # A cohort is complete iff some member was observed to the fertile upper bound.
         complete = (
             pop.groupby(group, observed=True)["end_age"].max().ge(fertile_upper).rename("complete")
         )
         total_births = bt.groupby(group, observed=True).size().rename("total_births")
-        out = pd.concat([n_women, complete, total_births], axis=1).reset_index()
+        out = pd.concat([n_persons, complete, total_births], axis=1).reset_index()
     else:
         out = pd.DataFrame(
             {
-                "n_women": [pop["person_id"].nunique()],
+                "n_persons": [pop["person_id"].nunique()],
                 "complete": [bool(pop["end_age"].max() >= fertile_upper)],
                 "total_births": [len(bt)],
             }
         )
     out["total_births"] = out["total_births"].fillna(0)
-    out["ccf"] = out["total_births"] / out["n_women"]
-    out["n_persons"] = out["n_women"]
-    cols = [*group, "n_women", "ccf", "complete", "n_persons"]
+    out["ccf"] = out["total_births"] / out["n_persons"]
+    cols = [*group, "ccf", "complete", "n_persons"]
     return out[cols].sort_values(group).reset_index(drop=True) if group else out[cols]
 
 
@@ -110,7 +110,7 @@ def ccf_variance(
 ) -> pd.DataFrame:
     """Variance of the per-cohort :func:`ccf`, split into replicate and between-woman parts.
 
-    Returns ``[cohort, n_women, ccf, within_var, between_var, total_var, n_persons]``, the
+    Returns ``[cohort, ccf, within_var, between_var, total_var, n_persons]``, the
     decomposition of :func:`~seqeval.core.replicates.mean_variance_components` applied per cohort.
     ``births`` and ``spans`` may be seed-replicated (``spans`` is the population, so women with no
     births are counted in the denominator exactly as :func:`ccf` does); ``ccf`` here is the
@@ -134,7 +134,6 @@ def ccf_variance(
         rows.append(
             {
                 "cohort": cohort,
-                "n_women": comp["n"],
                 "ccf": comp["mean"],
                 "within_var": comp["within_var"],
                 "between_var": comp["between_var"],
@@ -226,10 +225,10 @@ def parity_distribution(
     cells = cells.rename(columns={"_n_women": "n_persons"})
     cells = suppress_small_cells(
         cells,
-        count_col="n_persons",
+        count_cols=("n_persons", "n_replicates", "n_women_total"),
         by=["cohort"],
         min_cell=min_cell,
-        also_null=("n_replicates", "n_women_equiv", "share"),
+        also_null=("n_women_equiv", "share", "n_replicates_total"),
     )
     cols = [
         "cohort", "parity", "n_replicates", "n_replicates_total", "n_women_equiv", "share",

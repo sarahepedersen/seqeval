@@ -168,7 +168,9 @@ def p_hat_distribution(joined: pd.DataFrame, *, min_cell: int = MIN_CELL) -> pd.
         cells["p_hat"].map(lambda v: int(counts.get(v, 0))).astype(np.int64)
     )
     cells["n_total"] = int(len(p))
-    return suppress_small_cells(cells, count_col="n_persons", by=[], min_cell=min_cell)
+    return suppress_small_cells(
+        cells, count_cols=("n_persons", "n_total"), by=[], min_cell=min_cell
+    )
 
 
 def ece(calibration: pd.DataFrame) -> float:
@@ -516,7 +518,10 @@ def timing_error_distribution(
 
     cells = pd.concat(blocks, ignore_index=True)
     suppressed = suppress_small_cells(
-        cells, count_col="n_persons", by=[*by, "pred_bin"], min_cell=min_cell
+        cells,
+        count_cols=("n_persons", "n_pred_bin", "n_trajectories", "n_excluded"),
+        by=[*by, "pred_bin"],
+        min_cell=min_cell,
     )
     return suppressed[[*by, *_TIMING_ERROR_COLUMNS]]
 

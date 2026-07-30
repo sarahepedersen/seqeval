@@ -81,6 +81,6 @@ arms:
 output:
   dir: results/
   figure_format: png
-  # withholds individual-level tables and figures
-  # requires cell n >= 5 to be shown in the report
-  individual_level: false
+  individual_level: false        # remove individual-level output
+  min_cell: 3                    # minimum number of observations in a cell required to report
+                                 # min_cell: 0 disables suppression.

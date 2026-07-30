@@ -77,7 +77,7 @@ def _parity(cohorts, shares, n_women_total=500, suppressed=None, n_seeds=1):
 
 def _variance(cohorts, ccf=2.0, total_var=0.0004):
     return pd.DataFrame(
-        {"cohort": cohorts, "n_women": 500, "ccf": ccf, "within_var": total_var / 2,
+        {"cohort": cohorts, "n_persons": 500, "ccf": ccf, "within_var": total_var / 2,
          "between_var": total_var / 2, "total_var": total_var}
     )
 

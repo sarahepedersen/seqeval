@@ -46,6 +46,7 @@ def plot_ccf_inference_vs_outcome(
     level: float = DEFAULT_LEVEL,
     left_title: str = "inference uncertainty",
     title: str | None = None,
+    min_cell: int = MIN_CELL,
 ) -> Figure:
     """The uncertainty in the cohort mean beside the uncertainty a woman actually faces.
 
@@ -96,13 +97,15 @@ def plot_ccf_inference_vs_outcome(
         # cohort is unreadable, so only round ones are named.
         ax.set_xticks(_cohort_ticks(cohorts))
 
-    lo, hi = _padded_range(ccf - half, ccf + half)
+    # A suppressed cohort has no half-width; it still pins the axis through its estimate.
+    reach = np.nan_to_num(half, nan=0.0, posinf=0.0, neginf=0.0)
+    lo, hi = _padded_range(ccf - reach, ccf + reach)
     ax_inf.set_ylim(lo, hi)
     ax_inf.set_ylabel("CCF (mean births/woman) — magnified")
     ax_inf.set_title(left_title, fontsize=9)
     ax_inf.legend(fontsize=7, loc="best")
 
-    _draw_parity_columns(ax_out, parity, cohorts)
+    _draw_parity_columns(ax_out, parity, cohorts, min_cell=min_cell)
     ax_out.set_ylabel("births per woman (individual)")
     ax_out.set_title("outcome uncertainty", fontsize=9)
     ax_out.annotate(
@@ -134,7 +137,11 @@ def _cohort_ticks(cohorts: np.ndarray, *, max_labels: int = 10) -> np.ndarray:
 
 
 def _errorbar_split(ax, x, y, half, complete, *, color: str, label: str) -> None:
-    """Estimate + interval per cohort, hollow where the cohort's life course is unfinished."""
+    """Estimate + interval per cohort, hollow where the cohort's life course is unfinished.
+
+    A suppressed cohort keeps its estimate and loses its interval, which reaches here as a NaN
+    half-width; matplotlib draws the marker with no whisker.
+    """
     for sel, filled, suffix in ((complete, color, ""), (~complete, "white", " (incomplete)")):
         if not sel.any():
             continue
@@ -163,8 +170,15 @@ def _observed_split(ax, observed: pd.DataFrame) -> None:
 
 
 def _padded_range(lo: np.ndarray, hi: np.ndarray) -> tuple[float, float]:
-    """A y range around the intervals with a little air, never a zero-height one."""
-    bottom, top = float(np.min(lo)), float(np.max(hi))
+    """A y range around the intervals with a little air, never a zero-height one.
+
+    Non-finite endpoints are ignored, so a cohort whose variance was suppressed does not drag the
+    axis to NaN; it simply contributes its estimate instead of an interval.
+    """
+    finite_lo, finite_hi = lo[np.isfinite(lo)], hi[np.isfinite(hi)]
+    if not len(finite_lo) or not len(finite_hi):
+        return 0.0, 1.0
+    bottom, top = float(np.min(finite_lo)), float(np.max(finite_hi))
     pad = max((top - bottom) * 0.25, 0.01)
     return bottom - pad, top + pad
 
@@ -177,11 +191,13 @@ def _parity_fraction(parity: pd.DataFrame) -> pd.Series:
     her replicate count; the two coincide with balanced seeds and diverge without them, and the
     figure should be drawing the counts it claims to.
     """
-    total = parity["n_replicates_total"].replace(0, np.nan)
-    return parity["n_replicates"] / total
+    total = pd.to_numeric(parity["n_replicates_total"], errors="coerce").replace(0, np.nan)
+    return pd.to_numeric(parity["n_replicates"], errors="coerce") / total
 
 
-def _draw_parity_columns(ax, parity: pd.DataFrame, cohorts: np.ndarray) -> None:
+def _draw_parity_columns(
+    ax, parity: pd.DataFrame, cohorts: np.ndarray, *, min_cell: int = MIN_CELL
+) -> None:
     """Per cohort, the trajectory counts at each completed parity, as bars from the cohort tick.
 
     Every bar starts at its cohort's x position rather than being centred on it, so within a cohort
@@ -197,15 +213,16 @@ def _draw_parity_columns(ax, parity: pd.DataFrame, cohorts: np.ndarray) -> None:
         return
     spacing = float(np.min(np.diff(np.sort(cohorts)))) if len(cohorts) > 1 else 1.0
     fraction = _parity_fraction(parity)
-    widest = float(fraction.max() or 1.0)
-    unit = 0.8 * spacing / widest
+    # Every cohort may be withheld, leaving no fraction to scale by; fall back to a full-width unit.
+    widest = fraction.max()
+    unit = 0.8 * spacing / (float(widest) if pd.notna(widest) and widest else 1.0)
     for cohort, sub in parity.groupby("cohort", observed=True):
         shown = sub[~sub["suppressed"]]
         ax.barh(
             shown["parity"], _parity_fraction(shown) * unit, height=0.72, left=cohort,
             color="tab:blue", alpha=0.35, zorder=2,
         )
-        _draw_suppressed_parity(ax, sub, cohort, unit)
+        _draw_suppressed_parity(ax, sub, cohort, unit, min_cell=min_cell)
     # Bars grow to the right of their cohort tick, so the last cohort needs room past the last tick.
     ax.set_xlim(float(np.min(cohorts)) - 0.15 * spacing, float(np.max(cohorts)) + 1.0 * spacing)
     ax.set_yticks(sorted(parity["parity"].unique()))
@@ -215,14 +232,20 @@ def _draw_parity_columns(ax, parity: pd.DataFrame, cohorts: np.ndarray) -> None:
     ax.set_ylim(parity["parity"].min() - 0.7, parity["parity"].max() + 0.7)
 
 
-def _draw_suppressed_parity(ax, sub: pd.DataFrame, cohort, unit: float) -> None:
+def _draw_suppressed_parity(
+    ax, sub: pd.DataFrame, cohort, unit: float, *, min_cell: int = MIN_CELL
+) -> None:
     """Withheld parities hatched at the widest bar their threshold allows."""
     hidden = sub[sub["suppressed"]]
     if hidden.empty:
         return
     # Same denominator the drawn bars use, so the cap is on their scale rather than the women one.
-    total = float(sub["n_replicates_total"].iloc[0]) or 1.0
-    cap = (MIN_CELL - 1) / total * unit
+    # A withheld total means the cohort itself is too thin to describe: there is no honest upper
+    # bound to hatch at, so nothing is drawn for it.
+    totals = pd.to_numeric(sub["n_replicates_total"], errors="coerce").dropna()
+    if totals.empty or not totals.iloc[0]:
+        return
+    cap = max(min_cell, 0) / float(totals.iloc[0]) * unit
     ax.barh(
         hidden["parity"], cap, height=0.72, left=cohort,
         facecolor="none", edgecolor="0.6", hatch=SUPPRESSED_HATCH, lw=0.4, zorder=2,
@@ -235,7 +258,9 @@ def _uncertainty_ratio(half: np.ndarray, parity: pd.DataFrame) -> str:
     Weighted by the same trajectory counts the bars are, so the sd quoted describes the
     distribution the reader is looking at.
     """
-    ci = float(np.median(half))
+    # Cohorts whose variance was suppressed have no half-width to contribute to the median.
+    finite = half[np.isfinite(half)]
+    ci = float(np.median(finite)) if len(finite) else 0.0
     sds = []
     for _, sub in parity.groupby("cohort", observed=True):
         share = _parity_fraction(sub).fillna(0).to_numpy()

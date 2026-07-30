@@ -36,7 +36,9 @@ def plot_reliability(
     import matplotlib.pyplot as plt
 
     cal = calibration.sort_values("bin")
-    occupied = cal[cal["n"] > 0]
+    # A withheld bin has an NA count, so `fillna(0)` drops it here alongside the truly empty ones:
+    # its observed frequency rests on too few people to draw at all.
+    occupied = cal[cal["n"].fillna(0).astype(float) > 0]
 
     fig, axes = plt.subplots(2, 1, figsize=(5.5, 6.5), height_ratios=[3, 1], sharex=True)
     ax = axes[0]
@@ -87,7 +89,7 @@ def _draw_p_hat_spikes(ax, distribution: pd.DataFrame, *, min_cell: int) -> None
             # "at most this many", never a false zero — the same convention as the ridge figures.
             ax.bar(
                 hidden["p_hat"].to_numpy().astype(float),
-                np.full(len(hidden), max(min_cell - 1, 0), dtype=float),
+                np.full(len(hidden), max(min_cell, 0), dtype=float),
                 width=width, align="center", facecolor="none", edgecolor="0.6",
                 hatch=SUPPRESSED_HATCH, linewidth=0.4,
             )

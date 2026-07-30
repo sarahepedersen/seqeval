@@ -82,6 +82,24 @@ every input, resolved config, per-arm status/outputs, and the verbatim warning l
 self-contained HTML **report**. Use `--arm <name>` to run a single arm, `--force` to overwrite an
 existing results dir, and `--verbose` for DEBUG logging.
 
+### Suppressing individual-level output
+
+Results are aggregates, and every published table passes a min-cell rule before it is written.
+Two knobs, both under `output:`:
+
+```yaml
+output:
+  individual_level: false   # default — per-person tables and figures are opt-in
+  min_cell: 3               # default — a cell resting on 1..3 people OR events is withheld
+```
+
+A cell of exactly `min_cell` is withheld; cells of size 0 are allowed. The rule guards counts of
+*events* (e.g., births) as well as of people, and withholds the columns that invert back to a count — raw
+variances (`births = asfr²/asfr_var`), count-derived rates (`rate_per_event`), and the Kaplan-Meier
+interval, which is a closed form in the same Greenwood sum as the variance. Point estimates survive,
+so curves keep their shape; withheld cells are hatched in figures rather than drawn as zero, and
+every governed table carries a `suppressed` column. `min_cell: 0` disables suppression.
+
 Other example scripts:
 
 ```bash

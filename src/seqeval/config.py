@@ -339,15 +339,19 @@ class ArmsConfig(_Strict):
 class OutputConfig(_Strict):
     """``output:`` block.
 
-    ``individual_level: false`` withholds every per-person table and figure from the 
-    output directory (only reports aggregates).
+    ``individual_level`` defaults to false: per-person tables and figures name identifiable people,
+    so they are opt-in. Setting it true writes them (``probabilities``, ``violations``,
+    ``replicate_variance_individual``, ``replicate_occurrence``) alongside the aggregates.
 
-    ``min_cell`` is how many people a published cell must rest on; below it the cell is withheld. 
+    ``min_cell`` is the largest cell size still withheld: a cell resting on ``1..min_cell`` people
+    *or events* is suppressed, a true zero is published. It guards counts of both kinds, plus the
+    columns that invert to a count — raw variances and count-derived rates — per
+    :data:`seqeval.metrics._disclosure.POLICIES`. ``min_cell: 0`` disables suppression entirely.
     """
 
     dir: str = "results/"
     figure_format: str = "png"
-    individual_level: bool = True
+    individual_level: bool = False
     min_cell: int = Field(default=MIN_CELL, ge=0)
 
 

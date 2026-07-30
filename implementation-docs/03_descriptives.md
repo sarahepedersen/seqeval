@@ -47,7 +47,8 @@ All take births/spans tables plus persons where cohort/period is involved; all a
 ```python
 def ccf(births, spans, persons, *, by_cohort=True, extra_by=()) -> pd.DataFrame
     # completed cohort fertility: mean births per woman by birth cohort.
-    # Include column n_women and a `complete` flag: cohort marked incomplete if its members'
+    # Include column n_persons
+    # and a `complete` flag: cohort marked incomplete if its members'
     # spans end before fertile_ages upper bound (so callers can distinguish true CCF from
     # truncated means — important when the same function runs on censored/backtest data).
 

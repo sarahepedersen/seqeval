@@ -164,7 +164,14 @@ def _run_lexis(bundle, cfg, generated, windows, out, outcomes, cohort_width, lev
         level=level,
         clip=(0.0, None),
     )
-    combined = _combine_surfaces(obs_surface, fc_pooled, dim, subgroup)
+    # Suppress each surface before they are stacked, so the combined table inherits both sides'
+    # withheld cells and the figure below is drawn from the same cells the parquet publishes.
+    obs_surface = out.suppress(f"{prefix}_observed", obs_surface)
+    fc_by_seed = out.suppress(f"{prefix}_forecast", fc_by_seed)
+    fc_pooled = out.suppress(f"{prefix}_pooled", fc_pooled)
+    combined = out.suppress(
+        f"{prefix}_combined", _combine_surfaces(obs_surface, fc_pooled, dim, subgroup)
+    )
 
     out.frame(f"{prefix}_observed", obs_surface)
     out.frame(f"{prefix}_forecast", fc_by_seed)
@@ -464,7 +471,6 @@ def _ccf_row(sub: pd.DataFrame, z: float) -> dict:
     ccf_forecast = float(sub["mu_gen"].to_numpy().mean())  # model-contributed births per woman
     se_total = float(np.sqrt(comp["total_var"]))
     return {
-        "n_women": comp["n"],
         "ccf": ccf,
         "within_var": comp["within_var"],
         "between_var": comp["between_var"],

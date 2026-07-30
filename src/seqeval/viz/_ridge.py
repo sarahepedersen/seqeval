@@ -25,7 +25,7 @@ def draw_ridges(
     hi: str,
     count: str,
     total: str,
-    label_fn: Callable[[object, int], str],
+    label_fn: Callable[[object, int | None], str],
     x_transform: Callable[[np.ndarray], np.ndarray] = lambda x: x,
     overlap: float = 0.6,
     ylabel: str | None = None,
@@ -38,6 +38,9 @@ def draw_ridges(
     ``count / total``, so groups of different sizes stay comparable, scaled so the tallest ridge
     spans ``1/(1 - overlap)`` baselines. Ridges are drawn top-first, so each occludes the one above
     it and never the one below.
+
+    ``label_fn`` is called with the group key and its total, or with ``None`` for a group whose
+    total was suppressed — such a group keeps its baseline and its label but is not drawn.
     """
     if cells.empty:
         return []
@@ -49,7 +52,13 @@ def draw_ridges(
     for i, (key, color) in enumerate(zip(groups, colors, strict=True)):
         sub = cells[cells[row] == key].sort_values(lo)
         base = i * step
-        n_group = int(sub[total].iloc[0])
+        n_group = _group_total(sub, total)
+        if n_group is None:
+            # The group's own total was withheld, so the group rests on at most `min_cell` people
+            # and every share in it is disclosive. Keep the baseline and name it; draw nothing.
+            ticks.append(base)
+            labels.append(label_fn(key, None))
+            continue
         x = x_transform(np.append(sub[lo].to_numpy(), sub[hi].to_numpy()[-1]))
         share = sub[count].fillna(0).to_numpy().astype(float) / max(n_group, 1)
         height = np.append(share, share[-1]) * scale
@@ -70,12 +79,19 @@ def draw_ridges(
     return ticks
 
 
+def _group_total(sub: pd.DataFrame, total: str) -> int | None:
+    """A group's published total, or ``None`` where suppression withheld it.
+    """
+    value = pd.to_numeric(sub[total], errors="coerce").iloc[0]
+    return None if pd.isna(value) else int(value)
+
+
 def _hatch_withheld(ax, sub, base, n_group, scale, *, lo, hi, x_transform, min_cell) -> None:
     """Withheld cells at their upper bound: 'at most this many', never a false zero."""
     hidden = sub[sub["suppressed"]]
     if hidden.empty:
         return
-    cap = max(min_cell - 1, 0) / max(n_group, 1) * scale
+    cap = max(min_cell, 0) / max(n_group, 1) * scale
     left = x_transform(hidden[lo].to_numpy())
     right = x_transform(hidden[hi].to_numpy())
     ax.bar(
@@ -111,12 +127,16 @@ def draw_distribution_columns(
         return np.empty(0)
     groups = np.array(sorted(cells[x].dropna().unique()))
     spacing = float(np.min(np.diff(groups))) if len(groups) > 1 else 1.0
-    shares = cells[count] / cells[total]
+    shares = pd.to_numeric(cells[count], errors="coerce") / pd.to_numeric(
+        cells[total], errors="coerce"
+    )
     unit = 0.8 * spacing / float(shares.max() or 1.0)
 
     for key in groups:
         sub = cells[cells[x] == key].sort_values(lo)
-        n_group = int(sub[total].iloc[0])
+        n_group = _group_total(sub, total)
+        if n_group is None:
+            continue  # the group total was withheld; see `_group_total`
         height = (sub[hi] - sub[lo]).to_numpy()
         width = (sub[count].fillna(0).to_numpy().astype(float) / max(n_group, 1)) * unit
         ax.bar(
@@ -125,7 +145,7 @@ def draw_distribution_columns(
         )
         hidden = sub[sub["suppressed"]]
         if len(hidden):
-            cap = max(min_cell - 1, 0) / max(n_group, 1) * unit
+            cap = max(min_cell, 0) / max(n_group, 1) * unit
             ax.bar(
                 np.full(len(hidden), key),
                 (hidden[hi] - hidden[lo]).to_numpy(),

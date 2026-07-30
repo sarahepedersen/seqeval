@@ -67,7 +67,7 @@ def dispersion_distribution(
                 }
             )
     cells = suppress_small_cells(
-        pd.DataFrame(rows), count_col="n_persons", by=by, min_cell=min_cell
+        pd.DataFrame(rows), count_cols=("n_persons", "n_group"), by=by, min_cell=min_cell
     )
     return cells[cols].sort_values([*by, "bin"]).reset_index(drop=True)
 
@@ -111,6 +111,10 @@ def quantile_summary(
     summary = summary.reset_index()
 
     cells = suppress_small_cells(
-        summary, count_col="n_persons", by=by, min_cell=min_cell, also_null=tuple(mean_cols)
+        summary,
+        count_cols="n_persons",
+        by=by,
+        min_cell=min_cell,
+        also_null=("mean_k", *mean_cols),
     )
     return cells[out_cols].sort_values(by).reset_index(drop=True)

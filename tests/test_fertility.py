@@ -150,7 +150,7 @@ def test_ccf_variance_counts_childless_women_in_the_denominator():
     var = FE.ccf_variance(
         births.assign(seed=0), spans.assign(seed=0), pers, cohort_width=100
     ).iloc[0]
-    assert var["n_women"] == spans["person_id"].nunique()
+    assert var["n_persons"] == spans["person_id"].nunique()
     assert var["ccf"] == pytest.approx(tiny.EXPECTED_CCF)
     # one seed: nothing varies across replicates, so the whole spread is between women
     assert var["within_var"] == pytest.approx(0.0)

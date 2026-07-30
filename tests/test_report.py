@@ -81,7 +81,14 @@ def test_coverage_summary_absent_without_backtesting(demo_config, tmp_path):
 
 
 def test_report_embeds_figures_and_samples_persons(demo_config, tmp_path):
-    results = _run(demo_config, tmp_path / "results")
+    # Per-person rendering only happens on a run that opted into per-person tables.
+    permissive = demo_config.with_name("permissive.yaml")
+    permissive.write_text(
+        demo_config.read_text().replace(
+            "  figure_format: png", "  figure_format: png\n  individual_level: true"
+        )
+    )
+    results = _run(permissive, tmp_path / "results")
     html = (results / report.REPORT_NAME).read_text()
     assert "data:image/png;base64," in html
     # per-person tables (replicate variance, violations) are down-sampled, not fully dumped

@@ -482,10 +482,11 @@ def plot_timing_ridge(
     if errors.empty:
         return fig
 
-    def _label(key, n_bin: int) -> str:
+    def _label(key, n_bin: int | None) -> str:
         sub = errors[errors["pred_bin"] == key]
         lo, hi = days_to_years(sub["pred_lo"].iloc[0]), days_to_years(sub["pred_hi"].iloc[0])
-        return f"{lo:.1f}–{hi:.1f}y (n={n_bin})"
+        shown = "withheld" if n_bin is None else str(n_bin)
+        return f"{lo:.1f}–{hi:.1f}y (n={shown})"
 
     bases = draw_ridges(
         ax, errors, row="pred_bin", lo="error_lo", hi="error_hi",
@@ -518,8 +519,11 @@ def _exclusion_note(errors: pd.DataFrame) -> str:
     """
     if not {"n_trajectories", "n_excluded"} <= set(errors.columns):
         return ""
-    total = float(errors["n_trajectories"].iloc[0])
-    excluded = float(errors["n_excluded"].iloc[0])
+    total = pd.to_numeric(errors["n_trajectories"], errors="coerce").dropna()
+    excluded = pd.to_numeric(errors["n_excluded"], errors="coerce").dropna()
+    if total.empty or excluded.empty:
+        return ""
+    total, excluded = float(total.iloc[0]), float(excluded.iloc[0])
     if not total or excluded <= 0:
         return ""
     return (

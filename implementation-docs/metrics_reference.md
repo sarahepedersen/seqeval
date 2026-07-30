@@ -308,6 +308,8 @@ table (`_coverage_row` in `arms/backtesting.py`) breaks the condition population
 
 - **`n_condition`** — persons matching the condition at the jump-off.
 - **`n_evaluable`** — persons who actually contribute a score (event resolvable within the frame).
+  This is the table's head count; it carries no `n_persons` alias, since the residual below is
+  written in these names.
 - **`n_settled`** — persons whose framed outcome was already determined in the observed prefix at the
   jump-off (answer fixed, excluded).
 - **`n_uncovered`** — the residual, `max(n_condition − n_evaluable − n_settled, 0)`: persons whose

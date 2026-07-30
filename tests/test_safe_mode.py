@@ -99,13 +99,26 @@ def test_report_states_the_policy_and_still_renders_every_arm(restricted_run):
     assert "sampled persons" not in html
 
 
-def test_default_run_still_publishes_individual_level_output(demo_config, tmp_path):
-    """The flag defaults to true, so nothing changes for a run that does not ask."""
-    out = tmp_path / "full"
+def test_a_run_that_does_not_ask_gets_no_per_person_output(demo_config, tmp_path):
+    """The flag defaults to false: naming a person is opt-in, not the path of least resistance."""
+    out = tmp_path / "default"
     cli.main(["run", str(demo_config), "--out", str(out)])
     for rel in _PER_PERSON_TABLES:
-        assert (out / rel).exists(), rel
+        assert not (out / rel).exists(), rel
     assert "Individual-level output" in (out / "report.html").read_text()
+
+
+def test_asking_for_individual_level_output_gets_it(demo_config, tmp_path):
+    """The opt-in still works, and is the only way to reach the per-person tables."""
+    text = demo_config.read_text().replace(
+        "  figure_format: png", "  figure_format: png\n  individual_level: true"
+    )
+    cfg = demo_config.with_name("permissive.yaml")
+    cfg.write_text(text)
+    out = tmp_path / "full"
+    cli.main(["run", str(cfg), "--out", str(out)])
+    for rel in _PER_PERSON_TABLES:
+        assert (out / rel).exists(), rel
 
 
 def test_min_cell_controls_how_much_is_withheld(demo_config, tmp_path):

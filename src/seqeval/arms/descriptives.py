@@ -127,7 +127,8 @@ def _run_kaplan_meier(observed, cfg, out, outcomes, strata) -> None:
         tte = time_to_event(observed, OBS_KEYS, spec)
         if strata is not None:
             tte = tte.merge(strata, on="person_id", how="left")
-        km = sv.kaplan_meier(tte, by=by)
+        # Suppress individual-level output before writing
+        km = out.suppress(f"km_{name}", sv.kaplan_meier(tte, by=by))
         out.frame(f"km_{name}", km)
         out.figure(
             f"km_{name}",
@@ -165,10 +166,13 @@ def _run_fertility(bundle: Bundle, cfg, out, births, spans, cohort_width: int) -
     if fcfg.ccf:
         ccf = fe.ccf(births, spans, persons, by_cohort=True, cohort_width=cohort_width)
         variance = fe.ccf_variance(births, spans, persons, cohort_width=cohort_width)
-        out.frame(
-            "ccf",
-            ccf.merge(variance.drop(columns=["n_women", "ccf", "n_persons"]), on="cohort"),
+        # One suppressed frame feeds both the table and the figure — the variance columns invert to
+        # `n_persons` (`total_var = var_i(mu_i)/n`), so a thin cohort loses them here rather than in
+        # the parquet alone.
+        table = out.suppress(
+            "ccf", ccf.merge(variance.drop(columns=["ccf", "n_persons"]), on="cohort")
         )
+        out.frame("ccf", table)
 
         # The same two-panel contrast the backtesting arm draws, on the observed history: the
         # interval is pure sampling error here (nothing is replicated), and the parity distribution
@@ -180,23 +184,24 @@ def _run_fertility(bundle: Bundle, cfg, out, births, spans, cohort_width: int) -
         out.figure(
             "ccf_uncertainty",
             viz_fertility.plot_ccf_inference_vs_outcome(
-                variance,
+                table,
                 parity,
-                complete=ccf.set_index("cohort")["complete"],
+                complete=table.set_index("cohort")["complete"],
                 left_title="sampling uncertainty",
                 title="Sampling vs outcome uncertainty — observed",
+                min_cell=out.min_cell,
             ),
         )
 
     bins = AgeBins.from_years(_FERTILE_LO_YEARS, _FERTILE_HI_YEARS, fcfg.age_bin_width)
     for mode in fcfg.asfr:
-        table = fe.asfr(births, spans, persons, mode=mode, bins=bins, cohort_width=cohort_width)
-        out.frame(f"asfr_{mode}", table)
+        asfr = out.suppress(
+            f"asfr_{mode}",
+            fe.asfr(births, spans, persons, mode=mode, bins=bins, cohort_width=cohort_width),
+        )
+        out.frame(f"asfr_{mode}", asfr)
         if mode != "period":
             # Cohort ASFR has few groups; one age-profile line per cohort stays legible.
-            out.figure("asfr_cohort", viz_fertility.plot_asfr(table, dim="cohort"))
-        # Period ASFR is written but not drawn: neither the year x age surface nor its TFR summary
-        # is reported, since the jump-off is an age and a calendar-year cell is part observed and
-        # part forecast, so nothing in the other arms can be read against it.
+            out.figure("asfr_cohort", viz_fertility.plot_asfr(asfr, dim="cohort"))
 
 

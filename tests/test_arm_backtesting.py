@@ -154,7 +154,7 @@ def _run_arm(
         event_defs=None,
         events=EventConfig(birth="birth"),
     )
-    out = OutputWriter(base_dir=tmp_path, arm="backtesting", model="perfect")
+    out = OutputWriter(base_dir=tmp_path, arm="backtesting", model="perfect", individual_level=True)
     BT.run(
         bundle,
         cfg.arms.backtesting,
