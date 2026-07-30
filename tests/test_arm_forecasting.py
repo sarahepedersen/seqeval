@@ -440,3 +440,65 @@ def test_sequence_descriptives_are_off_unless_asked(tmp_path):
     out = _run(tmp_path)  # the base config leaves the flag unset
     names = {p.name for p in out.written}
     assert "event_age_distribution.parquet" not in names
+
+
+# =================================================================================================
+# illegal moves must see the observed prefix
+# =================================================================================================
+def test_ordering_rules_see_what_already_happened(tmp_path):
+    """The generated file starts after the jump-off; a rule blind to the prefix flags everyone.
+
+    Everyone marries before the jump-off and the model predicts a divorce after it — demographically
+    fine. Screened on the generated rows alone, `not_before` finds no marriage and, since an absent
+    anchor is itself a violation, condemns every trajectory.
+    """
+    from seqeval.core.specs import Rule
+    from seqeval.io.schema import GEN_KEYS
+    from seqeval.metrics import plausibility as pl
+    from seqeval.arms._common import combine_prefix
+
+    rng = np.random.default_rng(0)
+    n, seeds, t2 = 60, 3, yd(30)
+    observed = pd.DataFrame(
+        {"person_id": np.arange(n), "event": "marriage", "age": yd(25) + rng.integers(0, 600, n)}
+    )
+    gen = pd.DataFrame(
+        [
+            {"person_id": p, "seed": s, "age_start": 0, "age_stop": t2,
+             "event": "divorce", "age": t2 + rng.integers(30, 1500)}
+            for p in range(n) for s in range(seeds)
+        ]
+    )
+    rule = Rule("divorce_before_marriage", "divorce", occurrence=1, not_before="marriage")
+
+    blind = pl.check_rules(gen, GEN_KEYS, [rule])
+    assert len(blind) == n * seeds  # every one of them, wrongly
+
+    seeing = pl.check_rules(combine_prefix(observed, gen, 0, t2), GEN_KEYS, [rule])
+    assert len(seeing) == 0
+
+    # a person who never married is still caught
+    unmarried = combine_prefix(observed[observed["person_id"] >= 10], gen, 0, t2)
+    caught = pl.check_rules(unmarried, GEN_KEYS, [rule])
+    assert set(caught["person_id"]) == set(range(10))
+
+
+def test_a_violation_in_the_prefix_is_not_reported_as_the_model_s(tmp_path):
+    """It belongs to the observed data, and would otherwise be repeated once per seed."""
+    from seqeval.core.specs import Rule
+    from seqeval.io.schema import GEN_KEYS
+    from seqeval.metrics import plausibility as pl
+    from seqeval.arms._common import combine_prefix
+
+    t2 = yd(30)
+    observed = pd.DataFrame({"person_id": [1], "event": ["birth"], "age": [yd(12)]})  # too young
+    gen = pd.DataFrame(
+        [{"person_id": 1, "seed": s, "age_start": 0, "age_stop": t2, "event": "birth",
+          "age": t2 + yd(2)} for s in range(4)]
+    )
+    rule = Rule("birth_before_15", "birth", min_age=yd(15))
+    viol = pl.check_rules(combine_prefix(observed, gen, 0, t2), GEN_KEYS, [rule])
+    # the prefix violation appears once per seed in the combined frame ...
+    assert len(viol) == 4
+    # ... and the arm drops it, because it is not something the model did
+    assert len(viol[viol["age"] > t2]) == 0

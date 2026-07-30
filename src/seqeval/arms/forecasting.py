@@ -80,7 +80,7 @@ def run(
             bundle, cfg, generated, windows, out, outcomes, cohort_width, replicate_spec.level
         )
     if cfg.illegal_moves:
-        _run_illegal_moves(observed, generated, rules, out)
+        _run_illegal_moves(observed, generated, windows, rules, out)
     # One analysis per configured block, each about its own event and each writing stems suffixed
     # with the block's name, so several can coexist in one results directory.
     for block in cfg.replicate_variance:
@@ -210,8 +210,41 @@ def _combine_surfaces(observed_surface, forecast_pooled, dim, subgroup) -> pd.Da
 # =================================================================================================
 # 2. illegal moves
 # =================================================================================================
-def _run_illegal_moves(observed, generated, rules, out) -> None:
-    gen_viol = pl.check_rules(generated, GEN_KEYS, rules)
+def _run_illegal_moves(observed, generated, windows, rules, out) -> None:
+    """Rule violations on the generated futures, screened against each replicate's whole life.
+
+    The generated file holds only ``age > age_stop`` rows, so a rule evaluated on it alone cannot
+    see anything that already happened. That is not a rounding error for ordering rules: with
+    ``not_before``, an anchor sitting in the observed prefix is simply absent, and an absent anchor
+    *is* a violation by definition ("a divorce with no marriage anywhere"). Every such trajectory
+    would be flagged — a model that married everyone off before the jump-off would score 100%
+    illegal. The same blindness misnumbers ``occurrence`` ordinals, undercounts ``max_count``, and
+    misses the gap between the last observed event and the first generated one for ``min_spacing``.
+
+    So each window is screened on ``combine_prefix``'s full life course, and the violations are then
+    restricted to the generated future. A violation landing in the prefix is a property of the
+    observed data, which the observed pass below already reports; leaving it in would also repeat it
+    once per seed.
+
+    Rates stay per *generated* event: the denominator is what the model produced, not the history it
+    was handed.
+    """
+    per_window = []
+    for t1, t2 in windows:
+        gen_w = generated[
+            (generated["age_start"] == t1) & (generated["age_stop"] == t2)
+        ]
+        if gen_w.empty:
+            continue
+        viol = pl.check_rules(combine_prefix(observed, gen_w, t1, t2), GEN_KEYS, rules)
+        if len(viol):
+            per_window.append(viol[viol["age"] > t2])
+
+    gen_viol = (
+        pd.concat(per_window, ignore_index=True)
+        if per_window
+        else pl.check_rules(generated.iloc[:0], GEN_KEYS, rules)
+    )
     obs_viol = pl.check_rules(observed, OBS_KEYS, rules)
 
     gen_viol = gen_viol.assign(source="generated")
